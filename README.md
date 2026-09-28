@@ -13,10 +13,11 @@ nvmon 0.1.0  gpu-node  2026-09-28 Mon 21:39:29.75    1 GPU  299 W  16 / 80 GiB  
 ```
 
 - One box per GPU: utilization history on the left (0 % at the bottom, 100 % at the top),
-  utilization, memory, power and PCIe traffic on the right.
-- GPU name, fan, temperature and clock on the top edge; running processes (script names
-  for Python) on the bottom edge.
-- Top line: host, local time, driver / CUDA version and totals over all GPUs.
+  utilization, VRAM, power and PCIe traffic on the right.
+- Top edge: GPU name, running processes (script names for Python), temperature (blue when
+  cool, red from about 85 °C), fan and clock.
+- Top line: host, local time, driver / CUDA version, and over all GPUs: average utilization,
+  total VRAM and total power.
 - Refreshes every 0.5 s. Up to 8 GPUs fit on one screen; on wide terminals the boxes
   go into two columns.
 - **Zero dependencies.** One Python file that talks to the NVML library shipped with the
@@ -39,8 +40,9 @@ ssh HOST 'mkdir -p ~/.local/bin && cat > ~/.local/bin/nvmon && chmod +x ~/.local
 ## Usage
 
 ```bash
-nvmon              # Ctrl+C to quit
+nvmon              # q, Esc or Ctrl+C to quit
 nvmon -i 1         # update every second
+nvmon -g 0,2,4-7   # only these GPUs
 ssh -t HOST nvmon  # over ssh, -t gives the remote program a terminal
 ```
 

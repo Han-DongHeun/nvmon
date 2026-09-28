@@ -6,7 +6,7 @@ the top) and clock / power / memory / PCIe numbers on the right. It talks to
 the NVML library that ships with the NVIDIA driver through ctypes and draws
 with plain ANSI escape codes, so a single file runs on any Python >= 3.6.
 
-    nvmon [-i SECONDS]        Ctrl+C to quit
+    nvmon [-i SECONDS] [-g 0,2,4-7]        q / Esc / Ctrl+C to quit
 """
 import argparse
 import ctypes
@@ -24,8 +24,8 @@ from typing import NamedTuple, Optional
 
 __version__ = "0.1.0"
 
-INFO_W = 28                          # width of the stats column
-INFO_ROWS = 4                        # GPU, MEM, PWR, PCIe
+INFO_W = 30                          # width of the stats column
+INFO_ROWS = 4                        # Util, VRAM, Power, PCIe
 CHROME_W = 7                         # "│ " + " │ " + " │" around graph and stats
 MIN_GRAPH_W = 30                     # a narrower graph is not worth a second column
 MAX_INNER_H = 8                      # tallest graph: 8 rows x 8 sub-levels = 64 steps
@@ -37,20 +37,23 @@ def _fg(n):
     return "\x1b[38;5;{}m".format(n)
 
 
-def _gradient(stops, steps=101):
-    """24-bit colours evenly interpolated through the RGB `stops`."""
+def _gradient(stops):
+    """Truecolor codes for 0..100, interpolated through (position, (r, g, b)) `stops`."""
     colours = []
-    for i in range(steps):
-        t = i / (steps - 1) * (len(stops) - 1)
-        k = min(int(t), len(stops) - 2)
-        rgb = (round(a + (b - a) * (t - k)) for a, b in zip(stops[k], stops[k + 1]))
+    for i in range(101):
+        x = min(max(i, stops[0][0]), stops[-1][0])
+        (x0, c0), (x1, c1) = next(pair for pair in zip(stops, stops[1:]) if x <= pair[1][0])
+        rgb = (round(a + (b - a) * (x - x0) / (x1 - x0)) for a, b in zip(c0, c1))
         colours.append("\x1b[38;2;{};{};{}m".format(*rgb))
     return colours
 
 
-# Utilization uses a 101-step truecolor gradient, green -> yellow -> orange -> red;
-# everything else sticks to the 256-colour palette.
-HEAT = _gradient([(95, 175, 95), (175, 215, 95), (215, 215, 95), (215, 175, 95), (215, 135, 95), (215, 95, 95)])
+GREEN, YELLOW, ORANGE, RED = (95, 175, 95), (215, 215, 95), (215, 135, 95), (215, 95, 95)
+# Utilization and shares: green -> yellow -> orange -> red over 0-100 %.
+HEAT = _gradient([(0, GREEN), (20, (175, 215, 95)), (40, YELLOW), (60, (215, 175, 95)), (80, ORANGE), (100, RED)])
+# Temperature in °C: idle GPUs sit at 30-45, busy ones at 60-80, most throttle from about 85-90.
+TEMP = _gradient([(30, (95, 135, 215)), (45, (95, 175, 175)), (60, GREEN), (72, YELLOW), (80, ORANGE), (88, RED)])
+# Everything else sticks to the 256-colour palette.
 DIM, PROC = _fg(240), _fg(110)
 BOLD, RESET = "\x1b[1m", "\x1b[0m"
 
@@ -242,11 +245,14 @@ def versions(nv):
     return "  ".join(parts)
 
 
-def open_gpus(nv):
+def open_gpus(nv, wanted=None):
+    """GPUs whose index is in `wanted` (all when None)."""
     count = c_uint()
     check(nv, nv.nvmlDeviceGetCount_v2(byref(count)))
     gpus = []
     for index in range(count.value):
+        if wanted is not None and index not in wanted:
+            continue
         handle = c_void_p()
         # The count includes GPUs we may not open (cgroups, /dev/nvidiaN permissions): skip those.
         if nv.nvmlDeviceGetHandleByIndex_v2(index, byref(handle)) == NVML_SUCCESS:
@@ -302,7 +308,7 @@ def row(left, right=()):
 
 
 def share(part, whole):
-    """Right-hand percentage, coloured by its value."""
+    """A 4-cell percentage, coloured by its value."""
     if part is None or not whole:
         return [("   -", "")]
     return [("{:.0f}%".format(100 * part / whole).rjust(4), heat(part / whole))]
@@ -326,13 +332,14 @@ def rate(kib):
 
 def info(gpu, height):
     s = gpu.now
-    lines = [  # the three percentages share one right-hand column
-        row([("GPU", "")], share(s.util, 100)),
-        row([("MEM  {} / {} GiB".format(num(s.mem_used, "{:.1f}"), num(s.mem_total, "{:.1f}")), "")],
-            share(s.mem_used, s.mem_total)),
-        row([("PWR  {} / {} W".format(num(s.power, "{:.0f}"), num(s.power_limit, "{:.0f}")), "")],
-            share(s.power, s.power_limit)),
-        row([("TX {} RX {}".format(rate(s.tx), rate(s.rx)), "")]),
+    total, limit = num(s.mem_total, "{:.1f}"), num(s.power_limit, "{:.0f}")
+    lines = [  # used values are padded to the width of their maximum so the percentages hold still
+        row([("Util  ", "")] + share(s.util, 100)),
+        row([("VRAM  {}/{} GiB  ".format(num(s.mem_used, "{:.1f}").rjust(len(total)), total), "")]
+            + share(s.mem_used, s.mem_total)),
+        row([("Power {}/{} W  ".format(num(s.power, "{:.0f}").rjust(len(limit)), limit), "")]
+            + share(s.power, s.power_limit)),
+        row([("TX {}   RX {}".format(rate(s.tx), rate(s.rx)), "")]),
     ]
     return lines[:height] + [row([])] * (height - len(lines))  # a short panel keeps the top lines
 
@@ -340,21 +347,23 @@ def info(gpu, height):
 def panel(gpu, width, height):
     graph_w = max(0, width - CHROME_W - INFO_W)
     s = gpu.now
-    note = "  ".join(text.format(v) for text, v in (("FAN {}%", s.fan), ("{}°C", s.temp), ("{} MHz", s.clock))
-                     if v is not None)
-    top = edge(width, "╭╮", [("GPU {}".format(gpu.index), BOLD), ("  " + gpu.name, "")], note)
-    procs = []
+    label = [("GPU {}".format(gpu.index), BOLD), ("  " + gpu.name, "")]
     for name, mem in s.processes:
-        procs += [("  " if procs else "", ""), (name, PROC)] + ([] if mem is None else [(" {:.1f}G".format(mem), DIM)])
-    bottom = edge(width, "╰╯", procs)
+        label += [("  " + name, PROC)] + ([] if mem is None else [(" {:.1f}G".format(mem), DIM)])
+    # Fixed widths keep the right end of the border still while values change.
+    parts = [] if s.temp is None else [("{:>3}°C".format(s.temp), TEMP[min(max(s.temp, 0), 100)])]
+    parts += [] if s.fan is None else [("FAN {:>3}%".format(s.fan), "")]
+    parts += [] if s.clock is None else [("{:>4} MHz".format(s.clock), "")]
+    note = [seg for i, part in enumerate(parts) for seg in ([("  ", "")] if i else []) + [part]]
+    top, bottom = edge(width, "╭╮", label, note), edge(width, "╰╯", [])
     body = [[("│ ", DIM)] + g + [(" │ ", DIM)] + i + [(" │", DIM)]
             for g, i in zip(graph(gpu.history, graph_w, height), info(gpu, height))]
     return [top] + body + [bottom]
 
 
-def edge(width, corners, label, note=""):
+def edge(width, corners, label, note=()):
     """Top or bottom border, "╭─ label ───── note ─╮"; a long label is cut to fit."""
-    tail = ([(" " + note + " ", "")] if note else []) + [("─" + corners[1], DIM)]
+    tail = ([(" ", "")] + list(note) + [(" ", "")] if note else []) + [("─" + corners[1], DIM)]
     label = clip(label, width - 4 - width_of(tail))  # 4 = "╭─" + a space on each side of the label
     head = [(corners[0] + "─", DIM)] + ([(" ", "")] + label + [(" ", "")] if label else [])
     return head + [("─" * max(0, width - width_of(head) - width_of(tail)), DIM)] + tail
@@ -376,13 +385,18 @@ def render(gpus, width, height):
 
 
 def totals(gpus):
-    """'8 GPUs  2.1 kW  62 / 637 GiB' over every GPU shown."""
+    """'8 GPUs   Util  54%   VRAM  39/637 GiB   1243 W' over every GPU shown.
+
+    Each number is padded to the width of its maximum, so the line never shifts.
+    """
     def total(field):
         return sum(v for v in (getattr(g.now, field) for g in gpus) if v is not None)
-    power = total("power")
-    watts = "{:.1f} kW".format(power / 1000) if power >= 1000 else "{:.0f} W".format(power)
-    return "{} GPU{}  {}  {:.0f} / {:.0f} GiB".format(
-        len(gpus), "s" if len(gpus) > 1 else "", watts, total("mem_used"), total("mem_total"))
+    utils = [g.now.util for g in gpus if g.now.util is not None]
+    mem, power = "{:.0f}".format(total("mem_total")), "{:.0f}".format(total("power_limit"))
+    return ([("{} GPU{}".format(len(gpus), "s" if len(gpus) > 1 else ""), ""), ("   Util ", DIM)]
+            + share(sum(utils) / len(utils) if utils else None, 100)
+            + [("   VRAM ", DIM), ("{:.0f}".format(total("mem_used")).rjust(len(mem)) + "/" + mem + " GiB", ""),
+               ("   " + "{:.0f}".format(total("power")).rjust(len(power)) + " W", "")])
 
 
 def header(width, interval, gpus, driver):
@@ -392,7 +406,7 @@ def header(width, interval, gpus, driver):
     left = [("nvmon", BOLD), (" " + __version__, DIM), ("  " + socket.gethostname(), ""), ("  " + stamp, "")]
     right = [("refresh ", DIM), ("{:g}s".format(interval), "")]
     # Optional parts, most important first; each is shown only if it still fits beside the left side.
-    for part in ([(totals(gpus), ""), ("   ", "")], [(driver, DIM), ("   ", "")] if driver else []):
+    for part in (totals(gpus) + [("   ", "")], [(driver, DIM), ("   ", "")] if driver else []):
         if part and width_of(left) + 2 + width_of(part) + width_of(right) <= width:
             right = part + right
     room = width - width_of(right)
@@ -418,16 +432,51 @@ def paint(lines):
 # ── terminal ─────────────────────────────────────────────────────────────────
 
 class Screen:
-    """Alternate screen, hidden cursor, no auto-wrap; all restored on exit."""
+    """Alternate screen, hidden cursor, no auto-wrap, unbuffered keys; all restored on exit."""
 
     def __enter__(self):
-        self._restore_console = enable_vt()
+        self._keys = sys.stdin.isatty()
+        self._restore = [enable_vt(), raw_keys() if self._keys else (lambda: None)]
         self._write("\x1b[?1049h\x1b[?25l\x1b[?7l")
         return self
 
     def __exit__(self, *exc):
         self._write(RESET + "\x1b[?7h\x1b[?25h\x1b[?1049l")
-        self._restore_console()
+        for undo in self._restore:
+            undo()
+
+    def wait(self, seconds):
+        """Sleep for `seconds`; returns True early if q or Esc is pressed."""
+        end = time.monotonic() + seconds
+        if not self._keys:
+            time.sleep(seconds)
+            return False
+        if os.name == "nt":
+            import msvcrt
+            while True:
+                while msvcrt.kbhit():
+                    key = msvcrt.getwch()
+                    if key in ("\x00", "\xe0"):  # arrows and function keys come as two characters
+                        msvcrt.getwch()
+                    elif key in ("q", "Q", "\x1b"):
+                        return True
+                left = end - time.monotonic()
+                if left <= 0:
+                    return False
+                time.sleep(min(left, 0.05))
+        import select
+        fd = sys.stdin.fileno()
+        while True:
+            left = end - time.monotonic()
+            if left <= 0 or not select.select([fd], [], [], left)[0]:
+                return False
+            keys = os.read(fd, 64)
+            # A lone ESC is the Esc key; arrows and the like arrive as ESC [ ... sequences.
+            if b"q" in keys or b"Q" in keys or keys == b"\x1b":
+                return True
+            if not keys:  # stdin closed: nothing more to read, just sleep
+                time.sleep(max(0, end - time.monotonic()))
+                return False
 
     def draw(self, lines):
         # 2026 = synchronized output: terminals that know it swap the frame in at once.
@@ -455,10 +504,38 @@ def enable_vt():
     return lambda: kernel32.SetConsoleMode(handle, mode.value)
 
 
+def raw_keys():
+    """Deliver key presses at once and without echo; returns a function that undoes it."""
+    if os.name == "nt":
+        return lambda: None  # msvcrt already reads single keys without echo
+    import termios
+    import tty
+    fd = sys.stdin.fileno()
+    saved = termios.tcgetattr(fd)
+    tty.setcbreak(fd)  # Ctrl+C keeps working: cbreak leaves signal keys alone
+    return lambda: termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+
+
+def gpu_list(spec):
+    """argparse type: '0,2,4-7' -> {0, 2, 4, 5, 6, 7}."""
+    picked = set()
+    try:
+        for part in spec.split(","):
+            first, _, last = part.strip().partition("-")
+            picked.update(range(int(first), int(last or first) + 1))
+    except ValueError:
+        picked = set()
+    if not picked:
+        raise argparse.ArgumentTypeError("expected GPU numbers such as 0,2,4-7, got {!r}".format(spec))
+    return picked
+
+
 def main():
     parser = argparse.ArgumentParser(prog="nvmon", description="Compact btop-style NVIDIA GPU monitor.")
     parser.add_argument("-i", "--interval", type=float, default=0.5, metavar="SEC",
                         help="seconds between updates (default: 0.5)")
+    parser.add_argument("-g", "--gpus", type=gpu_list, metavar="LIST",
+                        help="only these GPUs, e.g. 0,2,4-7 (default: all)")
     parser.add_argument("-V", "--version", action="version", version="nvmon " + __version__)
     args = parser.parse_args()
     if not 0 < args.interval < math.inf:  # also rejects NaN
@@ -471,7 +548,10 @@ def main():
     except NvmlError as e:
         sys.exit("nvmon: {}".format(e))
     try:
-        gpus = open_gpus(nv)
+        gpus = open_gpus(nv, args.gpus)
+        missing = sorted((args.gpus or set()) - {g.index for g in gpus})
+        if missing:
+            sys.exit("nvmon: GPU {} not found or not accessible".format(", ".join(map(str, missing))))
         if not gpus:
             sys.exit("nvmon: no accessible NVIDIA GPU")
         driver = versions(nv)
@@ -485,7 +565,8 @@ def main():
                 # Fixed-rate ticks; a late tick restarts the schedule instead of bursting.
                 now = time.monotonic()
                 deadline = max(deadline + args.interval, now)
-                time.sleep(deadline - now)
+                if screen.wait(deadline - now):
+                    break
     except KeyboardInterrupt:
         pass
     except NvmlError as e:

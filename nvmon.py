@@ -114,12 +114,13 @@ class GpmMetric(ctypes.Structure):  # nvmlGpmMetric_t
                 ("shortName", ctypes.c_char_p), ("longName", ctypes.c_char_p), ("unit", ctypes.c_char_p)]
 
 
-class GpmMetricsGet(ctypes.Structure):  # nvmlGpmMetricsGet_t, sized for the two metrics we ask for
+# The GPM metrics we read: SM busy %, Tensor Core activity %, PCIe MiB/s from and to the GPU.
+GPM_METRICS = (2, 5, 20, 21)
+
+
+class GpmMetricsGet(ctypes.Structure):  # nvmlGpmMetricsGet_t, sized for GPM_METRICS
     _fields_ = [("version", c_uint), ("numMetrics", c_uint), ("sample1", c_void_p), ("sample2", c_void_p),
-                ("metrics", GpmMetric * 2)]
-
-
-NVML_GPM_METRIC_SM_UTIL, NVML_GPM_METRIC_ANY_TENSOR_UTIL = 2, 5
+                ("metrics", GpmMetric * len(GPM_METRICS))]
 
 # nvmlClocksEventReason bits that mean "held back", most serious first. The others (idle,
 # application clocks, sync boost, display) are normal operation and stay hidden.
@@ -172,13 +173,13 @@ class Sample(NamedTuple):
     clock: Optional[int]          # graphics clock, MHz
     mem_used: Optional[float]     # GiB
     mem_total: Optional[float]    # GiB
-    tx: Optional[int]             # PCIe GPU -> CPU, kB/s
-    rx: Optional[int]             # PCIe CPU -> GPU, kB/s
+    tx: Optional[float]           # PCIe GPU -> CPU, bytes/s
+    rx: Optional[float]           # PCIe CPU -> GPU, bytes/s
     pcie_width: Optional[int]     # current link width (lanes)
     cores: Optional[float]        # % of SMs busy (GPM, Hopper and newer)
     tensor: Optional[float]       # % Tensor Core activity (GPM)
     slowdown: Optional[tuple]     # (label, colour) when the clock is held back
-    processes: list               # [(name, GiB or None)], biggest first
+    processes: list               # [(name, GiB or None, owner or None)]
 
 
 class Gpu:
@@ -194,6 +195,7 @@ class Gpu:
         self.pcie_max_width = self._uint("nvmlDeviceGetMaxPcieLinkWidth")
         self._gpm = self._gpm_samples()
         self.has_activity = self._gpm is not None
+        self._names = {}  # pid -> (name, owner): fixed for a process's life, so read once
 
     def _ok(self, fn, *args):
         return getattr(self.nv, fn)(self.handle, *args) == NVML_SUCCESS
@@ -236,16 +238,23 @@ class Gpu:
         return samples  # [previous, current], kept for the whole run
 
     def _activity(self):
-        """(cores %, tensor %) between this poll and the previous one."""
+        """GPM_METRICS values between this poll and the previous one (Nones without GPM)."""
+        none = (None,) * len(GPM_METRICS)
         if self._gpm is None or self.nv.nvmlGpmSampleGet(self.handle, self._gpm[1]) != NVML_SUCCESS:
-            return None, None
+            return none
         previous, current = self._gpm
         self._gpm.reverse()  # this sample is the baseline for the next poll
-        query = GpmMetricsGet(version=1, numMetrics=2, sample1=previous, sample2=current)
-        query.metrics[0].metricId, query.metrics[1].metricId = NVML_GPM_METRIC_SM_UTIL, NVML_GPM_METRIC_ANY_TENSOR_UTIL
+        query = GpmMetricsGet(version=1, numMetrics=len(GPM_METRICS), sample1=previous, sample2=current)
+        for metric, metric_id in zip(query.metrics, GPM_METRICS):
+            metric.metricId = metric_id
         if self.nv.nvmlGpmMetricsGet(byref(query)) != NVML_SUCCESS:
-            return None, None
+            return none
         return tuple(None if m.nvmlReturn != NVML_SUCCESS else m.value for m in query.metrics)
+
+    def _pcie(self, counter):
+        """PCIe bytes/s; this query samples a counter for 20 ms, so it is only a fallback for GPM."""
+        kb = self._uint("nvmlDeviceGetPcieThroughput", counter)
+        return None if kb is None else kb * 1024
 
     def _slowdown(self):
         """(label, colour) for why the clock is held back, or None."""
@@ -261,10 +270,14 @@ class Gpu:
         if not (hasattr(self.nv, "nvmlDeviceGetComputeRunningProcesses_v3") and
                 self._ok("nvmlDeviceGetComputeRunningProcesses_v3", byref(count), infos)):
             return []
-        procs = [(self._process_name(p.pid),
-                  None if p.usedGpuMemory == NVML_VALUE_NOT_AVAILABLE else p.usedGpuMemory / 2**30)
-                 for p in infos[:count.value]]
-        return sorted(procs, key=lambda p: -(p[1] or 0))
+        running = infos[:count.value]
+        self._names = {p.pid: self._names.get(p.pid) or (self._process_name(p.pid), process_owner(p.pid))
+                       for p in running}
+        procs = []
+        for p in running:
+            name, owner = self._names[p.pid]
+            procs.append((name, None if p.usedGpuMemory == NVML_VALUE_NOT_AVAILABLE else p.usedGpuMemory / 2**30, owner))
+        return procs
 
     def _process_name(self, pid):
         """Short name; for a Python interpreter, the script or module it runs (train.py, torch.distributed.run)."""
@@ -294,7 +307,7 @@ class Gpu:
         used, total = self._memory()
         power = self._uint("nvmlDeviceGetPowerUsage")            # mW
         limit = self._uint("nvmlDeviceGetEnforcedPowerLimit")    # mW
-        cores, tensor = self._activity()
+        cores, tensor, gpm_tx, gpm_rx = self._activity()
         self.now = Sample(
             util=util,
             temp=self._temperature(),
@@ -304,9 +317,8 @@ class Gpu:
             clock=self._uint("nvmlDeviceGetClockInfo", NVML_CLOCK_GRAPHICS),
             mem_used=None if used is None else used / 2**30,
             mem_total=None if total is None else total / 2**30,
-            # Each PCIe query samples a counter for ~20 ms, hence the parallel polling.
-            tx=self._uint("nvmlDeviceGetPcieThroughput", NVML_PCIE_UTIL_TX_BYTES),
-            rx=self._uint("nvmlDeviceGetPcieThroughput", NVML_PCIE_UTIL_RX_BYTES),
+            tx=self._pcie(NVML_PCIE_UTIL_TX_BYTES) if gpm_tx is None else gpm_tx * 2**20,
+            rx=self._pcie(NVML_PCIE_UTIL_RX_BYTES) if gpm_rx is None else gpm_rx * 2**20,
             pcie_width=self._uint("nvmlDeviceGetCurrPcieLinkWidth"),
             cores=cores,
             tensor=tensor,
@@ -324,6 +336,22 @@ def versions(nv):
     if nv.nvmlSystemGetCudaDriverVersion_v2(byref(cuda)) == NVML_SUCCESS:  # e.g. 13000 -> 13.0
         parts.append("CUDA {}.{}".format(cuda.value // 1000, cuda.value % 1000 // 10))
     return "  ".join(parts)
+
+
+def process_owner(pid):
+    """Account running `pid`; None for our own processes or where there is no /proc (Windows)."""
+    try:
+        import pwd
+        with open("/proc/{}/status".format(pid)) as f:
+            uid = next(int(line.split()[1]) for line in f if line.startswith("Uid:"))
+    except (ImportError, OSError, StopIteration):
+        return None
+    if uid == os.getuid():
+        return None
+    try:
+        return pwd.getpwuid(uid).pw_name
+    except KeyError:  # no passwd entry, e.g. inside a container
+        return str(uid)
 
 
 def open_gpus(nv, wanted=None):
@@ -416,8 +444,8 @@ def info(gpu, height):
     top = PCIE_LANE_GBS.get(gpu.pcie_max_gen, 0) * (lanes or 0)
     cap = (" / {:.0f}".format(top), WARN if degraded(gpu) else "") if top else ("", "")
 
-    def link(label, kb):  # e.g. "CPU -> GPU  0.16 / 63 GB/s", like MEM's used/total
-        return row([(label + ("-" if kb is None else "{:.2f}".format(kb / 1e6)).rjust(6), ""), cap, (" GB/s", "")])
+    def link(label, rate):  # e.g. "CPU -> GPU  0.16 / 63 GB/s", like MEM's used/total
+        return row([(label + ("-" if rate is None else "{:.2f}".format(rate / 1e9)).rjust(6), ""), cap, (" GB/s", "")])
 
     gpu_row = row(busy)
     mem_row = row([("MEM ", "")] + share(s.mem_used, s.mem_total),
@@ -486,11 +514,24 @@ def edge(width, label, parts):
 
 
 def process_label(processes, room):
-    """As many whole "name 1.2G" entries as fit in `room` cells, then "+N" for the rest."""
+    """Processes grouped by owner, owners and processes by memory, biggest first:
+    "train.py 15.1G  eval.py 0.5G   kim: bench.py 3.2G" (our own processes carry no owner).
+    As many whole entries as fit in `room` cells, then "+N" for the rest."""
+    def mem(process):
+        return process[1] or 0
+    groups = {}
+    for process in sorted(processes, key=mem, reverse=True):
+        groups.setdefault(process[2], []).append(process)
+    ordered = sorted(groups.values(), key=lambda group: sum(map(mem, group)), reverse=True)
+    entries = []
+    for group in ordered:
+        for j, (name, used, owner) in enumerate(group):
+            gap = "" if not entries else "  " if j else "   "
+            entries.append([(gap, "")] + ([(owner + ": ", DIM)] if owner and not j else []) + [(name, PROC)]
+                           + ([] if used is None else [(" {:.1f}G".format(used), DIM)]))
     label = []
-    for i, (name, mem) in enumerate(processes):
-        entry = [("  " if label else "", ""), (name, PROC)] + ([] if mem is None else [(" {:.1f}G".format(mem), DIM)])
-        rest = len(processes) - i - 1
+    for i, entry in enumerate(entries):
+        rest = len(entries) - i - 1
         if width_of(label + entry) + (len("  +{}".format(rest)) if rest else 0) > room:
             # The first entry is always shown, cut if need be; later ones collapse into the count.
             return clip(entry, room) if not label else label + [("  +{}".format(rest + 1), DIM)]

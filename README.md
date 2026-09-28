@@ -22,11 +22,11 @@ nvmon 0.1.0  gpu-node  2026-09-28 Mon 23:08:19.63                               
   so it can read 100 % while most of the chip idles. `cores` is the share of SMs (the GPU's
   compute units) actually busy, `tensor` the Tensor Core (matrix-multiply unit) activity.
   They are hidden on GPUs that cannot report them.
-- Top edge: GPU name | power draw / limit; warnings, temperature (blue when cool, red from about
-  85 °C), fan and clock. Warnings appear only when something is off: `SLOWED: power` (orange), `SLOWED: heat`
-  or `SLOWED: hw` (red) when the clock is held back, which also tints the clock; and
-  `PCIe DEGRADED: x16 -> x8` (yellow) when the card runs on fewer lanes than it supports, which
-  also tints the link speed in the PCIe rows.
+- Top edge: GPU name | power draw / limit, then warnings, temperature (blue when cool, red
+  from about 85 °C), fan and clock. Warnings appear only when something is off:
+  `SLOWED: power` (orange), `SLOWED: heat` or `SLOWED: hw` (red) when the clock is held back,
+  which also tints the clock; `PCIe DEGRADED: x16 -> x8` (yellow) when the card runs on fewer
+  lanes than it supports, which also tints the link speed in the PCIe rows.
 - Bottom edge: running processes (script names for Python) with their memory.
 - Top line: host, local time, driver / CUDA version and refresh interval.
 - Refreshes every 0.5 s. Up to 8 GPUs fit on one screen; on wide terminals the boxes
@@ -39,6 +39,9 @@ nvmon 0.1.0  gpu-node  2026-09-28 Mon 23:08:19.63                               
 ```bash
 uv tool install nvmon      # or: pipx install nvmon
 ```
+
+Straight from GitHub: `uv tool install git+https://github.com/Han-DongHeun/nvmon`
+(update with `uv tool upgrade nvmon`).
 
 Or run it once without installing: `uvx nvmon`.
 

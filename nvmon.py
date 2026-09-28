@@ -2,9 +2,11 @@
 """nvmon: a compact, btop-style NVIDIA GPU monitor with zero dependencies.
 
 One box per GPU: utilization history on the left (0 % at the bottom, 100 % at
-the top) and clock / power / memory / PCIe numbers on the right. It talks to
-the NVML library that ships with the NVIDIA driver through ctypes and draws
-with plain ANSI escape codes, so a single file runs on any Python >= 3.6.
+the top); utilization, memory and PCIe traffic on the right; name, power,
+warnings, temperature, fan and clock on the top edge; processes on the bottom
+edge. It talks to the NVML library that ships with the NVIDIA driver through
+ctypes and draws with plain ANSI escape codes, so a single file runs on any
+Python >= 3.6.
 
     nvmon [-i SECONDS] [-g 0,2,4-7]        q / Esc / Ctrl+C to quit
 """
@@ -25,10 +27,9 @@ from typing import NamedTuple, Optional
 __version__ = "0.1.0"
 
 INFO_W = 32                          # width of the stats column
-INFO_ROWS = 5                        # GPU, MEM, PCIe title, CPU->GPU, GPU->CPU
 CHROME_W = 7                         # "│ " + " │ " + " │" around graph and stats
 MIN_GRAPH_W = 30                     # a narrower graph is not worth a second column
-MAX_INNER_H = 6                      # tallest panel = the full stats column: 6 rows x 8 sub-levels
+MAX_INNER_H = 6                      # tallest panel: the full stats column (graph: 6 x 8 levels)
 HISTORY = 1024                       # samples kept per GPU; wider than any terminal
 BLOCKS = " ▁▂▃▄▅▆▇█"                 # a character cell filled in 1/8 steps
 
@@ -343,11 +344,16 @@ def open_gpus(nv, wanted=None):
 # ── rendering ────────────────────────────────────────────────────────────────
 # A line is a list of (text, style) segments; every character is one cell wide.
 
+# A horizontal rule across the stats column, joined to the borders.
+RULE = [(" ├" + "─" * (INFO_W + 2) + "┤", DIM)]
+
+
 def width_of(line):
     return sum(len(text) for text, _ in line)
 
 
 def clip(line, width):
+    """`line` cut to at most `width` cells."""
     out = []
     for text, style in line:
         if width <= 0:
@@ -358,6 +364,7 @@ def clip(line, width):
 
 
 def pad(line, width):
+    """`line` padded with spaces to `width` cells."""
     return line + [(" " * (width - width_of(line)), "")]
 
 
@@ -422,10 +429,6 @@ def info(gpu, height):
     if height == 5:
         return [gpu_row, mem_row, title, to_gpu, to_cpu]
     return [gpu_row, mem_row, to_gpu, to_cpu][:height]
-
-
-# A horizontal rule across the stats column, joined to the borders.
-RULE = [(" ├" + "─" * (INFO_W + 2) + "┤", DIM)]
 
 
 def degraded(gpu):
@@ -507,7 +510,7 @@ def render(gpus, width, height):
     """The whole screen: exactly `height` lines of exactly `width` cells."""
     # Two columns only when one column cannot show every GPU at full height.
     two_fit = width // 2 >= CHROME_W + INFO_W + MIN_GRAPH_W
-    cols = 2 if two_fit and len(gpus) * (INFO_ROWS + 2) > height else 1
+    cols = 2 if two_fit and len(gpus) * (MAX_INNER_H + 2) > height else 1
     rows = math.ceil(len(gpus) / cols)
     inner = max(1, min(MAX_INNER_H, height // rows - 2))
     lines = []

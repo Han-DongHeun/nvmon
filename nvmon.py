@@ -333,18 +333,17 @@ def rate(kib):
 def info(gpu, height):
     s = gpu.now
     total, limit = num(s.mem_total, "{:.1f}"), num(s.power_limit, "{:.0f}")
-    # GPU and MEM percentages line up in one column; absolute values sit flush right.
+    # GPU and MEM percentages line up in one column; their absolute values sit flush right.
     lines = [
         row([("GPU ", "")] + share(s.util, 100)),
         row([("MEM ", "")] + share(s.mem_used, s.mem_total),
             [("{}/{} GiB".format(num(s.mem_used, "{:.1f}"), total), "")]),
-        row([("PWR", "")], [("{}/{} W".format(num(s.power, "{:.0f}"), limit), "")]),
-        row([], [("TX {}   RX {}".format(rate(s.tx), rate(s.rx)), "")]),
+        row([("PWR {}/{} W".format(num(s.power, "{:.0f}"), limit), "")]),
+        row([("TX {}   RX {}".format(rate(s.tx), rate(s.rx)), "")]),
     ]
-    if height < len(lines):  # a short panel keeps the most important lines
-        return lines[:height]
-    # GPU and MEM hug the top edge, PWR and PCIe the bottom edge.
-    return lines[:2] + [row([])] * (height - len(lines)) + lines[2:]
+    if height > len(lines):  # room to spare: a blank line after MEM sets GPU and MEM apart
+        lines.insert(2, row([]))
+    return lines[:height] + [row([])] * (height - len(lines))
 
 
 def panel(gpu, width, height):

@@ -3,7 +3,7 @@
 A compact, btop-style NVIDIA GPU monitor for the terminal.
 
 ```
-nvmon 0.1.0  gpu-node  2026-09-28 Mon 23:05:46.74                                    refresh 0.5s
+nvmon 0.1.0  gpu-node  2026-09-28 Mon 23:08:19.63                                    refresh 0.5s
 ╭─ GPU 4  H100 80GB HBM3  │ 234 / 700 W ─────────────────────────────────────  50°C  1980 MHz ─╮
 │ ▄▅▃       ▄   ▆▄            ▇     ▄      ▄      ▁         │ GPU 100%  cores  56% tensor   0% │
 │ ███▅▁█ ▄  █  ▁██  ▂ ▃   ▁  ██  ▆▁ █    ▁▆█▇▃ ▂ ▂█▄▁ ▂▃  █ │ MEM  20%         15.6 / 79.6 GiB │

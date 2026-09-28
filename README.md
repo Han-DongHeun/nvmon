@@ -1,8 +1,12 @@
 # nvmon
 
-A compact, btop-style NVIDIA GPU monitor for the terminal. One Python file, no dependencies.
+NVIDIA GPU monitor for the terminal. Single Python file, no dependencies.
 
-![nvmon on an 8x H100 node](https://raw.githubusercontent.com/Han-DongHeun/nvmon/main/docs/screenshot.png)
+![nvmon showing four H100 GPUs](https://raw.githubusercontent.com/Han-DongHeun/nvmon/main/docs/screenshot.png)
+
+On a wide terminal, eight GPUs go into two columns:
+
+![nvmon showing eight H100 GPUs in two columns](https://raw.githubusercontent.com/Han-DongHeun/nvmon/main/docs/screenshot-grid.png)
 
 ## Install
 
@@ -38,11 +42,6 @@ ssh -t HOST nvmon  # over ssh: -t gives it a terminal
 - Needs an NVIDIA driver and a truecolor terminal. In tmux, add
   `set -ag terminal-overrides ",*:RGB"` to `~/.tmux.conf`.
 - On Windows, run it in Windows Terminal; Git Bash's default window is not a terminal to Python.
-
-## Releasing
-
-Bump `__version__` in `nvmon.py`, then `git tag -a vX.Y.Z -m vX.Y.Z && git push --follow-tags`.
-The `publish` workflow uploads to PyPI.
 
 ## License
 

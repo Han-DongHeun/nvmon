@@ -171,8 +171,8 @@ class Sample(NamedTuple):
     clock: Optional[int]          # graphics clock, MHz
     mem_used: Optional[float]     # GiB
     mem_total: Optional[float]    # GiB
-    tx: Optional[int]             # PCIe GPU -> CPU, KiB/s
-    rx: Optional[int]             # PCIe CPU -> GPU, KiB/s
+    tx: Optional[int]             # PCIe GPU -> CPU, kB/s
+    rx: Optional[int]             # PCIe CPU -> GPU, kB/s
     pcie_width: Optional[int]     # current link width (lanes)
     cores: Optional[float]        # % of SMs busy (GPM, Hopper and newer)
     tensor: Optional[float]       # % Tensor Core activity (GPM)
@@ -398,16 +398,16 @@ def num(value, fmt):
     return "-" if value is None else fmt.format(value)
 
 
-def rate(kib):
-    """KiB/s as a fixed 10-cell string, e.g. '8.61 MiB/s'."""
-    if kib is None:
-        return "-".rjust(10)
-    for unit in ("KiB", "MiB", "GiB"):
-        if kib < 999.5 or unit == "GiB":
+def rate(kb):
+    """kB/s as a fixed 9-cell string in decimal units, like link speeds: '22.8 MB/s'."""
+    if kb is None:
+        return "-".rjust(9)
+    for unit in ("kB", "MB", "GB"):
+        if kb < 999.5 or unit == "GB":
             break
-        kib /= 1024
-    digits = 2 if kib < 9.995 else 1 if kib < 99.95 else 0
-    return "{:.{}f} {}/s".format(kib, digits, unit).rjust(10)
+        kb /= 1000
+    digits = 2 if kb < 9.995 else 1 if kb < 99.95 else 0
+    return "{:.{}f} {}/s".format(kb, digits, unit).rjust(9)
 
 
 def info(gpu, height):
@@ -416,18 +416,18 @@ def info(gpu, height):
     # GPU and MEM percentages line up in one column; their absolute values sit flush right.
     busy = [("GPU ", "")] + share(s.util, 100)
     if gpu.has_activity:  # "cores" = share of SMs at work, "tensor" = Tensor Core activity
-        busy += [("  cores ", DIM)] + share(s.cores, 100) + [(" tensor ", DIM)] + share(s.tensor, 100)
+        busy += [("  cores " + share(s.cores, 100)[0][0] + " tensor " + share(s.tensor, 100)[0][0], DIM)]
     # A link's top speed: its generation's per-lane rate times the lanes it runs on now.
     lanes = s.pcie_width or gpu.pcie_max_width
     top = PCIE_LANE_GBS.get(gpu.pcie_max_gen, 0) * (lanes or 0)
-    cap = [("/ {:.0f} GB/s".format(top), DIM)] if top else []
+    cap = [(" of {:.0f} GB/s".format(top), DIM)] if top else []
     lines = [
         row(busy),
         row([("MEM ", "")] + share(s.mem_used, s.mem_total),
             [("{}/{} GiB".format(num(s.mem_used, "{:.1f}"), total), "")]),
         row([("PWR {}/{} W".format(num(s.power, "{:.0f}"), limit), "")]),
-        row([("CPU→GPU " + rate(s.rx), "")], cap),
-        row([("GPU→CPU " + rate(s.tx), "")], cap),
+        row([("PCIe to GPU ", ""), (rate(s.rx), "")] + cap),
+        row([("     to CPU ", ""), (rate(s.tx), "")] + cap),
     ]
     if height > len(lines):  # room to spare: a rule (None) after MEM sets GPU and MEM apart
         lines.insert(2, None)

@@ -24,7 +24,7 @@ from concurrent.futures import ThreadPoolExecutor
 from ctypes import byref, c_int, c_uint, c_ulonglong, c_void_p
 from typing import NamedTuple, Optional
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 
 INFO_W = 32                          # width of the stats column
 CHROME_W = 7                         # "│ " + " │ " + " │" around graph and stats

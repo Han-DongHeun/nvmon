@@ -25,7 +25,7 @@ from typing import NamedTuple, Optional
 __version__ = "0.1.0"
 
 INFO_W = 32                          # width of the stats column
-INFO_ROWS = 6                        # GPU, MEM, PWR, PCIe title, CPU->GPU, GPU->CPU
+INFO_ROWS = 5                        # GPU, MEM, PCIe title, CPU->GPU, GPU->CPU
 CHROME_W = 7                         # "│ " + " │ " + " │" around graph and stats
 MIN_GRAPH_W = 30                     # a narrower graph is not worth a second column
 MAX_INNER_H = 8                      # tallest graph: 8 rows x 8 sub-levels = 64 steps
@@ -400,7 +400,7 @@ def num(value, fmt):
 
 def info(gpu, height):
     s = gpu.now
-    total, limit = num(s.mem_total, "{:.1f}"), num(s.power_limit, "{:.0f}")
+    total = num(s.mem_total, "{:.1f}")
     busy = [("GPU ", "")] + share(s.util, 100)
     if gpu.has_activity:  # "cores" = share of SMs at work, "tensor" = Tensor Core activity
         busy += [("  cores " + share(s.cores, 100)[0][0] + " tensor " + share(s.tensor, 100)[0][0], FAINT)]
@@ -416,13 +416,12 @@ def info(gpu, height):
     mem_row = row([("MEM ", "")] + share(s.mem_used, s.mem_total),
                   [("{} / {} GiB".format(num(s.mem_used, "{:.1f}"), total), "")])
     title, to_gpu, to_cpu = row([("PCIe transfer", "")]), link(" CPU -> GPU ", s.rx), link(" GPU -> CPU ", s.tx)
-    power = row([("PWR", "")], [("{} / {} W".format(num(s.power, "{:.0f}"), limit), "")])
     # The rule (None) after MEM and the PCIe title only appear when there is room.
-    if height >= 7:
-        return [gpu_row, mem_row, None, power, title, to_gpu, to_cpu] + [row([])] * (height - 7)
-    if height == 6:
-        return [gpu_row, mem_row, power, title, to_gpu, to_cpu]
-    return [gpu_row, mem_row, power, to_gpu, to_cpu][:height]
+    if height >= 6:
+        return [gpu_row, mem_row, None, title, to_gpu, to_cpu] + [row([])] * (height - 6)
+    if height == 5:
+        return [gpu_row, mem_row, title, to_gpu, to_cpu]
+    return [gpu_row, mem_row, to_gpu, to_cpu][:height]
 
 
 # A horizontal rule across the stats column, joined to the borders.
@@ -444,6 +443,8 @@ def panel(gpu, width, height):
         parts += [("PCIe DEGRADED: x{} -> x{}".format(gpu.pcie_max_width, s.pcie_width), WARN)]
     parts += [] if s.fan is None else [("FAN {:>3}%".format(s.fan), "")]
     parts += [] if s.temp is None else [("{:>3}°C".format(s.temp), TEMP[min(max(s.temp, 0), 100)])]
+    limit = num(s.power_limit, "{:.0f}")  # power padded to the limit's width
+    parts += [("PWR {} / {} W".format(num(s.power, "{:.0f}").rjust(len(limit)), limit), "")]
     parts += [] if s.clock is None else [("{:>4} MHz".format(s.clock), s.slowdown[1] if s.slowdown else "")]
     top = edge(width, [("GPU {}".format(gpu.index), BOLD), ("  " + gpu.name, "")], parts)
     split = 2 + graph_w + 1  # column of the graph | stats divider

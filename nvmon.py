@@ -14,6 +14,7 @@ import argparse
 import ctypes
 import itertools
 import math
+import operator
 import os
 import signal
 import socket
@@ -22,6 +23,7 @@ import time
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from ctypes import byref, c_int, c_uint, c_ulonglong, c_void_p
+from functools import lru_cache
 from typing import NamedTuple, Optional
 
 __version__ = "0.2.1"
@@ -72,6 +74,8 @@ def heat(t):
 # ── NVML (libnvidia-ml / nvml.dll, part of the NVIDIA driver) ───────────────
 
 NVML_SUCCESS = 0
+# Failures that hold for as long as we run: the GPU, or this driver version, lacks the query.
+NVML_ERROR_NOT_SUPPORTED, NVML_ERROR_FUNCTION_NOT_FOUND, NVML_ERROR_ARGUMENT_VERSION_MISMATCH = 3, 13, 25
 NVML_TEMPERATURE_GPU = 0
 NVML_CLOCK_GRAPHICS = 0
 NVML_PCIE_UTIL_TX_BYTES, NVML_PCIE_UTIL_RX_BYTES = 0, 1
@@ -150,7 +154,7 @@ def load_nvml():
         paths = ["libnvidia-ml.so.1"]
     for path in paths:
         try:
-            nv = ctypes.CDLL(path)  # CDLL releases the GIL during calls, so GPUs poll in parallel
+            nv = ctypes.CDLL(path)  # CDLL releases the GIL during calls, so threads can poll GPUs in parallel
         except OSError:
             continue
         nv.nvmlErrorString.restype = ctypes.c_char_p
@@ -193,6 +197,7 @@ class Sample(NamedTuple):
 class Gpu:
     def __init__(self, nv, index, handle):
         self.nv, self.index, self.handle = nv, index, handle
+        self._unsupported = set()  # queries this GPU or driver cannot answer, see _ok
         name = ctypes.create_string_buffer(NVML_DEVICE_NAME_BUFFER_SIZE)
         nv.nvmlDeviceGetName(handle, name, NVML_DEVICE_NAME_BUFFER_SIZE)
         name = name.value.decode("utf-8", "replace")
@@ -204,9 +209,18 @@ class Gpu:
         self._gpm = self._gpm_samples()
         self.has_activity = self._gpm is not None
         self._facts = {}  # pid -> (name, owner, env, started): fixed for a process's life, so read once
+        self._listed, self._listed_mem = [], None  # process list, and the memory in use when it was read
 
     def _ok(self, fn, *args):
-        return getattr(self.nv, fn)(self.handle, *args) == NVML_SUCCESS
+        """Run the device query `fn`; True on success. A query this GPU or driver cannot answer is not
+        asked again: the answer costs time too (0.3 ms of CPU for a fanless H100 to say it has no fan)."""
+        if fn in self._unsupported:
+            return False
+        query = getattr(self.nv, fn, None)  # None: a driver older than this function
+        rc = query(self.handle, *args) if query else NVML_ERROR_FUNCTION_NOT_FOUND
+        if rc in (NVML_ERROR_NOT_SUPPORTED, NVML_ERROR_FUNCTION_NOT_FOUND, NVML_ERROR_ARGUMENT_VERSION_MISMATCH):
+            self._unsupported.add(fn)
+        return rc == NVML_SUCCESS
 
     def _uint(self, fn, *args):
         """Scalar query; None when this GPU does not support it (e.g. fan on an H100)."""
@@ -215,40 +229,37 @@ class Gpu:
 
     def _memory(self):
         """(used, total) bytes. v2 (R510+) leaves out driver-reserved memory, like nvidia-smi."""
-        if hasattr(self.nv, "nvmlDeviceGetMemoryInfo_v2"):
-            mem = MemoryV2(version=MEMORY_V2)
-            if self._ok("nvmlDeviceGetMemoryInfo_v2", byref(mem)):
-                return mem.used, mem.total
+        mem = MemoryV2(version=MEMORY_V2)
+        if self._ok("nvmlDeviceGetMemoryInfo_v2", byref(mem)):
+            return mem.used, mem.total
         mem = Memory()
         return (mem.used, mem.total) if self._ok("nvmlDeviceGetMemoryInfo", byref(mem)) else (None, None)
 
     def _temperature(self):
         """nvmlDeviceGetTemperature is deprecated; its replacement only exists on R565+ drivers."""
-        if hasattr(self.nv, "nvmlDeviceGetTemperatureV"):
-            temp = TemperatureV1(version=TEMPERATURE_V1, sensorType=NVML_TEMPERATURE_GPU)
-            if self._ok("nvmlDeviceGetTemperatureV", byref(temp)):
-                return temp.temperature
+        temp = TemperatureV1(version=TEMPERATURE_V1, sensorType=NVML_TEMPERATURE_GPU)
+        if self._ok("nvmlDeviceGetTemperatureV", byref(temp)):
+            return temp.temperature
         return self._uint("nvmlDeviceGetTemperature", NVML_TEMPERATURE_GPU)
 
     def _gpm_samples(self):
         """Two GPM sample buffers, or None where GPM is unavailable (it needs Hopper or newer)."""
         support = GpmSupport(version=1)
-        if not (hasattr(self.nv, "nvmlGpmQueryDeviceSupport")
-                and self._ok("nvmlGpmQueryDeviceSupport", byref(support)) and support.isSupportedDevice):
+        if not (self._ok("nvmlGpmQueryDeviceSupport", byref(support)) and support.isSupportedDevice):
             return None
         samples = [c_void_p(), c_void_p()]
         if any(self.nv.nvmlGpmSampleAlloc(byref(sample)) != NVML_SUCCESS for sample in samples):
             return None
         # Take the first sample now, on the main thread: NVML crashes when a device's
         # first GPM sample is taken from several threads at once.
-        if self.nv.nvmlGpmSampleGet(self.handle, samples[0]) != NVML_SUCCESS:
+        if not self._ok("nvmlGpmSampleGet", samples[0]):
             return None
         return samples  # [previous, current], kept for the whole run
 
     def _activity(self):
         """GPM_METRICS values between this poll and the previous one (Nones without GPM)."""
         none = (None,) * len(GPM_METRICS)
-        if self._gpm is None or self.nv.nvmlGpmSampleGet(self.handle, self._gpm[1]) != NVML_SUCCESS:
+        if self._gpm is None or not self._ok("nvmlGpmSampleGet", self._gpm[1]):
             return none
         previous, current = self._gpm
         self._gpm.reverse()  # this sample is the baseline for the next poll
@@ -266,17 +277,15 @@ class Gpu:
 
     def _slowdown(self):
         """(label, colour) for why the clock is held back, or None."""
-        fn = ("nvmlDeviceGetCurrentClocksEventReasons" if hasattr(self.nv, "nvmlDeviceGetCurrentClocksEventReasons")
-              else "nvmlDeviceGetCurrentClocksThrottleReasons")  # the pre-R535 name
         reasons = c_ulonglong()
-        if not self._ok(fn, byref(reasons)):
+        if not (self._ok("nvmlDeviceGetCurrentClocksEventReasons", byref(reasons))
+                or self._ok("nvmlDeviceGetCurrentClocksThrottleReasons", byref(reasons))):  # the pre-R535 name
             return None
         return next(((label, colour) for bits, label, colour in SLOWDOWNS if reasons.value & bits), None)
 
     def _processes(self):
         infos, count = (ProcessInfo * MAX_PROCESSES)(), c_uint(MAX_PROCESSES)
-        if not (hasattr(self.nv, "nvmlDeviceGetComputeRunningProcesses_v3") and
-                self._ok("nvmlDeviceGetComputeRunningProcesses_v3", byref(count), infos)):
+        if not self._ok("nvmlDeviceGetComputeRunningProcesses_v3", byref(count), infos):
             return []
         running = infos[:count.value]
         self._facts = {p.pid: self._facts.get(p.pid) or (self._process_name(p.pid),) + process_facts(p.pid)
@@ -314,6 +323,10 @@ class Gpu:
         util = Utilization()
         util = util.gpu if self._ok("nvmlDeviceGetUtilizationRates", byref(util)) else None
         used, total = self._memory()
+        # The process list is the costliest query on a busy GPU. Processes only come and go with memory
+        # being allocated or freed, so the list is read again only when the memory in use has changed.
+        if used is None or used != self._listed_mem:
+            self._listed, self._listed_mem = self._processes(), used
         power = self._uint("nvmlDeviceGetPowerUsage")            # mW
         limit = self._uint("nvmlDeviceGetEnforcedPowerLimit")    # mW
         cores, tensor, gpm_tx, gpm_rx = self._activity()
@@ -332,7 +345,7 @@ class Gpu:
             cores=cores,
             tensor=tensor,
             slowdown=self._slowdown(),
-            processes=self._processes(),
+            processes=self._listed,
         )
         self.history.append(util or 0)
 
@@ -435,23 +448,31 @@ def pad(line, width):
     return line + [(" " * (width - width_of(line)), "")]
 
 
-def graph(history, width, height):
-    """Stacked block chart, newest sample on the right, top row first.
+@lru_cache(maxsize=None)
+def graph_row(r, height):
+    """The (block, colour) cell that row `r` (0 = bottom) of a `height`-row graph shows for each
+    level 0 .. 8 * height.
 
     Each cell takes the colour of the level its top reaches: full cells shade row by row,
     and the ragged top edge shows the exact colour of each value.
     """
+    steps = height * 8
+    fills = (min(8, max(0, level - r * 8)) for level in range(steps + 1))
+    # Blank and full cells share the row colour so they join into long runs.
+    return [(BLOCKS[f], heat((r * 8 + (f or 8)) / steps)) for f in fills]
+
+
+def graph(history, width, height):
+    """Stacked block chart, newest sample on the right, top row first."""
     vals = list(history)[-width:] if width > 0 else []
     steps = height * 8
     # Any non-zero value gets at least one sub-level so light load stays visible.
     levels = [0] * (width - len(vals)) + [max(round(v * steps / 100), 1 if v else 0) for v in vals]
+    text_of, style_of = operator.itemgetter(0), operator.itemgetter(1)
     rows = []
     for r in reversed(range(height)):
-        fills = [min(8, max(0, lv - r * 8)) for lv in levels]
-        # Blank and full cells share the row colour so they join into long runs.
-        cells = [(BLOCKS[f], heat((r * 8 + (f or 8)) / steps)) for f in fills]
-        rows.append([("".join(text for text, _ in run), style)
-                     for style, run in itertools.groupby(cells, key=lambda cell: cell[1])])
+        cells = map(graph_row(r, height).__getitem__, levels)
+        rows.append([("".join(map(text_of, run)), style) for style, run in itertools.groupby(cells, key=style_of)])
     return rows
 
 
@@ -781,9 +802,12 @@ def main():
         driver = versions(nv)
         signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(128 + signum))
         with ThreadPoolExecutor(len(gpus)) as pool, Screen() as screen:
+            # Without GPM (before Hopper) the PCIe query blocks for 20 ms, so such GPUs poll side by
+            # side on threads. Otherwise one after another is quicker: threads would only add overhead.
+            poll_all = map if all(g.has_activity for g in gpus) else pool.map
             deadline = time.monotonic()
             while True:
-                list(pool.map(Gpu.poll, gpus))
+                list(poll_all(Gpu.poll, gpus))
                 width, height = os.get_terminal_size()
                 screen.draw([header(width, args.interval, driver)] + render(gpus, width, height - 2)
                             + [footer(width)])

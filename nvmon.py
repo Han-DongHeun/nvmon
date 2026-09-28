@@ -401,7 +401,6 @@ def num(value, fmt):
 def info(gpu, height):
     s = gpu.now
     total, limit = num(s.mem_total, "{:.1f}"), num(s.power_limit, "{:.0f}")
-    # GPU and MEM percentages line up in one column; their absolute values sit flush right.
     busy = [("GPU ", "")] + share(s.util, 100)
     if gpu.has_activity:  # "cores" = share of SMs at work, "tensor" = Tensor Core activity
         busy += [("  cores " + share(s.cores, 100)[0][0] + " tensor " + share(s.tensor, 100)[0][0], DIM)]
@@ -415,8 +414,7 @@ def info(gpu, height):
 
     lines = [
         row(busy),
-        row([("MEM ", "")] + share(s.mem_used, s.mem_total),
-            [("{}/{} GiB".format(num(s.mem_used, "{:.1f}"), total), "")]),
+        row([("MEM {}/{} GiB".format(num(s.mem_used, "{:.1f}"), total), "")]),
         row([("PWR {}/{} W".format(num(s.power, "{:.0f}"), limit), "")]),
         link("CPU -> GPU ", s.rx),
         link("GPU -> CPU ", s.tx),

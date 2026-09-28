@@ -398,18 +398,6 @@ def num(value, fmt):
     return "-" if value is None else fmt.format(value)
 
 
-def rate(kb):
-    """kB/s as a fixed 9-cell string in decimal units, like link speeds: '22.8 MB/s'."""
-    if kb is None:
-        return "-".rjust(9)
-    for unit in ("kB", "MB", "GB"):
-        if kb < 999.5 or unit == "GB":
-            break
-        kb /= 1000
-    digits = 2 if kb < 9.995 else 1 if kb < 99.95 else 0
-    return "{:.{}f} {}/s".format(kb, digits, unit).rjust(9)
-
-
 def info(gpu, height):
     s = gpu.now
     total, limit = num(s.mem_total, "{:.1f}"), num(s.power_limit, "{:.0f}")
@@ -420,14 +408,18 @@ def info(gpu, height):
     # A link's top speed: its generation's per-lane rate times the lanes it runs on now.
     lanes = s.pcie_width or gpu.pcie_max_width
     top = PCIE_LANE_GBS.get(gpu.pcie_max_gen, 0) * (lanes or 0)
-    cap = [(" / {:.0f} GB/s".format(top), WARN if degraded(gpu) else "")] if top else []
+    cap = ("/{:.0f}".format(top), WARN if degraded(gpu) else "") if top else ("", "")
+
+    def link(label, kb):  # e.g. "CPU -> GPU  0.16/63 GB/s", like MEM's used/total
+        return row([(label + ("-" if kb is None else "{:.2f}".format(kb / 1e6)).rjust(6), ""), cap, (" GB/s", "")])
+
     lines = [
         row(busy),
         row([("MEM ", "")] + share(s.mem_used, s.mem_total),
             [("{}/{} GiB".format(num(s.mem_used, "{:.1f}"), total), "")]),
         row([("PWR {}/{} W".format(num(s.power, "{:.0f}"), limit), "")]),
-        row([("CPU -> GPU " + rate(s.rx), "")] + cap),
-        row([("GPU -> CPU " + rate(s.tx), "")] + cap),
+        link("CPU -> GPU ", s.rx),
+        link("GPU -> CPU ", s.tx),
     ]
     if height > len(lines):  # room to spare: a rule (None) after MEM sets GPU and MEM apart
         lines.insert(2, None)
@@ -446,7 +438,7 @@ def panel(gpu, width, height):
     # Fixed widths keep the right end of the border still while values change.
     parts = [] if s.slowdown is None else [s.slowdown]
     if degraded(gpu):
-        parts += [("PCIe DEGRADED: x{}/x{}".format(s.pcie_width, gpu.pcie_max_width), WARN)]
+        parts += [("PCIe DEGRADED: x{} -> x{}".format(gpu.pcie_max_width, s.pcie_width), WARN)]
     parts += [] if s.fan is None else [("FAN {:>3}%".format(s.fan), "")]
     parts += [] if s.temp is None else [("{:>3}°C".format(s.temp), TEMP[min(max(s.temp, 0), 100)])]
     parts += [] if s.clock is None else [("{:>4} MHz".format(s.clock), s.slowdown[1] if s.slowdown else "")]

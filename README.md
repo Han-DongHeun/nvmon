@@ -3,13 +3,13 @@
 A compact, btop-style NVIDIA GPU monitor for the terminal.
 
 ```
-nvmon 0.1.0  gpu-node  2026-09-28 Mon 22:34:59.48                                    refresh 0.5s
+nvmon 0.1.0  gpu-node  2026-09-28 Mon 22:36:04.34                                    refresh 0.5s
 ╭─ GPU 4  H100 80GB HBM3 ────────────────────────────────────────────────────  50°C  1980 MHz ─╮
 │ ▃ ▁    ▂      ▂    ▇   ▆ ▃       ▇ ▅▂   ▆      █        ▂ │ GPU 100%  cores  56% tensor   0% │
 │ █ █▆▃▇██▃▁▁ ▄ █    █ ▃▂█ █ ▄▁█ ▄▆█ ██▂▆▂█▆▃▃▄▄ █  ▄▄▇▄▄▆█ │ MEM  20%           15.6/79.6 GiB │
 │ █ █████████▇███▂▆▇▁█ ███▂█████▆███ █████████████▂ ███████ │ PWR 234/700 W                    │
-│ ████████████████████▇█████████████▇██████████████ ███████ │ CPU -> GPU  163 MB/s / 63 GB/s   │
-│ █████████████████████████████████████████████████████████ │ GPU -> CPU 23.3 MB/s / 63 GB/s   │
+│ ████████████████████▇█████████████▇██████████████ ███████ │ CPU -> GPU   0.16/63 GB/s        │
+│ █████████████████████████████████████████████████████████ │ GPU -> CPU   0.02/63 GB/s        │
 ╰───────────────────────────── train.py 15.1G  eval.py 0.5G ───────────────────────────────────╯
                                                                                     Esc / q quit
 ```
@@ -24,7 +24,7 @@ nvmon 0.1.0  gpu-node  2026-09-28 Mon 22:34:59.48                               
 - Top edge: GPU name, warnings, fan, temperature (blue when cool, red from about 85 °C) and
   clock. Warnings appear only when something is off: `SLOWED: power` (orange), `SLOWED: heat`
   or `SLOWED: hw` (red) when the clock is held back, which also tints the clock; and
-  `PCIe DEGRADED: x8/x16` (yellow) when the card runs on fewer lanes than it supports, which
+  `PCIe DEGRADED: x16 -> x8` (yellow) when the card runs on fewer lanes than it supports, which
   also tints the link speed in the PCIe rows.
 - Bottom edge: running processes (script names for Python) with their memory.
 - Top line: host, local time, driver / CUDA version and refresh interval.

@@ -419,9 +419,12 @@ def info(gpu, height):
         link("GPU -> CPU ", s.tx),
         row([("PWR {} / {} W".format(num(s.power, "{:.0f}"), limit), "")]),
     ]
+    if height < len(lines):  # a short panel keeps the top lines
+        return lines[:height]
     if height > len(lines):  # room to spare: a rule (None) after MEM sets GPU and MEM apart
         lines.insert(2, None)
-    return lines[:height] + [row([])] * (height - len(lines))
+    # PWR stays on the bottom row; any spare rows go just above it.
+    return lines[:-1] + [row([])] * (height - len(lines)) + lines[-1:]
 
 
 def degraded(gpu):

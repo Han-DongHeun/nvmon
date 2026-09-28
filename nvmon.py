@@ -341,8 +341,8 @@ def info(gpu, height):
         row([("PWR {}/{} W".format(num(s.power, "{:.0f}"), limit), "")]),
         row([("TX {}   RX {}".format(rate(s.tx), rate(s.rx)), "")]),
     ]
-    if height > len(lines):  # room to spare: a blank line after MEM sets GPU and MEM apart
-        lines.insert(2, row([]))
+    if height > len(lines):  # room to spare: a rule (None) after MEM sets GPU and MEM apart
+        lines.insert(2, None)
     return lines[:height] + [row([])] * (height - len(lines))
 
 
@@ -357,7 +357,8 @@ def panel(gpu, width, height):
     top = edge(width, [("GPU {}".format(gpu.index), BOLD), ("  " + gpu.name, "")], note)
     split = 2 + graph_w + 1  # column of the graph | stats divider
     bottom = bottom_edge(width, split, process_label(s.processes, split - 4))
-    body = [[("│ ", DIM)] + g + [(" │ ", DIM)] + i + [(" │", DIM)]
+    body = [[("│ ", DIM)] + g + ([(" ├" + "─" * (INFO_W + 2) + "┤", DIM)] if i is None
+                                  else [(" │ ", DIM)] + i + [(" │", DIM)])
             for g, i in zip(graph(gpu.history, graph_w, height), info(gpu, height))]
     return [top] + body + [bottom]
 

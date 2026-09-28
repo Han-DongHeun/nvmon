@@ -414,7 +414,7 @@ def info(gpu, height):
 
     lines = [
         row(busy),
-        row([("MEM {} / {} GiB".format(num(s.mem_used, "{:.1f}"), total), "")]),
+        row([("MEM ", "")] + share(s.mem_used, s.mem_total), [("{} / {} GiB".format(num(s.mem_used, "{:.1f}"), total), "")]),
         row([("PWR {} / {} W".format(num(s.power, "{:.0f}"), limit), "")]),
         link("CPU -> GPU ", s.rx),
         link("GPU -> CPU ", s.tx),

@@ -58,6 +58,7 @@ NVML_TEMPERATURE_GPU = 0
 NVML_CLOCK_GRAPHICS = 0
 NVML_PCIE_UTIL_TX_BYTES, NVML_PCIE_UTIL_RX_BYTES = 0, 1
 NVML_DEVICE_NAME_BUFFER_SIZE = 96
+NVML_SYSTEM_DRIVER_VERSION_BUFFER_SIZE = 80
 
 
 class Utilization(ctypes.Structure):
@@ -222,6 +223,16 @@ class Gpu:
         self.history.append(util or 0)
 
 
+def versions(nv):
+    """'driver 580.173.02  CUDA 13.0'; fixed while the program runs, so read once."""
+    driver, cuda, parts = ctypes.create_string_buffer(NVML_SYSTEM_DRIVER_VERSION_BUFFER_SIZE), c_int(), []
+    if nv.nvmlSystemGetDriverVersion(driver, NVML_SYSTEM_DRIVER_VERSION_BUFFER_SIZE) == NVML_SUCCESS:
+        parts.append("driver " + driver.value.decode())
+    if nv.nvmlSystemGetCudaDriverVersion_v2(byref(cuda)) == NVML_SUCCESS:  # e.g. 13000 -> 13.0
+        parts.append("CUDA {}.{}".format(cuda.value // 1000, cuda.value % 1000 // 10))
+    return "  ".join(parts)
+
+
 def open_gpus(nv):
     count = c_uint()
     check(nv, nv.nvmlDeviceGetCount_v2(byref(count)))
@@ -348,12 +359,26 @@ def render(gpus, width, height):
     return lines + [[(" " * width, "")]] * (height - len(lines))
 
 
-def header(width, interval):
-    """Top line: name, version, host and local time on the left; refresh interval on the right."""
+def totals(gpus):
+    """'8 GPUs  2.1 kW  62 / 637 GiB' over every GPU shown."""
+    def total(field):
+        return sum(v for v in (getattr(g.now, field) for g in gpus) if v is not None)
+    power = total("power")
+    watts = "{:.1f} kW".format(power / 1000) if power >= 1000 else "{:.0f} W".format(power)
+    return "{} GPU{}  {}  {:.0f} / {:.0f} GiB".format(
+        len(gpus), "s" if len(gpus) > 1 else "", watts, total("mem_used"), total("mem_total"))
+
+
+def header(width, interval, gpus, driver):
+    """Top line: name, version, host, local time | totals, driver, refresh interval."""
     now = time.time()
     stamp = time.strftime("%Y-%m-%d %a %H:%M:%S", time.localtime(now)) + ".{:02d}".format(int(now % 1 * 100))
     left = [("nvmon", BOLD), (" " + __version__, DIM), ("  " + socket.gethostname(), ""), ("  " + stamp, "")]
     right = [("refresh ", DIM), ("{:g}s".format(interval), "")]
+    # Optional parts, most important first; each is shown only if it still fits beside the left side.
+    for part in ([(totals(gpus), ""), ("   ", "")], [(driver, DIM), ("   ", "")] if driver else []):
+        if part and width_of(left) + 2 + width_of(part) + width_of(right) <= width:
+            right = part + right
     room = width - width_of(right)
     return clip(pad(clip(left, room - 1), room) + right, width)
 
@@ -422,13 +447,14 @@ def main():
         gpus = open_gpus(nv)
         if not gpus:
             sys.exit("nvmon: no accessible NVIDIA GPU")
+        driver = versions(nv)
         signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(128 + signum))
         with ThreadPoolExecutor(len(gpus)) as pool, Screen() as screen:
             deadline = time.monotonic()
             while True:
                 list(pool.map(Gpu.poll, gpus))
                 width, height = os.get_terminal_size()
-                screen.draw([header(width, args.interval)] + render(gpus, width, height - 1))
+                screen.draw([header(width, args.interval, gpus, driver)] + render(gpus, width, height - 1))
                 # Fixed-rate ticks; a late tick restarts the schedule instead of bursting.
                 now = time.monotonic()
                 deadline = max(deadline + args.interval, now)

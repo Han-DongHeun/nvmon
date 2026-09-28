@@ -3,7 +3,7 @@
 A compact, btop-style NVIDIA GPU monitor for the terminal.
 
 ```
-nvmon 0.1.0  gpu-node  2026-09-28 Mon 21:16:26.34                                refresh 0.5s
+nvmon 0.1.0  gpu-node  2026-09-28 Mon 21:34:51.41   8 GPUs  1.2 kW  61 / 637 GiB   refresh 0.5s
 ╭─ GPU 6  H100 80GB HBM3 ─────────────────────────────────────────────────────── 1980 MHz ─╮
 │   ▄ ▃  ▁▁▄      ▄    ▇   ▆ ▄   ▂   ▇ ▆▃   ▆       │ GPU ■■■■■■■■■■■■■■■■■■■■   67%  49°C │
 │  ▁█ ██▅███▆▄▄▃▇▃█ ▂▃ █ ▆▄█ █▄▆▄█▂▆██ ██▅█▅██▆▆▆▆▃ │ MEM  15.6 / 79.6 GiB       20%       │
@@ -14,6 +14,7 @@ nvmon 0.1.0  gpu-node  2026-09-28 Mon 21:16:26.34                               
 
 - One box per GPU: utilization history on the left (0 % at the bottom, 100 % at the top),
   utilization, temperature, memory, power, PCIe traffic and fan on the right.
+- Top line: host, local time, driver / CUDA version and totals over all GPUs.
 - GPU name and clock on the top edge, running processes (script names for Python) on the bottom edge.
 - Refreshes every 0.5 s. Up to 8 GPUs fit on one screen; on wide terminals the boxes
   go into two columns.

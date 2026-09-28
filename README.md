@@ -3,23 +3,21 @@
 A compact, btop-style NVIDIA GPU monitor for the terminal.
 
 ```
-nvmon 0.1.0  gpu-node  2026-09-28 Mon 22:52:10.85                                    refresh 0.5s
+nvmon 0.1.0  gpu-node  2026-09-28 Mon 22:53:25.47                                    refresh 0.5s
 ╭─ GPU 4  H100 80GB HBM3 ────────────────────────────────────────────────────  50°C  1980 MHz ─╮
-│                    ▇   ▅         ▆ ▄    ▅      █          │ GPU 100%  cores  56% tensor   0% │
-│ █ ▅▁ ▂▃▇      ▇    █   █ █   ▃  ▁█ █▆ ▁ █      █    ▁  ▁▆ │ MEM  20%         15.6 / 79.6 GiB │
-│ █ ██▃███▄   ▅ █    █ ▄▁█ █ ▄ █ ▅██ ██▂█▂█▇▄▄▄▄ █  ▅▄█▄▄██ ├──────────────────────────────────┤
-│ █ █████████▅█▆█ ▄▅ █ ███ █▇███▄███ ███████████▆█  ███████ │ PCIe transfer                    │
-│ █▂█████████████▅██▃█ ███▄█████████ █████████████▅ ███████ │  CPU -> GPU   0.16 / 63 GB/s     │
-│ █████████████████████████████████████████████████ ███████ │  GPU -> CPU   0.02 / 63 GB/s     │
-│ █████████████████████████████████████████████████▅███████ ├──────────────────────────────────┤
-│ █████████████████████████████████████████████████████████ │ PWR 234 / 700 W                  │
-╰───────────────────────────── train.py 15.1G  eval.py 0.5G ───────────────────────────────────╯
+│ ▂      ▁      ▁    ▇   ▆ ▂       ▇ ▅▁   ▆      █        ▁ │ GPU 100%  cores  56% tensor   0% │
+│ █ █▄ ▅▆█▁   ▂ █    █ ▁ █ █ ▁ ▆ ▂▄█ ██ ▄ █▄▁▁▁▁ █  ▂▁▅▁▁▄█ │ MEM  20%         15.6 / 79.6 GiB │
+│ █ ███████▆▆▄█▅█ ▃▄ █ █▇█ █▅█▆█▃███ ██▇█▇██████▄█  ███████ ├──────────────────────────────────┤
+│ █▄█████████████▆██▄█▂███▅█████████▂█████████████▆ ███████ │ PCIe transfer                    │
+│ █████████████████████████████████████████████████▂███████ │  CPU -> GPU   0.16 / 63 GB/s     │
+│ █████████████████████████████████████████████████████████ │  GPU -> CPU   0.02 / 63 GB/s     │
+╰───────────────────────────── train.py 15.1G  eval.py 0.5G ─ PWR 234 / 700 W ─────────────────╯
                                                                                     Esc / q quit
 ```
 
 - One box per GPU: utilization history on the left (0 % at the bottom, 100 % at the top);
   on the right, utilization, memory, PCIe traffic CPU -> GPU and GPU -> CPU next to the link's
-  top speed, and power.
+  top speed.
 - **cores / tensor** (Hopper and newer, e.g. H100): `GPU` counts the time *any* kernel runs,
   so it can read 100 % while most of the chip idles. `cores` is the share of SMs (the GPU's
   compute units) actually busy, `tensor` the Tensor Core (matrix-multiply unit) activity.
@@ -29,7 +27,8 @@ nvmon 0.1.0  gpu-node  2026-09-28 Mon 22:52:10.85                               
   or `SLOWED: hw` (red) when the clock is held back, which also tints the clock; and
   `PCIe DEGRADED: x16 -> x8` (yellow) when the card runs on fewer lanes than it supports, which
   also tints the link speed in the PCIe rows.
-- Bottom edge: running processes (script names for Python) with their memory.
+- Bottom edge: running processes (script names for Python) with their memory, left of the
+  graph | stats divider; power draw / limit right of it.
 - Top line: host, local time, driver / CUDA version and refresh interval.
 - Refreshes every 0.5 s. Up to 8 GPUs fit on one screen; on wide terminals the boxes
   go into two columns.

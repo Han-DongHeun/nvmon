@@ -25,7 +25,7 @@ from typing import NamedTuple, Optional
 __version__ = "0.1.0"
 
 INFO_W = 32                          # width of the stats column
-INFO_ROWS = 6                        # GPU, MEM, PCIe title, CPU->GPU, GPU->CPU, PWR
+INFO_ROWS = 5                        # GPU, MEM, PCIe title, CPU->GPU, GPU->CPU
 CHROME_W = 7                         # "│ " + " │ " + " │" around graph and stats
 MIN_GRAPH_W = 30                     # a narrower graph is not worth a second column
 MAX_INNER_H = 8                      # tallest graph: 8 rows x 8 sub-levels = 64 steps
@@ -400,7 +400,7 @@ def num(value, fmt):
 
 def info(gpu, height):
     s = gpu.now
-    total, limit = num(s.mem_total, "{:.1f}"), num(s.power_limit, "{:.0f}")
+    total = num(s.mem_total, "{:.1f}")
     busy = [("GPU ", "")] + share(s.util, 100)
     if gpu.has_activity:  # "cores" = share of SMs at work, "tensor" = Tensor Core activity
         busy += [("  cores " + share(s.cores, 100)[0][0] + " tensor " + share(s.tensor, 100)[0][0], FAINT)]
@@ -416,16 +416,12 @@ def info(gpu, height):
     mem_row = row([("MEM ", "")] + share(s.mem_used, s.mem_total),
                   [("{} / {} GiB".format(num(s.mem_used, "{:.1f}"), total), "")])
     title, to_gpu, to_cpu = row([("PCIe transfer", "")]), link(" CPU -> GPU ", s.rx), link(" GPU -> CPU ", s.tx)
-    power = row([("PWR {} / {} W".format(num(s.power, "{:.0f}"), limit), "")])
-    # Rules (None) and the PCIe title only appear when there is room: the rule above PWR
-    # goes last, the title before the numbers. PWR stays on the bottom row; spare rows go above it.
-    if height >= 8:
-        return [gpu_row, mem_row, None, title, to_gpu, to_cpu] + [row([])] * (height - 8) + [None, power]
-    if height == 7:
-        return [gpu_row, mem_row, title, to_gpu, to_cpu, None, power]
-    if height == 6:
-        return [gpu_row, mem_row, title, to_gpu, to_cpu, power]
-    return [gpu_row, mem_row, to_gpu, to_cpu, power][:height]
+    # The rule (None) after MEM and the PCIe title only appear when there is room.
+    if height >= 6:
+        return [gpu_row, mem_row, None, title, to_gpu, to_cpu] + [row([])] * (height - 6)
+    if height == 5:
+        return [gpu_row, mem_row, title, to_gpu, to_cpu]
+    return [gpu_row, mem_row, to_gpu, to_cpu][:height]
 
 
 # A horizontal rule across the stats column, joined to the borders.
@@ -450,7 +446,8 @@ def panel(gpu, width, height):
     parts += [] if s.clock is None else [("{:>4} MHz".format(s.clock), s.slowdown[1] if s.slowdown else "")]
     top = edge(width, [("GPU {}".format(gpu.index), BOLD), ("  " + gpu.name, "")], parts)
     split = 2 + graph_w + 1  # column of the graph | stats divider
-    bottom = bottom_edge(width, split, process_label(s.processes, split - 4))
+    power = "PWR {} / {} W".format(num(s.power, "{:.0f}"), num(s.power_limit, "{:.0f}"))
+    bottom = bottom_edge(width, split, process_label(s.processes, split - 4), power)
     body = [[("│ ", DIM)] + g + (RULE if i is None
                                   else [(" │ ", DIM)] + i + [(" │", DIM)])
             for g, i in zip(graph(gpu.history, graph_w, height), info(gpu, height))]
@@ -495,12 +492,16 @@ def process_label(processes, room):
     return label
 
 
-def bottom_edge(width, split, label):
-    """Bottom border with `label` flush right against column `split`, the graph | stats divider."""
+def bottom_edge(width, split, label, note):
+    """Bottom border around column `split`, the graph | stats divider:
+    "╰──── label ─ note ────╯", `label` flush against the divider from the left and `note`
+    starting just right of it (dropped when it does not fit)."""
     label = clip(label, split - 4)  # keep "╰─" and a space on each side
     middle = [(" ", "")] + label + [(" ", "")] if label else []
-    return ([("╰" + "─" * max(0, split - 1 - width_of(middle)), DIM)] + middle
-            + [("─" * max(0, width - split - 1) + "╯", DIM)])
+    rest = width - split - 4 - len(note)  # "─ " + note + " " ... "╯"
+    right = ([("─ ", DIM), (note, ""), (" " + "─" * rest + "╯", DIM)] if rest >= 0
+             else [("─" * max(0, width - split - 1) + "╯", DIM)])
+    return [("╰" + "─" * max(0, split - 1 - width_of(middle)), DIM)] + middle + right
 
 
 def render(gpus, width, height):

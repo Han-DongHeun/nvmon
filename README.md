@@ -3,7 +3,7 @@
 A compact, btop-style NVIDIA GPU monitor for the terminal.
 
 ```
-nvmon 0.1.0  gpu-node  2026-09-28 Mon 22:53:25.47                                    refresh 0.5s
+nvmon 0.1.0  gpu-node  2026-09-28 Mon 22:54:38.55                                    refresh 0.5s
 ╭─ GPU 4  H100 80GB HBM3 ────────────────────────────────────────────────────  50°C  1980 MHz ─╮
 │ ▂      ▁      ▁    ▇   ▆ ▂       ▇ ▅▁   ▆      █        ▁ │ GPU 100%  cores  56% tensor   0% │
 │ █ █▄ ▅▆█▁   ▂ █    █ ▁ █ █ ▁ ▆ ▂▄█ ██ ▄ █▄▁▁▁▁ █  ▂▁▅▁▁▄█ │ MEM  20%         15.6 / 79.6 GiB │
@@ -11,7 +11,7 @@ nvmon 0.1.0  gpu-node  2026-09-28 Mon 22:53:25.47                               
 │ █▄█████████████▆██▄█▂███▅█████████▂█████████████▆ ███████ │ PCIe transfer                    │
 │ █████████████████████████████████████████████████▂███████ │  CPU -> GPU   0.16 / 63 GB/s     │
 │ █████████████████████████████████████████████████████████ │  GPU -> CPU   0.02 / 63 GB/s     │
-╰───────────────────────────── train.py 15.1G  eval.py 0.5G ─ PWR 234 / 700 W ─────────────────╯
+╰───────────────────────────── train.py 15.1G  eval.py 0.5G ───────────────── PWR 234 / 700 W ─╯
                                                                                     Esc / q quit
 ```
 
@@ -28,7 +28,7 @@ nvmon 0.1.0  gpu-node  2026-09-28 Mon 22:53:25.47                               
   `PCIe DEGRADED: x16 -> x8` (yellow) when the card runs on fewer lanes than it supports, which
   also tints the link speed in the PCIe rows.
 - Bottom edge: running processes (script names for Python) with their memory, left of the
-  graph | stats divider; power draw / limit right of it.
+  graph | stats divider; power draw / limit at the right end.
 - Top line: host, local time, driver / CUDA version and refresh interval.
 - Refreshes every 0.5 s. Up to 8 GPUs fit on one screen; on wide terminals the boxes
   go into two columns.

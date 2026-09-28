@@ -493,13 +493,12 @@ def process_label(processes, room):
 
 
 def bottom_edge(width, split, label, note):
-    """Bottom border around column `split`, the graph | stats divider:
-    "╰──── label ─ note ────╯", `label` flush against the divider from the left and `note`
-    starting just right of it (dropped when it does not fit)."""
+    """Bottom border "╰──── label ───── note ─╯": `label` flush against column `split` (the
+    graph | stats divider) from the left, `note` at the right end (dropped when it does not fit)."""
     label = clip(label, split - 4)  # keep "╰─" and a space on each side
     middle = [(" ", "")] + label + [(" ", "")] if label else []
-    rest = width - split - 4 - len(note)  # "─ " + note + " " ... "╯"
-    right = ([("─ ", DIM), (note, ""), (" " + "─" * rest + "╯", DIM)] if rest >= 0
+    rest = width - split - 4 - len(note)  # dashes left of " note ─╯"
+    right = ([("─" * rest, DIM), (" " + note + " ", ""), ("─╯", DIM)] if rest >= 0
              else [("─" * max(0, width - split - 1) + "╯", DIM)])
     return [("╰" + "─" * max(0, split - 1 - width_of(middle)), DIM)] + middle + right
 

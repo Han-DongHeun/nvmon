@@ -416,7 +416,7 @@ def info(gpu, height):
     mem_row = row([("MEM ", "")] + share(s.mem_used, s.mem_total),
                   [("{} / {} GiB".format(num(s.mem_used, "{:.1f}"), total), "")])
     title, to_gpu, to_cpu = row([("PCIe transfer", "")]), link(" CPU -> GPU ", s.rx), link(" GPU -> CPU ", s.tx)
-    power = row([("PWR {} / {} W".format(num(s.power, "{:.0f}"), limit), "")])
+    power = row([("PWR", "")], [("{} / {} W".format(num(s.power, "{:.0f}"), limit), "")])
     # The rule (None) after MEM and the PCIe title only appear when there is room.
     if height >= 7:
         return [gpu_row, mem_row, None, title, to_gpu, to_cpu, power] + [row([])] * (height - 7)

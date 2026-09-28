@@ -14,8 +14,7 @@ On a wide terminal, eight GPUs go into two columns:
 uv tool install nvmon    # or: pipx install nvmon
 ```
 
-No uv? `pip install nvmon` works too, inside whichever environment you use. On a server without
-internet, copy `nvmon.py` over and run it with any Python 3.6+.
+No uv? `pip install nvmon`.
 
 ## Usage
 

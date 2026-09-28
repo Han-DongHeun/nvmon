@@ -3,22 +3,20 @@
 A compact, btop-style NVIDIA GPU monitor for the terminal.
 
 ```
-nvmon 0.1.0  gpu-node  2026-09-28 Mon 21:58:36.82                                refresh 0.5s
+nvmon 0.1.0  gpu-node  2026-09-28 Mon 22:03:59.68                                refresh 0.5s
 ╭─ GPU 6  H100 80GB HBM3 ────────────────────────────────────────────────  49°C  1980 MHz ─╮
-│ ▃  ▁▁▄      ▄    ▇   ▆ ▄   ▂   ▇ ▆▃   ▆      █    ▁   ▃ │ GPU  67%                       │
-│ ██▅███▆▄▄▃▇▃█ ▂▃ █ ▆▄█ █▄▆▄█▂▆██ ██▅█▅██▆▆▆▆▃█  ▆▆█▆▆██ │ MEM  15.6/79.6 GiB             │
-│ █████████████▆██▅█▄███▆█████████▄█████████████▆ ███████ │ PWR  299/700 W                 │
-│ ███████████████████████████████████████████████▇███████ │ TX 6.39 MiB/s   RX  163 MiB/s  │
+│ ▄▂ ▃▃▅    ▁ ▅    █   ▇ ▅ ▁ ▃ ▁▂▇ ▆▄ ▂ ▇▂  ▁▁ █  ▁▁▂▁▁▂▄ │ GPU  67%  MEM 15.6/79.6 GiB    │
+│ ███████▇▇▆█▆█▃▅▆▂█▁█▇█▃█▇█▇█▅███▁███████████▆█▃ ███████ │ PWR 299/700 W                  │
+│ ███████████████████████████████████████████████▅███████ │ TX 6.39 MiB/s   RX  163 MiB/s  │
 ╰─────────────────────────── train.py 15.1G  eval.py 0.5G ─────────────────────────────────╯
-1 GPU   GPU  67%   MEM  16/80 GiB   PWR 299 W                                         q quit
+                                                                                Esc / q quit
 ```
 
 - One box per GPU: utilization history on the left (0 % at the bottom, 100 % at the top),
   utilization, memory, power and PCIe traffic on the right.
-- Top edge: GPU name, temperature (blue when cool, red from about 85 °C), fan and clock.
+- Top edge: GPU name, fan, temperature (blue when cool, red from about 85 °C) and clock.
   Bottom edge: running processes (script names for Python) with their memory.
-- Top line: host, local time, driver / CUDA version. Bottom line: GPU count, average
-  utilization, total memory and total power.
+- Top line: host, local time, driver / CUDA version and refresh interval.
 - Refreshes every 0.5 s. Up to 8 GPUs fit on one screen; on wide terminals the boxes
   go into two columns.
 - **Zero dependencies.** One Python file that talks to the NVML library shipped with the
@@ -41,7 +39,7 @@ ssh HOST 'mkdir -p ~/.local/bin && cat > ~/.local/bin/nvmon && chmod +x ~/.local
 ## Usage
 
 ```bash
-nvmon              # q, Esc or Ctrl+C to quit
+nvmon              # Esc, q or Ctrl+C to quit
 nvmon -i 1         # update every second
 nvmon -g 0,2,4-7   # only these GPUs
 ssh -t HOST nvmon  # over ssh, -t gives the remote program a terminal

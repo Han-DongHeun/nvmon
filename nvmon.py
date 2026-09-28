@@ -25,7 +25,7 @@ from typing import NamedTuple, Optional
 __version__ = "0.1.0"
 
 INFO_W = 30                          # width of the stats column
-INFO_ROWS = 4                        # GPU, MEM, PWR, PCIe
+INFO_ROWS = 3                        # GPU + MEM, PWR, PCIe
 CHROME_W = 7                         # "│ " + " │ " + " │" around graph and stats
 MIN_GRAPH_W = 30                     # a narrower graph is not worth a second column
 MAX_INNER_H = 8                      # tallest graph: 8 rows x 8 sub-levels = 64 steps
@@ -334,9 +334,9 @@ def info(gpu, height):
     s = gpu.now
     total, limit = num(s.mem_total, "{:.1f}"), num(s.power_limit, "{:.0f}")
     lines = [  # used values are padded to the width of their maximum so nothing shifts
-        row([("GPU ", "")] + share(s.util, 100)),
-        row([("MEM  {}/{} GiB".format(num(s.mem_used, "{:.1f}").rjust(len(total)), total), "")]),
-        row([("PWR  {}/{} W".format(num(s.power, "{:.0f}").rjust(len(limit)), limit), "")]),
+        row([("GPU ", "")] + share(s.util, 100)
+            + [("  MEM {}/{} GiB".format(num(s.mem_used, "{:.1f}").rjust(len(total)), total), "")]),
+        row([("PWR {}/{} W".format(num(s.power, "{:.0f}").rjust(len(limit)), limit), "")]),
         row([("TX {}   RX {}".format(rate(s.tx), rate(s.rx)), "")]),
     ]
     return lines[:height] + [row([])] * (height - len(lines))  # a short panel keeps the top lines
@@ -346,8 +346,8 @@ def panel(gpu, width, height):
     graph_w = max(0, width - CHROME_W - INFO_W)
     s = gpu.now
     # Fixed widths keep the right end of the border still while values change.
-    parts = [] if s.temp is None else [("{:>3}°C".format(s.temp), TEMP[min(max(s.temp, 0), 100)])]
-    parts += [] if s.fan is None else [("FAN {:>3}%".format(s.fan), "")]
+    parts = [] if s.fan is None else [("FAN {:>3}%".format(s.fan), "")]
+    parts += [] if s.temp is None else [("{:>3}°C".format(s.temp), TEMP[min(max(s.temp, 0), 100)])]
     parts += [] if s.clock is None else [("{:>4} MHz".format(s.clock), "")]
     note = [seg for i, part in enumerate(parts) for seg in ([("  ", "")] if i else []) + [part]]
     top = edge(width, [("GPU {}".format(gpu.index), BOLD), ("  " + gpu.name, "")], note)
@@ -402,21 +402,6 @@ def render(gpus, width, height):
     return lines + [[(" " * width, "")]] * (height - len(lines))
 
 
-def totals(gpus):
-    """'8 GPUs   GPU  54%   MEM  39/637 GiB   PWR 1243 W' over every GPU shown.
-
-    Each number is padded to the width of its maximum, so the line never shifts.
-    """
-    def total(field):
-        return sum(v for v in (getattr(g.now, field) for g in gpus) if v is not None)
-    utils = [g.now.util for g in gpus if g.now.util is not None]
-    mem, power = "{:.0f}".format(total("mem_total")), "{:.0f}".format(total("power_limit"))
-    return ([("{} GPU{}".format(len(gpus), "s" if len(gpus) > 1 else ""), ""), ("   GPU ", DIM)]
-            + share(sum(utils) / len(utils) if utils else None, 100)
-            + [("   MEM  ", DIM), ("{:.0f}".format(total("mem_used")).rjust(len(mem)) + "/" + mem + " GiB", ""),
-               ("   PWR ", DIM), ("{:.0f}".format(total("power")).rjust(len(power)) + " W", "")])
-
-
 def spread(width, left, right):
     """`left`, then `right` flush right: one line of exactly `width` cells."""
     room = width - width_of(right)
@@ -434,9 +419,9 @@ def header(width, interval, driver):
     return spread(width, left, right)
 
 
-def footer(width, gpus):
-    """Bottom line: totals over all GPUs | how to quit."""
-    return spread(width, totals(gpus), [("q quit", DIM)])
+def footer(width):
+    """Bottom line: how to quit."""
+    return spread(width, [], [("Esc / q quit", DIM)])
 
 
 def paint(lines):
@@ -588,7 +573,7 @@ def main():
                 list(pool.map(Gpu.poll, gpus))
                 width, height = os.get_terminal_size()
                 screen.draw([header(width, args.interval, driver)] + render(gpus, width, height - 2)
-                            + [footer(width, gpus)])
+                            + [footer(width)])
                 # Fixed-rate ticks; a late tick restarts the schedule instead of bursting.
                 now = time.monotonic()
                 deadline = max(deadline + args.interval, now)

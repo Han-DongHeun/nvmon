@@ -59,7 +59,7 @@ TEMP = _gradient([(30, (95, 135, 215)), (45, (95, 175, 175)), (60, GREEN), (72, 
 # Warnings on the top edge: yellow = worth a look, orange = slowed, red = act.
 WARN, SLOW, ALERT = _rgb(YELLOW), _rgb(ORANGE), _rgb(RED)
 # Everything else sticks to the 256-colour palette.
-DIM, FAINT, PROC = _fg(240), _fg(238), _fg(110)
+DIM, FAINT, PROC = _fg(240), _fg(236), _fg(110)
 BOLD, RESET = "\x1b[1m", "\x1b[0m"
 
 

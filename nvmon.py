@@ -25,7 +25,7 @@ from typing import NamedTuple, Optional
 __version__ = "0.1.0"
 
 INFO_W = 32                          # width of the stats column
-INFO_ROWS = 5                        # GPU, MEM, PWR, CPU->GPU, GPU->CPU
+INFO_ROWS = 4                        # GPU, MEM, CPU->GPU, GPU->CPU
 CHROME_W = 7                         # "│ " + " │ " + " │" around graph and stats
 MIN_GRAPH_W = 30                     # a narrower graph is not worth a second column
 MAX_INNER_H = 8                      # tallest graph: 8 rows x 8 sub-levels = 64 steps
@@ -59,7 +59,7 @@ TEMP = _gradient([(30, (95, 135, 215)), (45, (95, 175, 175)), (60, GREEN), (72, 
 # Warnings on the top edge: yellow = worth a look, orange = slowed, red = act.
 WARN, SLOW, ALERT = _rgb(YELLOW), _rgb(ORANGE), _rgb(RED)
 # Everything else sticks to the 256-colour palette.
-DIM, PROC = _fg(240), _fg(110)
+DIM, FAINT, PROC = _fg(240), _fg(238), _fg(110)
 BOLD, RESET = "\x1b[1m", "\x1b[0m"
 
 
@@ -400,10 +400,10 @@ def num(value, fmt):
 
 def info(gpu, height):
     s = gpu.now
-    total, limit = num(s.mem_total, "{:.1f}"), num(s.power_limit, "{:.0f}")
+    total = num(s.mem_total, "{:.1f}")
     busy = [("GPU ", "")] + share(s.util, 100)
     if gpu.has_activity:  # "cores" = share of SMs at work, "tensor" = Tensor Core activity
-        busy += [("  cores " + share(s.cores, 100)[0][0] + " tensor " + share(s.tensor, 100)[0][0], DIM)]
+        busy += [("  cores " + share(s.cores, 100)[0][0] + " tensor " + share(s.tensor, 100)[0][0], FAINT)]
     # A link's top speed: its generation's per-lane rate times the lanes it runs on now.
     lanes = s.pcie_width or gpu.pcie_max_width
     top = PCIE_LANE_GBS.get(gpu.pcie_max_gen, 0) * (lanes or 0)
@@ -415,7 +415,6 @@ def info(gpu, height):
     lines = [
         row(busy),
         row([("MEM ", "")] + share(s.mem_used, s.mem_total), [("{} / {} GiB".format(num(s.mem_used, "{:.1f}"), total), "")]),
-        row([("PWR {} / {} W".format(num(s.power, "{:.0f}"), limit), "")]),
         link("CPU -> GPU ", s.rx),
         link("GPU -> CPU ", s.tx),
     ]
@@ -440,8 +439,9 @@ def panel(gpu, width, height):
     parts += [] if s.fan is None else [("FAN {:>3}%".format(s.fan), "")]
     parts += [] if s.temp is None else [("{:>3}°C".format(s.temp), TEMP[min(max(s.temp, 0), 100)])]
     parts += [] if s.clock is None else [("{:>4} MHz".format(s.clock), s.slowdown[1] if s.slowdown else "")]
-    note = [seg for i, part in enumerate(parts) for seg in ([("  ", "")] if i else []) + [part]]
-    top = edge(width, [("GPU {}".format(gpu.index), BOLD), ("  " + gpu.name, "")], note)
+    limit = num(s.power_limit, "{:.0f}")  # the power is padded to the limit's width so the edge holds still
+    power = "  PWR {} / {} W".format(num(s.power, "{:.0f}").rjust(len(limit)), limit)
+    top = edge(width, [("GPU {}".format(gpu.index), BOLD), ("  " + gpu.name, ""), (power, "")], parts)
     split = 2 + graph_w + 1  # column of the graph | stats divider
     bottom = bottom_edge(width, split, process_label(s.processes, split - 4))
     body = [[("│ ", DIM)] + g + ([(" ├" + "─" * (INFO_W + 2) + "┤", DIM)] if i is None
@@ -450,10 +450,27 @@ def panel(gpu, width, height):
     return [top] + body + [bottom]
 
 
-def edge(width, label, note):
-    """Top border, "╭─ label ───── note ─╮"; a long label is cut to fit."""
-    tail = ([(" ", "")] + note + [(" ", "")] if note else []) + [("─╮", DIM)]
-    label = clip(label, width - 4 - width_of(tail))  # 4 = "╭─" + a space on each side of the label
+def edge(width, label, parts):
+    """Top border, "╭─ label ───── parts ─╮", fitted to `width`.
+
+    The GPU number (the label's first segment) always shows: when space runs out the right-hand
+    parts go first, from the end (clock, then temperature, ...), so warnings go last. The other
+    label segments show whole or not at all, so nothing is left half-written.
+    """
+    parts = list(parts)
+    while True:
+        note = [seg for i, part in enumerate(parts) for seg in ([("  ", "")] if i else []) + [part]]
+        tail = ([(" ", "")] + note + [(" ", "")] if note else []) + [("─╮", DIM)]
+        room = width - 4 - width_of(tail)  # 4 = "╭─" + a space on each side of the label
+        if not parts or room >= width_of(label[:1]):
+            break
+        parts.pop()
+    kept = clip(label[:1], room)
+    for segment in label[1:]:
+        if width_of(kept) + len(segment[0]) > room:
+            break
+        kept.append(segment)
+    label = kept
     head = [("╭─", DIM)] + ([(" ", "")] + label + [(" ", "")] if label else [])
     return head + [("─" * max(0, width - width_of(head) - width_of(tail)), DIM)] + tail
 

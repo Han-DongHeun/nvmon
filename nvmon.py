@@ -24,10 +24,8 @@ from typing import NamedTuple, Optional
 
 __version__ = "0.1.0"
 
-INFO_W = 36                          # width of the stats column
+INFO_W = 28                          # width of the stats column
 INFO_ROWS = 4                        # GPU, MEM, PWR, PCIe
-SUFFIX_W = 11                        # numbers after the GPU bar: "  98%  52°C"
-BAR_W = INFO_W - 4 - 1 - SUFFIX_W    # "GPU " + bar + " " + numbers
 CHROME_W = 7                         # "│ " + " │ " + " │" around graph and stats
 MIN_GRAPH_W = 30                     # a narrower graph is not worth a second column
 MAX_INNER_H = 8                      # tallest graph: 8 rows x 8 sub-levels = 64 steps
@@ -39,16 +37,27 @@ def _fg(n):
     return "\x1b[38;5;{}m".format(n)
 
 
-# Fixed 256-colour palette: identical over ssh, tmux and local terminals.
-# HEAT runs green -> yellow -> orange -> red in eight steps.
-HEAT = [_fg(n) for n in (71, 107, 143, 185, 179, 173, 167, 161)]
-DIM = _fg(240)
+def _gradient(stops, steps=101):
+    """24-bit colours evenly interpolated through the RGB `stops`."""
+    colours = []
+    for i in range(steps):
+        t = i / (steps - 1) * (len(stops) - 1)
+        k = min(int(t), len(stops) - 2)
+        rgb = (round(a + (b - a) * (t - k)) for a, b in zip(stops[k], stops[k + 1]))
+        colours.append("\x1b[38;2;{};{};{}m".format(*rgb))
+    return colours
+
+
+# Utilization uses a 101-step truecolor gradient, green -> yellow -> orange -> red;
+# everything else sticks to the 256-colour palette.
+HEAT = _gradient([(95, 175, 95), (175, 215, 95), (215, 215, 95), (215, 175, 95), (215, 135, 95), (215, 95, 95)])
+DIM, PROC = _fg(240), _fg(110)
 BOLD, RESET = "\x1b[1m", "\x1b[0m"
 
 
 def heat(t):
     """Colour for a position t in [0, 1] of the 0-100 % scale."""
-    return HEAT[min(int(t * len(HEAT)), len(HEAT) - 1)]
+    return HEAT[round(min(max(t, 0), 1) * 100)]
 
 
 # ── NVML (libnvidia-ml / nvml.dll, part of the NVIDIA driver) ───────────────
@@ -267,34 +276,40 @@ def pad(line, width):
 
 
 def graph(history, width, height):
-    """Stacked block chart, newest sample on the right, top row first."""
+    """Stacked block chart, newest sample on the right, top row first.
+
+    Each cell takes the colour of the level its top reaches: full cells shade row by row,
+    and the ragged top edge shows the exact colour of each value.
+    """
     vals = list(history)[-width:] if width > 0 else []
     steps = height * 8
     # Any non-zero value gets at least one sub-level so light load stays visible.
     levels = [0] * (width - len(vals)) + [max(round(v * steps / 100), 1 if v else 0) for v in vals]
-    return [[("".join(BLOCKS[min(8, max(0, lv - r * 8))] for lv in levels), heat((r + 0.5) / height))]
-            for r in reversed(range(height))]
+    rows = []
+    for r in reversed(range(height)):
+        fills = [min(8, max(0, lv - r * 8)) for lv in levels]
+        # Blank and full cells share the row colour so they join into long runs.
+        cells = [(BLOCKS[f], heat((r * 8 + (f or 8)) / steps)) for f in fills]
+        rows.append([("".join(text for text, _ in run), style)
+                     for style, run in itertools.groupby(cells, key=lambda cell: cell[1])])
+    return rows
 
 
-def bar(frac):
-    """Horizontal meter coloured along the heat scale."""
-    filled = round(min(max(frac or 0, 0), 1) * BAR_W)
-    cells = [heat(i / BAR_W) if i < filled else DIM for i in range(BAR_W)]
-    return [("■" * len(list(run)), style) for style, run in itertools.groupby(cells)]
+def row(left, right=()):
+    """One stats line: `left`, then the `right` segments flush right; exactly INFO_W cells."""
+    room = INFO_W - width_of(right)
+    return pad(clip(left, room - 1 if right else room), room) + list(right)
 
 
-def row(left, right=""):
-    """One stats line: `left`, then `right` flush right; exactly INFO_W cells."""
-    room = INFO_W - len(right)
-    return pad(clip(left, room - 1 if right else room), room) + [(right, "")]
+def share(part, whole):
+    """Right-hand percentage, coloured by its value."""
+    if part is None or not whole:
+        return [("   -", "")]
+    return [("{:.0f}%".format(100 * part / whole).rjust(4), heat(part / whole))]
 
 
 def num(value, fmt):
     return "-" if value is None else fmt.format(value)
-
-
-def percent(part, whole):
-    return "{:.0f}%".format(100 * part / whole) if part is not None and whole else "-"
 
 
 def rate(kib):
@@ -311,15 +326,13 @@ def rate(kib):
 
 def info(gpu, height):
     s = gpu.now
-    lines = [
-        row([("GPU ", "")] + bar(None if s.util is None else s.util / 100),
-            num(s.util, "{}%").rjust(5) + num(s.temp, "{}°C").rjust(6)),
-        # MEM and PWR show their share in the same column as the GPU utilization.
+    lines = [  # the three percentages share one right-hand column
+        row([("GPU", "")], share(s.util, 100)),
         row([("MEM  {} / {} GiB".format(num(s.mem_used, "{:.1f}"), num(s.mem_total, "{:.1f}")), "")],
-            percent(s.mem_used, s.mem_total).rjust(5) + " " * 6),
+            share(s.mem_used, s.mem_total)),
         row([("PWR  {} / {} W".format(num(s.power, "{:.0f}"), num(s.power_limit, "{:.0f}")), "")],
-            percent(s.power, s.power_limit).rjust(5) + " " * 6),
-        row([("TX {} RX {}".format(rate(s.tx), rate(s.rx)), "")], "" if s.fan is None else "FAN {}%".format(s.fan)),
+            share(s.power, s.power_limit)),
+        row([("TX {} RX {}".format(rate(s.tx), rate(s.rx)), "")]),
     ]
     return lines[:height] + [row([])] * (height - len(lines))  # a short panel keeps the top lines
 
@@ -327,10 +340,13 @@ def info(gpu, height):
 def panel(gpu, width, height):
     graph_w = max(0, width - CHROME_W - INFO_W)
     s = gpu.now
-    top = edge(width, "╭╮", [("GPU {}".format(gpu.index), BOLD), ("  " + gpu.name, "")],
-               "" if s.clock is None else "{} MHz".format(s.clock))
-    procs = "  ".join(name if mem is None else "{} {:.1f}G".format(name, mem) for name, mem in s.processes)
-    bottom = edge(width, "╰╯", [(procs, "")] if procs else [])
+    note = "  ".join(text.format(v) for text, v in (("FAN {}%", s.fan), ("{}°C", s.temp), ("{} MHz", s.clock))
+                     if v is not None)
+    top = edge(width, "╭╮", [("GPU {}".format(gpu.index), BOLD), ("  " + gpu.name, "")], note)
+    procs = []
+    for name, mem in s.processes:
+        procs += [("  " if procs else "", ""), (name, PROC)] + ([] if mem is None else [(" {:.1f}G".format(mem), DIM)])
+    bottom = edge(width, "╰╯", procs)
     body = [[("│ ", DIM)] + g + [(" │ ", DIM)] + i + [(" │", DIM)]
             for g, i in zip(graph(gpu.history, graph_w, height), info(gpu, height))]
     return [top] + body + [bottom]
@@ -384,8 +400,19 @@ def header(width, interval, gpus, driver):
 
 
 def paint(lines):
-    return "\r\n".join("".join(style + text + RESET if style else text for text, style in line)
-                       for line in lines)
+    """Join lines into one string, sending a style code only where the style changes."""
+    out, current = [], ""
+    for i, line in enumerate(lines):
+        if i:
+            out.append("\r\n")
+        for text, style in line:
+            if style != current:
+                # One colour replaces another directly; anything else (bold, plain) needs a reset first.
+                colours = style.startswith("\x1b[38") and current.startswith("\x1b[38")
+                out.append(style if colours else RESET + style)
+                current = style
+            out.append(text)
+    return "".join(out) + RESET
 
 
 # ── terminal ─────────────────────────────────────────────────────────────────

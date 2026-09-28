@@ -1,6 +1,6 @@
 # nvmon
 
-NVIDIA GPU monitor for the terminal. Single Python file, no dependencies.
+A fancy NVIDIA GPU monitor for the terminal. Single Python file, no dependencies.
 
 ![nvmon showing four H100 GPUs](https://raw.githubusercontent.com/Han-DongHeun/nvmon/main/docs/screenshot.png)
 

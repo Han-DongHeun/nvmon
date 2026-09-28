@@ -24,8 +24,8 @@ from typing import NamedTuple, Optional
 
 __version__ = "0.1.0"
 
-INFO_W = 30                          # width of the stats column
-INFO_ROWS = 4                        # GPU, MEM, PWR, PCIe
+INFO_W = 32                          # width of the stats column
+INFO_ROWS = 5                        # GPU, MEM, PWR, CPU->GPU, GPU->CPU
 CHROME_W = 7                         # "│ " + " │ " + " │" around graph and stats
 MIN_GRAPH_W = 30                     # a narrower graph is not worth a second column
 MAX_INNER_H = 8                      # tallest graph: 8 rows x 8 sub-levels = 64 steps
@@ -37,14 +37,17 @@ def _fg(n):
     return "\x1b[38;5;{}m".format(n)
 
 
+def _rgb(rgb):
+    return "\x1b[38;2;{};{};{}m".format(*rgb)
+
+
 def _gradient(stops):
     """Truecolor codes for 0..100, interpolated through (position, (r, g, b)) `stops`."""
     colours = []
     for i in range(101):
         x = min(max(i, stops[0][0]), stops[-1][0])
         (x0, c0), (x1, c1) = next(pair for pair in zip(stops, stops[1:]) if x <= pair[1][0])
-        rgb = (round(a + (b - a) * (x - x0) / (x1 - x0)) for a, b in zip(c0, c1))
-        colours.append("\x1b[38;2;{};{};{}m".format(*rgb))
+        colours.append(_rgb([round(a + (b - a) * (x - x0) / (x1 - x0)) for a, b in zip(c0, c1)]))
     return colours
 
 
@@ -53,6 +56,8 @@ GREEN, YELLOW, ORANGE, RED = (95, 175, 95), (215, 215, 95), (215, 135, 95), (215
 HEAT = _gradient([(0, GREEN), (20, (175, 215, 95)), (40, YELLOW), (60, (215, 175, 95)), (80, ORANGE), (100, RED)])
 # Temperature in °C: idle GPUs sit at 30-45, busy ones at 60-80, most throttle from about 85-90.
 TEMP = _gradient([(30, (95, 135, 215)), (45, (95, 175, 175)), (60, GREEN), (72, YELLOW), (80, ORANGE), (88, RED)])
+# Warnings on the top edge: yellow = worth a look, orange = slowed, red = act.
+WARN, SLOW, ALERT = _rgb(YELLOW), _rgb(ORANGE), _rgb(RED)
 # Everything else sticks to the 256-colour palette.
 DIM, PROC = _fg(240), _fg(110)
 BOLD, RESET = "\x1b[1m", "\x1b[0m"
@@ -98,6 +103,32 @@ class ProcessInfo(ctypes.Structure):  # nvmlProcessInfo_v2_t
 NVML_VALUE_NOT_AVAILABLE = 2**64 - 1  # usedGpuMemory under Windows WDDM
 MAX_PROCESSES = 64
 
+
+class GpmSupport(ctypes.Structure):  # nvmlGpmSupport_t
+    _fields_ = [("version", c_uint), ("isSupportedDevice", c_uint)]
+
+
+class GpmMetric(ctypes.Structure):  # nvmlGpmMetric_t
+    _fields_ = [("metricId", c_uint), ("nvmlReturn", c_int), ("value", ctypes.c_double),
+                ("shortName", ctypes.c_char_p), ("longName", ctypes.c_char_p), ("unit", ctypes.c_char_p)]
+
+
+class GpmMetricsGet(ctypes.Structure):  # nvmlGpmMetricsGet_t, sized for the two metrics we ask for
+    _fields_ = [("version", c_uint), ("numMetrics", c_uint), ("sample1", c_void_p), ("sample2", c_void_p),
+                ("metrics", GpmMetric * 2)]
+
+
+NVML_GPM_METRIC_SM_UTIL, NVML_GPM_METRIC_ANY_TENSOR_UTIL = 2, 5
+
+# nvmlClocksEventReason bits that mean "held back", most serious first. The others (idle,
+# application clocks, sync boost, display) are normal operation and stay hidden.
+SLOWDOWNS = [(0x20 | 0x40, "TOO HOT", ALERT),        # software / hardware thermal slowdown
+             (0x08 | 0x80, "HW SLOWDOWN", ALERT),    # hardware slowdown / power brake
+             (0x04, "POWER LIMIT", SLOW)]            # software power cap
+
+# PCIe payload bandwidth per lane and direction, GB/s, by link generation.
+PCIE_LANE_GBS = {1: 0.25, 2: 0.5, 3: 0.985, 4: 1.969, 5: 3.938, 6: 7.563}
+
 # NVML_STRUCT_VERSION(): struct size with the version number in the top byte.
 MEMORY_V2 = ctypes.sizeof(MemoryV2) | 2 << 24
 TEMPERATURE_V1 = ctypes.sizeof(TemperatureV1) | 1 << 24
@@ -140,8 +171,12 @@ class Sample(NamedTuple):
     clock: Optional[int]          # graphics clock, MHz
     mem_used: Optional[float]     # GiB
     mem_total: Optional[float]    # GiB
-    tx: Optional[int]             # PCIe, KiB/s
-    rx: Optional[int]             # PCIe, KiB/s
+    tx: Optional[int]             # PCIe GPU -> CPU, KiB/s
+    rx: Optional[int]             # PCIe CPU -> GPU, KiB/s
+    pcie_width: Optional[int]     # current link width (lanes)
+    cores: Optional[float]        # % of SMs busy (GPM, Hopper and newer)
+    tensor: Optional[float]       # % Tensor Core activity (GPM)
+    slowdown: Optional[tuple]     # (label, colour) when the clock is held back
     processes: list               # [(name, GiB or None)], biggest first
 
 
@@ -154,6 +189,10 @@ class Gpu:
         self.name = name[len("NVIDIA "):] if name.startswith("NVIDIA ") else name
         self.history = deque(maxlen=HISTORY)
         self.now = None
+        self.pcie_max_gen = self._uint("nvmlDeviceGetMaxPcieLinkGeneration")
+        self.pcie_max_width = self._uint("nvmlDeviceGetMaxPcieLinkWidth")
+        self._gpm = self._gpm_samples()
+        self.has_activity = self._gpm is not None
 
     def _ok(self, fn, *args):
         return getattr(self.nv, fn)(self.handle, *args) == NVML_SUCCESS
@@ -179,6 +218,42 @@ class Gpu:
             if self._ok("nvmlDeviceGetTemperatureV", byref(temp)):
                 return temp.temperature
         return self._uint("nvmlDeviceGetTemperature", NVML_TEMPERATURE_GPU)
+
+    def _gpm_samples(self):
+        """Two GPM sample buffers, or None where GPM is unavailable (it needs Hopper or newer)."""
+        support = GpmSupport(version=1)
+        if not (hasattr(self.nv, "nvmlGpmQueryDeviceSupport")
+                and self._ok("nvmlGpmQueryDeviceSupport", byref(support)) and support.isSupportedDevice):
+            return None
+        samples = [c_void_p(), c_void_p()]
+        if any(self.nv.nvmlGpmSampleAlloc(byref(sample)) != NVML_SUCCESS for sample in samples):
+            return None
+        # Take the first sample now, on the main thread: NVML crashes when a device's
+        # first GPM sample is taken from several threads at once.
+        if self.nv.nvmlGpmSampleGet(self.handle, samples[0]) != NVML_SUCCESS:
+            return None
+        return samples  # [previous, current], kept for the whole run
+
+    def _activity(self):
+        """(cores %, tensor %) between this poll and the previous one."""
+        if self._gpm is None or self.nv.nvmlGpmSampleGet(self.handle, self._gpm[1]) != NVML_SUCCESS:
+            return None, None
+        previous, current = self._gpm
+        self._gpm.reverse()  # this sample is the baseline for the next poll
+        query = GpmMetricsGet(version=1, numMetrics=2, sample1=previous, sample2=current)
+        query.metrics[0].metricId, query.metrics[1].metricId = NVML_GPM_METRIC_SM_UTIL, NVML_GPM_METRIC_ANY_TENSOR_UTIL
+        if self.nv.nvmlGpmMetricsGet(byref(query)) != NVML_SUCCESS:
+            return None, None
+        return tuple(None if m.nvmlReturn != NVML_SUCCESS else m.value for m in query.metrics)
+
+    def _slowdown(self):
+        """(label, colour) for why the clock is held back, or None."""
+        fn = ("nvmlDeviceGetCurrentClocksEventReasons" if hasattr(self.nv, "nvmlDeviceGetCurrentClocksEventReasons")
+              else "nvmlDeviceGetCurrentClocksThrottleReasons")  # the pre-R535 name
+        reasons = c_ulonglong()
+        if not self._ok(fn, byref(reasons)):
+            return None
+        return next(((label, colour) for bits, label, colour in SLOWDOWNS if reasons.value & bits), None)
 
     def _processes(self):
         infos, count = (ProcessInfo * MAX_PROCESSES)(), c_uint(MAX_PROCESSES)
@@ -218,6 +293,7 @@ class Gpu:
         used, total = self._memory()
         power = self._uint("nvmlDeviceGetPowerUsage")            # mW
         limit = self._uint("nvmlDeviceGetEnforcedPowerLimit")    # mW
+        cores, tensor = self._activity()
         self.now = Sample(
             util=util,
             temp=self._temperature(),
@@ -230,6 +306,10 @@ class Gpu:
             # Each PCIe query samples a counter for ~20 ms, hence the parallel polling.
             tx=self._uint("nvmlDeviceGetPcieThroughput", NVML_PCIE_UTIL_TX_BYTES),
             rx=self._uint("nvmlDeviceGetPcieThroughput", NVML_PCIE_UTIL_RX_BYTES),
+            pcie_width=self._uint("nvmlDeviceGetCurrPcieLinkWidth"),
+            cores=cores,
+            tensor=tensor,
+            slowdown=self._slowdown(),
             processes=self._processes(),
         )
         self.history.append(util or 0)
@@ -334,12 +414,20 @@ def info(gpu, height):
     s = gpu.now
     total, limit = num(s.mem_total, "{:.1f}"), num(s.power_limit, "{:.0f}")
     # GPU and MEM percentages line up in one column; their absolute values sit flush right.
+    busy = [("GPU ", "")] + share(s.util, 100)
+    if gpu.has_activity:  # "cores" = share of SMs at work, "tensor" = Tensor Core activity
+        busy += [("  cores ", DIM)] + share(s.cores, 100) + [(" tensor ", DIM)] + share(s.tensor, 100)
+    # A link's top speed: its generation's per-lane rate times the lanes it runs on now.
+    lanes = s.pcie_width or gpu.pcie_max_width
+    top = PCIE_LANE_GBS.get(gpu.pcie_max_gen, 0) * (lanes or 0)
+    cap = [("/ {:.0f} GB/s".format(top), DIM)] if top else []
     lines = [
-        row([("GPU ", "")] + share(s.util, 100)),
+        row(busy),
         row([("MEM ", "")] + share(s.mem_used, s.mem_total),
             [("{}/{} GiB".format(num(s.mem_used, "{:.1f}"), total), "")]),
         row([("PWR {}/{} W".format(num(s.power, "{:.0f}"), limit), "")]),
-        row([("TX {}   RX {}".format(rate(s.tx), rate(s.rx)), "")]),
+        row([("CPU→GPU " + rate(s.rx), "")], cap),
+        row([("GPU→CPU " + rate(s.tx), "")], cap),
     ]
     if height > len(lines):  # room to spare: a rule (None) after MEM sets GPU and MEM apart
         lines.insert(2, None)
@@ -350,9 +438,12 @@ def panel(gpu, width, height):
     graph_w = max(0, width - CHROME_W - INFO_W)
     s = gpu.now
     # Fixed widths keep the right end of the border still while values change.
-    parts = [] if s.fan is None else [("FAN {:>3}%".format(s.fan), "")]
+    parts = [] if s.slowdown is None else [s.slowdown]
+    if s.pcie_width and gpu.pcie_max_width and s.pcie_width < gpu.pcie_max_width:  # e.g. a loose card
+        parts += [("PCIe x{}/{}".format(s.pcie_width, gpu.pcie_max_width), WARN)]
+    parts += [] if s.fan is None else [("FAN {:>3}%".format(s.fan), "")]
     parts += [] if s.temp is None else [("{:>3}°C".format(s.temp), TEMP[min(max(s.temp, 0), 100)])]
-    parts += [] if s.clock is None else [("{:>4} MHz".format(s.clock), "")]
+    parts += [] if s.clock is None else [("{:>4} MHz".format(s.clock), s.slowdown[1] if s.slowdown else "")]
     note = [seg for i, part in enumerate(parts) for seg in ([("  ", "")] if i else []) + [part]]
     top = edge(width, [("GPU {}".format(gpu.index), BOLD), ("  " + gpu.name, "")], note)
     split = 2 + graph_w + 1  # column of the graph | stats divider

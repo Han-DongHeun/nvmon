@@ -3,20 +3,29 @@
 A compact, btop-style NVIDIA GPU monitor for the terminal.
 
 ```
-nvmon 0.1.0  gpu-node  2026-09-28 Mon 22:05:00.07                                refresh 0.5s
-╭─ GPU 6  H100 80GB HBM3 ────────────────────────────────────────────────  49°C  1980 MHz ─╮
-│ ▃  ▁▁▄      ▄    ▇   ▆ ▄   ▂   ▇ ▆▃   ▆      █    ▁   ▃ │ GPU  67%                       │
-│ ██▅███▆▄▄▃▇▃█ ▂▃ █ ▆▄█ █▄▆▄█▂▆██ ██▅█▅██▆▆▆▆▃█  ▆▆█▆▆██ │ MEM  20%         15.6/79.6 GiB │
-│ █████████████▆██▅█▄███▆█████████▄█████████████▆ ███████ │ PWR  43%             299/700 W │
-│ ███████████████████████████████████████████████▇███████ │  TX 6.39 MiB/s   RX  163 MiB/s │
-╰─────────────────────────── train.py 15.1G  eval.py 0.5G ─────────────────────────────────╯
-                                                                                Esc / q quit
+nvmon 0.1.0  gpu-node  2026-09-28 Mon 22:29:26.46                                    refresh 0.5s
+╭─ GPU 4  H100 80GB HBM3 ────────────────────────────────────────────────────  50°C  1980 MHz ─╮
+│ ▃ ▁    ▂      ▂    ▇   ▆ ▃       ▇ ▅▂   ▆      █        ▂ │ GPU 100%  cores  56% tensor   0% │
+│ █ █▆▃▇██▃▁▁ ▄ █    █ ▃▂█ █ ▄▁█ ▄▆█ ██▂▆▂█▆▃▃▄▄ █  ▄▄▇▄▄▆█ │ MEM  20%           15.6/79.6 GiB │
+│ █ █████████▇███▂▆▇▁█ ███▂█████▆███ █████████████▂ ███████ │ PWR 234/700 W                    │
+│ ████████████████████▇█████████████▇██████████████ ███████ │ CPU→GPU  159 MiB/s     / 63 GB/s │
+│ █████████████████████████████████████████████████████████ │ GPU→CPU 22.8 MiB/s     / 63 GB/s │
+╰───────────────────────────── train.py 15.1G  eval.py 0.5G ───────────────────────────────────╯
+                                                                                    Esc / q quit
 ```
 
-- One box per GPU: utilization history on the left (0 % at the bottom, 100 % at the top),
-  utilization, memory, power and PCIe traffic on the right.
-- Top edge: GPU name, fan, temperature (blue when cool, red from about 85 °C) and clock.
-  Bottom edge: running processes (script names for Python) with their memory.
+- One box per GPU: utilization history on the left (0 % at the bottom, 100 % at the top);
+  on the right, utilization, memory, power and PCIe traffic in each direction with the link's
+  top speed.
+- **cores / tensor** (Hopper and newer, e.g. H100): `GPU` counts the time *any* kernel runs,
+  so it can read 100 % while most of the chip idles. `cores` is the share of SMs (the GPU's
+  compute units) actually busy, `tensor` the Tensor Core (matrix-multiply unit) activity.
+  They are hidden on GPUs that cannot report them.
+- Top edge: GPU name, warnings, fan, temperature (blue when cool, red from about 85 °C) and
+  clock. Warnings appear only when something is off: `POWER LIMIT` (orange), `TOO HOT` or
+  `HW SLOWDOWN` (red) when the clock is held back, which also tints the clock; `PCIe x8/16`
+  (yellow) when the card runs on fewer lanes than it supports.
+- Bottom edge: running processes (script names for Python) with their memory.
 - Top line: host, local time, driver / CUDA version and refresh interval.
 - Refreshes every 0.5 s. Up to 8 GPUs fit on one screen; on wide terminals the boxes
   go into two columns.

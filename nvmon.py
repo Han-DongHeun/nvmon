@@ -333,13 +333,12 @@ def rate(kib):
 def info(gpu, height):
     s = gpu.now
     total, limit = num(s.mem_total, "{:.1f}"), num(s.power_limit, "{:.0f}")
-    # Percentages line up in one column; the absolute values sit flush right.
+    # GPU and MEM percentages line up in one column; absolute values sit flush right.
     lines = [
         row([("GPU ", "")] + share(s.util, 100)),
         row([("MEM ", "")] + share(s.mem_used, s.mem_total),
             [("{}/{} GiB".format(num(s.mem_used, "{:.1f}"), total), "")]),
-        row([("PWR ", "")] + share(s.power, s.power_limit),
-            [("{}/{} W".format(num(s.power, "{:.0f}"), limit), "")]),
+        row([("PWR", "")], [("{}/{} W".format(num(s.power, "{:.0f}"), limit), "")]),
         row([], [("TX {}   RX {}".format(rate(s.tx), rate(s.rx)), "")]),
     ]
     if height < len(lines):  # a short panel keeps the most important lines

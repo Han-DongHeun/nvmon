@@ -124,9 +124,9 @@ class GpmMetricsGet(ctypes.Structure):  # nvmlGpmMetricsGet_t, sized for GPM_MET
 
 # nvmlClocksEventReason bits that mean "held back", most serious first. The others (idle,
 # application clocks, sync boost, display) are normal operation and stay hidden.
-SLOWDOWNS = [(0x20 | 0x40, "SLOWED: heat", ALERT),   # software / hardware thermal slowdown
-             (0x08 | 0x80, "SLOWED: hw", ALERT),     # hardware slowdown / power brake
-             (0x04, "SLOWED: power", SLOW)]          # software power cap
+SLOWDOWNS = [(0x20 | 0x40, "SLOWED: too hot", ALERT),   # software / hardware thermal slowdown
+             (0x08 | 0x80, "SLOWED: hw brake", ALERT),     # hardware slowdown / power brake
+             (0x04, "SLOWED: power cap", SLOW)]          # software power cap
 
 # PCIe payload bandwidth per lane and direction, GB/s, by link generation.
 PCIE_LANE_GBS = {1: 0.25, 2: 0.5, 3: 0.985, 4: 1.969, 5: 3.938, 6: 7.563}

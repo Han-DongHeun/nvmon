@@ -30,7 +30,7 @@ ssh -t HOST nvmon  # over ssh: -t gives it a terminal
 - **MEM**, **PCIe** traffic in each direction against the link's top speed, power, temperature,
   fan and clock.
 - Processes on each GPU, grouped by account (your own unlabelled), script names for Python.
-- Warnings only when something is off: `SLOWED: power | heat | hw` when the clock is held back,
+- Warnings only when something is off: `SLOWED: power cap | too hot | hw brake` when the clock is held back,
   `PCIe DEGRADED: x16 -> x8` when the card runs on fewer lanes than it supports.
 
 ## Notes

@@ -342,7 +342,10 @@ def info(gpu, height):
             [("{}/{} W".format(num(s.power, "{:.0f}"), limit), "")]),
         row([], [("TX {}   RX {}".format(rate(s.tx), rate(s.rx)), "")]),
     ]
-    return lines[:height] + [row([])] * (height - len(lines))  # a short panel keeps the top lines
+    if height < len(lines):  # a short panel keeps the most important lines
+        return lines[:height]
+    # GPU and MEM hug the top edge, PWR and PCIe the bottom edge.
+    return lines[:2] + [row([])] * (height - len(lines)) + lines[2:]
 
 
 def panel(gpu, width, height):

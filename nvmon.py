@@ -25,7 +25,7 @@ from typing import NamedTuple, Optional
 __version__ = "0.1.0"
 
 INFO_W = 32                          # width of the stats column
-INFO_ROWS = 5                        # GPU, MEM, CPU->GPU, GPU->CPU, PWR
+INFO_ROWS = 6                        # GPU, MEM, PCIe title, CPU->GPU, GPU->CPU, PWR
 CHROME_W = 7                         # "│ " + " │ " + " │" around graph and stats
 MIN_GRAPH_W = 30                     # a narrower graph is not worth a second column
 MAX_INNER_H = 8                      # tallest graph: 8 rows x 8 sub-levels = 64 steps
@@ -412,23 +412,24 @@ def info(gpu, height):
     def link(label, kb):  # e.g. "CPU -> GPU  0.16 / 63 GB/s", like MEM's used/total
         return row([(label + ("-" if kb is None else "{:.2f}".format(kb / 1e6)).rjust(6), ""), cap, (" GB/s", "")])
 
-    lines = [
-        row(busy),
-        row([("MEM ", "")] + share(s.mem_used, s.mem_total), [("{} / {} GiB".format(num(s.mem_used, "{:.1f}"), total), "")]),
-        link("CPU -> GPU ", s.rx),
-        link("GPU -> CPU ", s.tx),
-        row([("PWR {} / {} W".format(num(s.power, "{:.0f}"), limit), "")]),
-    ]
-    if height < len(lines):  # a short panel keeps the top lines
-        return lines[:height]
-    if height > len(lines):  # room to spare: a rule (None) after MEM sets GPU and MEM apart
-        lines.insert(2, None)
-    # PWR stays on the bottom row; any spare rows go just above it.
-    return lines[:-1] + [row([])] * (height - len(lines)) + lines[-1:]
+    gpu_row = row(busy)
+    mem_row = row([("MEM ", "")] + share(s.mem_used, s.mem_total),
+                  [("{} / {} GiB".format(num(s.mem_used, "{:.1f}"), total), "")])
+    title, to_gpu, to_cpu = row([("PCIe transfer", "")]), link(" CPU -> GPU ", s.rx), link(" GPU -> CPU ", s.tx)
+    power = row([("PWR {} / {} W".format(num(s.power, "{:.0f}"), limit), "")])
+    # Rules (None) and the PCIe title only appear when there is room: the rule above PWR
+    # goes last, the title before the numbers. PWR stays on the bottom row; spare rows go above it.
+    if height >= 8:
+        return [gpu_row, mem_row, None, title, to_gpu, to_cpu] + [row([])] * (height - 8) + [None, power]
+    if height == 7:
+        return [gpu_row, mem_row, title, to_gpu, to_cpu, None, power]
+    if height == 6:
+        return [gpu_row, mem_row, title, to_gpu, to_cpu, power]
+    return [gpu_row, mem_row, to_gpu, to_cpu, power][:height]
 
 
-# The rule above the PCIe rows doubles as their title: " ├─ PCIe transfer ────┤".
-RULE = [(" ├─ ", DIM), ("PCIe transfer", ""), (" " + "─" * (INFO_W - len("PCIe transfer") - 1) + "┤", DIM)]
+# A horizontal rule across the stats column, joined to the borders.
+RULE = [(" ├" + "─" * (INFO_W + 2) + "┤", DIM)]
 
 
 def degraded(gpu):

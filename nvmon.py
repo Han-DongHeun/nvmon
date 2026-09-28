@@ -25,7 +25,7 @@ from typing import NamedTuple, Optional
 __version__ = "0.1.0"
 
 INFO_W = 32                          # width of the stats column
-INFO_ROWS = 6                        # GPU, MEM, PCIe title, CPU->GPU, GPU->CPU, PWR
+INFO_ROWS = 6                        # GPU, MEM, PWR, PCIe title, CPU->GPU, GPU->CPU
 CHROME_W = 7                         # "│ " + " │ " + " │" around graph and stats
 MIN_GRAPH_W = 30                     # a narrower graph is not worth a second column
 MAX_INNER_H = 8                      # tallest graph: 8 rows x 8 sub-levels = 64 steps
@@ -417,12 +417,12 @@ def info(gpu, height):
                   [("{} / {} GiB".format(num(s.mem_used, "{:.1f}"), total), "")])
     title, to_gpu, to_cpu = row([("PCIe transfer", "")]), link(" CPU -> GPU ", s.rx), link(" GPU -> CPU ", s.tx)
     power = row([("PWR", "")], [("{} / {} W".format(num(s.power, "{:.0f}"), limit), "")])
-    # The rule (None) after MEM and the PCIe title only appear when there is room.
+    # The rule (None) above the PCIe rows and their title only appear when there is room.
     if height >= 7:
-        return [gpu_row, mem_row, None, title, to_gpu, to_cpu, power] + [row([])] * (height - 7)
+        return [gpu_row, mem_row, power, None, title, to_gpu, to_cpu] + [row([])] * (height - 7)
     if height == 6:
-        return [gpu_row, mem_row, title, to_gpu, to_cpu, power]
-    return [gpu_row, mem_row, to_gpu, to_cpu, power][:height]
+        return [gpu_row, mem_row, power, title, to_gpu, to_cpu]
+    return [gpu_row, mem_row, power, to_gpu, to_cpu][:height]
 
 
 # A horizontal rule across the stats column, joined to the borders.

@@ -25,7 +25,7 @@ from typing import NamedTuple, Optional
 __version__ = "0.1.0"
 
 INFO_W = 30                          # width of the stats column
-INFO_ROWS = 4                        # Util, VRAM, Power, PCIe
+INFO_ROWS = 4                        # GPU, MEM, PWR, PCIe
 CHROME_W = 7                         # "│ " + " │ " + " │" around graph and stats
 MIN_GRAPH_W = 30                     # a narrower graph is not worth a second column
 MAX_INNER_H = 8                      # tallest graph: 8 rows x 8 sub-levels = 64 steps
@@ -333,12 +333,10 @@ def rate(kib):
 def info(gpu, height):
     s = gpu.now
     total, limit = num(s.mem_total, "{:.1f}"), num(s.power_limit, "{:.0f}")
-    lines = [  # used values are padded to the width of their maximum so the percentages hold still
-        row([("Util  ", "")] + share(s.util, 100)),
-        row([("VRAM  {}/{} GiB  ".format(num(s.mem_used, "{:.1f}").rjust(len(total)), total), "")]
-            + share(s.mem_used, s.mem_total)),
-        row([("Power {}/{} W  ".format(num(s.power, "{:.0f}").rjust(len(limit)), limit), "")]
-            + share(s.power, s.power_limit)),
+    lines = [  # used values are padded to the width of their maximum so nothing shifts
+        row([("GPU ", "")] + share(s.util, 100)),
+        row([("MEM  {}/{} GiB".format(num(s.mem_used, "{:.1f}").rjust(len(total)), total), "")]),
+        row([("PWR  {}/{} W".format(num(s.power, "{:.0f}").rjust(len(limit)), limit), "")]),
         row([("TX {}   RX {}".format(rate(s.tx), rate(s.rx)), "")]),
     ]
     return lines[:height] + [row([])] * (height - len(lines))  # a short panel keeps the top lines
@@ -347,26 +345,46 @@ def info(gpu, height):
 def panel(gpu, width, height):
     graph_w = max(0, width - CHROME_W - INFO_W)
     s = gpu.now
-    label = [("GPU {}".format(gpu.index), BOLD), ("  " + gpu.name, "")]
-    for name, mem in s.processes:
-        label += [("  " + name, PROC)] + ([] if mem is None else [(" {:.1f}G".format(mem), DIM)])
     # Fixed widths keep the right end of the border still while values change.
     parts = [] if s.temp is None else [("{:>3}°C".format(s.temp), TEMP[min(max(s.temp, 0), 100)])]
     parts += [] if s.fan is None else [("FAN {:>3}%".format(s.fan), "")]
     parts += [] if s.clock is None else [("{:>4} MHz".format(s.clock), "")]
     note = [seg for i, part in enumerate(parts) for seg in ([("  ", "")] if i else []) + [part]]
-    top, bottom = edge(width, "╭╮", label, note), edge(width, "╰╯", [])
+    top = edge(width, [("GPU {}".format(gpu.index), BOLD), ("  " + gpu.name, "")], note)
+    split = 2 + graph_w + 1  # column of the graph | stats divider
+    bottom = bottom_edge(width, split, process_label(s.processes, split - 4))
     body = [[("│ ", DIM)] + g + [(" │ ", DIM)] + i + [(" │", DIM)]
             for g, i in zip(graph(gpu.history, graph_w, height), info(gpu, height))]
     return [top] + body + [bottom]
 
 
-def edge(width, corners, label, note=()):
-    """Top or bottom border, "╭─ label ───── note ─╮"; a long label is cut to fit."""
-    tail = ([(" ", "")] + list(note) + [(" ", "")] if note else []) + [("─" + corners[1], DIM)]
+def edge(width, label, note):
+    """Top border, "╭─ label ───── note ─╮"; a long label is cut to fit."""
+    tail = ([(" ", "")] + note + [(" ", "")] if note else []) + [("─╮", DIM)]
     label = clip(label, width - 4 - width_of(tail))  # 4 = "╭─" + a space on each side of the label
-    head = [(corners[0] + "─", DIM)] + ([(" ", "")] + label + [(" ", "")] if label else [])
+    head = [("╭─", DIM)] + ([(" ", "")] + label + [(" ", "")] if label else [])
     return head + [("─" * max(0, width - width_of(head) - width_of(tail)), DIM)] + tail
+
+
+def process_label(processes, room):
+    """As many whole "name 1.2G" entries as fit in `room` cells, then "+N" for the rest."""
+    label = []
+    for i, (name, mem) in enumerate(processes):
+        entry = [("  " if label else "", ""), (name, PROC)] + ([] if mem is None else [(" {:.1f}G".format(mem), DIM)])
+        rest = len(processes) - i - 1
+        if width_of(label + entry) + (len("  +{}".format(rest)) if rest else 0) > room:
+            # The first entry is always shown, cut if need be; later ones collapse into the count.
+            return clip(entry, room) if not label else label + [("  +{}".format(rest + 1), DIM)]
+        label += entry
+    return label
+
+
+def bottom_edge(width, split, label):
+    """Bottom border with `label` flush right against column `split`, the graph | stats divider."""
+    label = clip(label, split - 4)  # keep "╰─" and a space on each side
+    middle = [(" ", "")] + label + [(" ", "")] if label else []
+    return ([("╰" + "─" * max(0, split - 1 - width_of(middle)), DIM)] + middle
+            + [("─" * max(0, width - split - 1) + "╯", DIM)])
 
 
 def render(gpus, width, height):
@@ -385,7 +403,7 @@ def render(gpus, width, height):
 
 
 def totals(gpus):
-    """'8 GPUs   Util  54%   VRAM  39/637 GiB   1243 W' over every GPU shown.
+    """'8 GPUs   GPU  54%   MEM  39/637 GiB   PWR 1243 W' over every GPU shown.
 
     Each number is padded to the width of its maximum, so the line never shifts.
     """
@@ -393,24 +411,32 @@ def totals(gpus):
         return sum(v for v in (getattr(g.now, field) for g in gpus) if v is not None)
     utils = [g.now.util for g in gpus if g.now.util is not None]
     mem, power = "{:.0f}".format(total("mem_total")), "{:.0f}".format(total("power_limit"))
-    return ([("{} GPU{}".format(len(gpus), "s" if len(gpus) > 1 else ""), ""), ("   Util ", DIM)]
+    return ([("{} GPU{}".format(len(gpus), "s" if len(gpus) > 1 else ""), ""), ("   GPU ", DIM)]
             + share(sum(utils) / len(utils) if utils else None, 100)
-            + [("   VRAM ", DIM), ("{:.0f}".format(total("mem_used")).rjust(len(mem)) + "/" + mem + " GiB", ""),
-               ("   " + "{:.0f}".format(total("power")).rjust(len(power)) + " W", "")])
+            + [("   MEM  ", DIM), ("{:.0f}".format(total("mem_used")).rjust(len(mem)) + "/" + mem + " GiB", ""),
+               ("   PWR ", DIM), ("{:.0f}".format(total("power")).rjust(len(power)) + " W", "")])
 
 
-def header(width, interval, gpus, driver):
-    """Top line: name, version, host, local time | totals, driver, refresh interval."""
+def spread(width, left, right):
+    """`left`, then `right` flush right: one line of exactly `width` cells."""
+    room = width - width_of(right)
+    return clip(pad(clip(left, room - 1), room) + right, width)
+
+
+def header(width, interval, driver):
+    """Top line: name, version, host, local time | driver, refresh interval."""
     now = time.time()
     stamp = time.strftime("%Y-%m-%d %a %H:%M:%S", time.localtime(now)) + ".{:02d}".format(int(now % 1 * 100))
     left = [("nvmon", BOLD), (" " + __version__, DIM), ("  " + socket.gethostname(), ""), ("  " + stamp, "")]
     right = [("refresh ", DIM), ("{:g}s".format(interval), "")]
-    # Optional parts, most important first; each is shown only if it still fits beside the left side.
-    for part in (totals(gpus) + [("   ", "")], [(driver, DIM), ("   ", "")] if driver else []):
-        if part and width_of(left) + 2 + width_of(part) + width_of(right) <= width:
-            right = part + right
-    room = width - width_of(right)
-    return clip(pad(clip(left, room - 1), room) + right, width)
+    if driver and width_of(left) + 2 + len(driver) + 3 + width_of(right) <= width:  # dropped when narrow
+        right = [(driver + "   ", DIM)] + right
+    return spread(width, left, right)
+
+
+def footer(width, gpus):
+    """Bottom line: totals over all GPUs | how to quit."""
+    return spread(width, totals(gpus), [("q quit", DIM)])
 
 
 def paint(lines):
@@ -561,7 +587,8 @@ def main():
             while True:
                 list(pool.map(Gpu.poll, gpus))
                 width, height = os.get_terminal_size()
-                screen.draw([header(width, args.interval, gpus, driver)] + render(gpus, width, height - 1))
+                screen.draw([header(width, args.interval, driver)] + render(gpus, width, height - 2)
+                            + [footer(width, gpus)])
                 # Fixed-rate ticks; a late tick restarts the schedule instead of bursting.
                 now = time.monotonic()
                 deadline = max(deadline + args.interval, now)

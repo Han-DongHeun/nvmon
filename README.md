@@ -3,21 +3,22 @@
 A compact, btop-style NVIDIA GPU monitor for the terminal.
 
 ```
-nvmon 0.1.0  gpu-node  2026-09-28 Mon 21:39:29.75    1 GPU  299 W  16 / 80 GiB   refresh 0.5s
-╭─ GPU 6  H100 80GB HBM3 ───────────────────────────────────────────────── 49°C  1980 MHz ─╮
-│ ▄ ▃  ▁▁▄      ▄    ▇   ▆ ▄   ▂   ▇ ▆▃   ▆      █    ▁   ▃ │ GPU                      67% │
-│ █ ██▅███▆▄▄▃▇▃█ ▂▃ █ ▆▄█ █▄▆▄█▂▆██ ██▅█▅██▆▆▆▆▃█  ▆▆█▆▆██ │ MEM  15.6 / 79.6 GiB     20% │
-│ █▅█████████████▆██▅█▄███▆█████████▄█████████████▆ ███████ │ PWR  299 / 700 W         43% │
-│ █████████████████████████████████████████████████▇███████ │ TX 6.39 MiB/s RX  163 MiB/s  │
-╰─ train.py 15.1G  eval.py 0.5G ───────────────────────────────────────────────────────────╯
+nvmon 0.1.0  gpu-node  2026-09-28 Mon 21:58:36.82                                refresh 0.5s
+╭─ GPU 6  H100 80GB HBM3 ────────────────────────────────────────────────  49°C  1980 MHz ─╮
+│ ▃  ▁▁▄      ▄    ▇   ▆ ▄   ▂   ▇ ▆▃   ▆      █    ▁   ▃ │ GPU  67%                       │
+│ ██▅███▆▄▄▃▇▃█ ▂▃ █ ▆▄█ █▄▆▄█▂▆██ ██▅█▅██▆▆▆▆▃█  ▆▆█▆▆██ │ MEM  15.6/79.6 GiB             │
+│ █████████████▆██▅█▄███▆█████████▄█████████████▆ ███████ │ PWR  299/700 W                 │
+│ ███████████████████████████████████████████████▇███████ │ TX 6.39 MiB/s   RX  163 MiB/s  │
+╰─────────────────────────── train.py 15.1G  eval.py 0.5G ─────────────────────────────────╯
+1 GPU   GPU  67%   MEM  16/80 GiB   PWR 299 W                                         q quit
 ```
 
 - One box per GPU: utilization history on the left (0 % at the bottom, 100 % at the top),
-  utilization, VRAM, power and PCIe traffic on the right.
-- Top edge: GPU name, running processes (script names for Python), temperature (blue when
-  cool, red from about 85 °C), fan and clock.
-- Top line: host, local time, driver / CUDA version, and over all GPUs: average utilization,
-  total VRAM and total power.
+  utilization, memory, power and PCIe traffic on the right.
+- Top edge: GPU name, temperature (blue when cool, red from about 85 °C), fan and clock.
+  Bottom edge: running processes (script names for Python) with their memory.
+- Top line: host, local time, driver / CUDA version. Bottom line: GPU count, average
+  utilization, total memory and total power.
 - Refreshes every 0.5 s. Up to 8 GPUs fit on one screen; on wide terminals the boxes
   go into two columns.
 - **Zero dependencies.** One Python file that talks to the NVML library shipped with the

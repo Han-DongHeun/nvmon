@@ -25,7 +25,7 @@ from typing import NamedTuple, Optional
 __version__ = "0.1.0"
 
 INFO_W = 32                          # width of the stats column
-INFO_ROWS = 4                        # GPU, MEM, CPU->GPU, GPU->CPU
+INFO_ROWS = 5                        # GPU, MEM, CPU->GPU, GPU->CPU, PWR
 CHROME_W = 7                         # "│ " + " │ " + " │" around graph and stats
 MIN_GRAPH_W = 30                     # a narrower graph is not worth a second column
 MAX_INNER_H = 8                      # tallest graph: 8 rows x 8 sub-levels = 64 steps
@@ -400,7 +400,7 @@ def num(value, fmt):
 
 def info(gpu, height):
     s = gpu.now
-    total = num(s.mem_total, "{:.1f}")
+    total, limit = num(s.mem_total, "{:.1f}"), num(s.power_limit, "{:.0f}")
     busy = [("GPU ", "")] + share(s.util, 100)
     if gpu.has_activity:  # "cores" = share of SMs at work, "tensor" = Tensor Core activity
         busy += [("  cores " + share(s.cores, 100)[0][0] + " tensor " + share(s.tensor, 100)[0][0], FAINT)]
@@ -417,6 +417,7 @@ def info(gpu, height):
         row([("MEM ", "")] + share(s.mem_used, s.mem_total), [("{} / {} GiB".format(num(s.mem_used, "{:.1f}"), total), "")]),
         link("CPU -> GPU ", s.rx),
         link("GPU -> CPU ", s.tx),
+        row([("PWR {} / {} W".format(num(s.power, "{:.0f}"), limit), "")]),
     ]
     if height > len(lines):  # room to spare: a rule (None) after MEM sets GPU and MEM apart
         lines.insert(2, None)
@@ -439,9 +440,7 @@ def panel(gpu, width, height):
     parts += [] if s.fan is None else [("FAN {:>3}%".format(s.fan), "")]
     parts += [] if s.temp is None else [("{:>3}°C".format(s.temp), TEMP[min(max(s.temp, 0), 100)])]
     parts += [] if s.clock is None else [("{:>4} MHz".format(s.clock), s.slowdown[1] if s.slowdown else "")]
-    limit = num(s.power_limit, "{:.0f}")  # the power is padded to the limit's width so the edge holds still
-    power = "  PWR {} / {} W".format(num(s.power, "{:.0f}").rjust(len(limit)), limit)
-    top = edge(width, [("GPU {}".format(gpu.index), BOLD), ("  " + gpu.name, ""), (power, "")], parts)
+    top = edge(width, [("GPU {}".format(gpu.index), BOLD), ("  " + gpu.name, "")], parts)
     split = 2 + graph_w + 1  # column of the graph | stats divider
     bottom = bottom_edge(width, split, process_label(s.processes, split - 4))
     body = [[("│ ", DIM)] + g + ([(" ├" + "─" * (INFO_W + 2) + "┤", DIM)] if i is None

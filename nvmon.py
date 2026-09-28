@@ -437,15 +437,16 @@ def degraded(gpu):
 def panel(gpu, width, height):
     graph_w = max(0, width - CHROME_W - INFO_W)
     s = gpu.now
-    # Fixed widths keep the right end of the border still while values change.
-    parts = [] if s.slowdown is None else [s.slowdown]
-    if degraded(gpu):
-        parts += [("PCIe DEGRADED: x{} -> x{}".format(gpu.pcie_max_width, s.pcie_width), WARN)]
-    parts += [] if s.fan is None else [("FAN {:>3}%".format(s.fan), "")]
-    parts += [] if s.temp is None else [("{:>3}°C".format(s.temp), TEMP[min(max(s.temp, 0), 100)])]
+    # Right-hand parts as (segment, rank): shown cause to effect (power -> heat -> fan -> clock),
+    # dropped lowest rank first when space runs out. Fixed widths keep them from shifting.
     limit = num(s.power_limit, "{:.0f}")  # power padded to the limit's width
-    parts += [("{} / {} W".format(num(s.power, "{:.0f}").rjust(len(limit)), limit), "")]
-    parts += [] if s.clock is None else [("{:>4} MHz".format(s.clock), s.slowdown[1] if s.slowdown else "")]
+    parts = [] if s.slowdown is None else [(s.slowdown, 9)]
+    if degraded(gpu):
+        parts += [(("PCIe DEGRADED: x{} -> x{}".format(gpu.pcie_max_width, s.pcie_width), WARN), 8)]
+    parts += [(("{} / {} W".format(num(s.power, "{:.0f}").rjust(len(limit)), limit), ""), 2)]
+    parts += [] if s.temp is None else [(("{:>3}°C".format(s.temp), TEMP[min(max(s.temp, 0), 100)]), 4)]
+    parts += [] if s.fan is None else [(("FAN {:>3}%".format(s.fan), ""), 1)]
+    parts += [] if s.clock is None else [(("{:>4} MHz".format(s.clock), s.slowdown[1] if s.slowdown else ""), 3)]
     top = edge(width, [("GPU {}".format(gpu.index), BOLD), ("  " + gpu.name, "")], parts)
     split = 2 + graph_w + 1  # column of the graph | stats divider
     bottom = bottom_edge(width, split, process_label(s.processes, split - 4))
@@ -458,18 +459,18 @@ def panel(gpu, width, height):
 def edge(width, label, parts):
     """Top border, "╭─ label ───── parts ─╮", fitted to `width`.
 
-    The GPU number (the label's first segment) always shows: when space runs out the right-hand
-    parts go first, from the end (clock, then temperature, ...), so warnings go last. The other
-    label segments show whole or not at all, so nothing is left half-written.
+    `parts` are (segment, rank). The GPU number (the label's first segment) always shows: when
+    space runs out the part with the lowest rank goes first, keeping the others in order. The
+    other label segments show whole or not at all, so nothing is left half-written.
     """
     parts = list(parts)
     while True:
-        note = [seg for i, part in enumerate(parts) for seg in ([("  ", "")] if i else []) + [part]]
+        note = [seg for i, (part, _) in enumerate(parts) for seg in ([("  ", "")] if i else []) + [part]]
         tail = ([(" ", "")] + note + [(" ", "")] if note else []) + [("─╮", DIM)]
         room = width - 4 - width_of(tail)  # 4 = "╭─" + a space on each side of the label
         if not parts or room >= width_of(label[:1]):
             break
-        parts.pop()
+        parts.remove(min(parts, key=lambda part: part[1]))
     kept = clip(label[:1], room)
     for segment in label[1:]:
         if width_of(kept) + len(segment[0]) > room:

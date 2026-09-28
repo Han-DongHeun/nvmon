@@ -122,9 +122,9 @@ NVML_GPM_METRIC_SM_UTIL, NVML_GPM_METRIC_ANY_TENSOR_UTIL = 2, 5
 
 # nvmlClocksEventReason bits that mean "held back", most serious first. The others (idle,
 # application clocks, sync boost, display) are normal operation and stay hidden.
-SLOWDOWNS = [(0x20 | 0x40, "TOO HOT", ALERT),        # software / hardware thermal slowdown
-             (0x08 | 0x80, "HW SLOWDOWN", ALERT),    # hardware slowdown / power brake
-             (0x04, "POWER LIMIT", SLOW)]            # software power cap
+SLOWDOWNS = [(0x20 | 0x40, "SLOWED: heat", ALERT),   # software / hardware thermal slowdown
+             (0x08 | 0x80, "SLOWED: hw", ALERT),     # hardware slowdown / power brake
+             (0x04, "SLOWED: power", SLOW)]          # software power cap
 
 # PCIe payload bandwidth per lane and direction, GB/s, by link generation.
 PCIE_LANE_GBS = {1: 0.25, 2: 0.5, 3: 0.985, 4: 1.969, 5: 3.938, 6: 7.563}
@@ -420,18 +420,24 @@ def info(gpu, height):
     # A link's top speed: its generation's per-lane rate times the lanes it runs on now.
     lanes = s.pcie_width or gpu.pcie_max_width
     top = PCIE_LANE_GBS.get(gpu.pcie_max_gen, 0) * (lanes or 0)
-    cap = [(" of {:.0f} GB/s".format(top), DIM)] if top else []
+    cap = [(" / {:.0f} GB/s".format(top), WARN if degraded(gpu) else "")] if top else []
     lines = [
         row(busy),
         row([("MEM ", "")] + share(s.mem_used, s.mem_total),
             [("{}/{} GiB".format(num(s.mem_used, "{:.1f}"), total), "")]),
         row([("PWR {}/{} W".format(num(s.power, "{:.0f}"), limit), "")]),
-        row([("PCIe to GPU ", ""), (rate(s.rx), "")] + cap),
-        row([("     to CPU ", ""), (rate(s.tx), "")] + cap),
+        row([("CPU -> GPU " + rate(s.rx), "")] + cap),
+        row([("GPU -> CPU " + rate(s.tx), "")] + cap),
     ]
     if height > len(lines):  # room to spare: a rule (None) after MEM sets GPU and MEM apart
         lines.insert(2, None)
     return lines[:height] + [row([])] * (height - len(lines))
+
+
+def degraded(gpu):
+    """True when the PCIe link runs on fewer lanes than card and slot allow, e.g. a loose card."""
+    s = gpu.now
+    return bool(s.pcie_width and gpu.pcie_max_width and s.pcie_width < gpu.pcie_max_width)
 
 
 def panel(gpu, width, height):
@@ -439,8 +445,8 @@ def panel(gpu, width, height):
     s = gpu.now
     # Fixed widths keep the right end of the border still while values change.
     parts = [] if s.slowdown is None else [s.slowdown]
-    if s.pcie_width and gpu.pcie_max_width and s.pcie_width < gpu.pcie_max_width:  # e.g. a loose card
-        parts += [("PCIe x{}/{}".format(s.pcie_width, gpu.pcie_max_width), WARN)]
+    if degraded(gpu):
+        parts += [("PCIe DEGRADED: x{}/x{}".format(s.pcie_width, gpu.pcie_max_width), WARN)]
     parts += [] if s.fan is None else [("FAN {:>3}%".format(s.fan), "")]
     parts += [] if s.temp is None else [("{:>3}°C".format(s.temp), TEMP[min(max(s.temp, 0), 100)])]
     parts += [] if s.clock is None else [("{:>4} MHz".format(s.clock), s.slowdown[1] if s.slowdown else "")]

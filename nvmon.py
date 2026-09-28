@@ -566,7 +566,7 @@ def elapsed(started):
 
 def process_label(processes, room):
     """Processes grouped by owner and conda environment, groups and processes by memory, biggest
-    first: "migi: train.py 2h13m 15.1G  eval.py 5m 0.5G   kim/torch: a.py 1d4h 9.0G" (our own
+    first: "migi: train.py 2h13m 15.1G · eval.py 5m 0.5G   kim/torch: a.py 1d4h 9.0G" (our own
     processes carry no owner). As many whole entries as fit in `room` cells, then "+N" for the rest."""
     def mem(process):
         return process.mem or 0
@@ -577,10 +577,10 @@ def process_label(processes, room):
     for (owner, env), group in sorted(groups.items(), key=lambda item: sum(map(mem, item[1])), reverse=True):
         tag = "/".join(part for part in (owner, env) if part)
         for j, process in enumerate(group):
-            gap = "" if not entries else "  " if j else "   "
+            gap = [] if not entries else [(" · ", DIM)] if j else [("   ", "")]
             details = [elapsed(process.started)] if process.started is not None else []
             details += [] if process.mem is None else ["{:.1f}G".format(process.mem)]
-            entries.append([(gap, "")] + ([(tag + ": ", DIM)] if tag and not j else []) + [(process.name, PROC)]
+            entries.append(gap + ([(tag + ": ", DIM)] if tag and not j else []) + [(process.name, PROC)]
                            + ([(" " + " ".join(details), DIM)] if details else []))
     label = []
     for i, entry in enumerate(entries):

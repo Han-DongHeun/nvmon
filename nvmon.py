@@ -164,6 +164,14 @@ def check(nv, rc):
         raise NvmlError(nv.nvmlErrorString(rc).decode())
 
 
+class Process(NamedTuple):
+    name: str                     # script name for Python, else the executable
+    mem: Optional[float]          # GPU memory, GiB
+    owner: Optional[str]          # account; None for our own processes
+    env: Optional[str]            # conda environment
+    started: Optional[float]      # start time, seconds since the epoch
+
+
 class Sample(NamedTuple):
     util: Optional[int]           # %
     temp: Optional[int]           # °C
@@ -179,7 +187,7 @@ class Sample(NamedTuple):
     cores: Optional[float]        # % of SMs busy (GPM, Hopper and newer)
     tensor: Optional[float]       # % Tensor Core activity (GPM)
     slowdown: Optional[tuple]     # (label, colour) when the clock is held back
-    processes: list               # [(name, GiB or None, owner or None)]
+    processes: list               # [Process]
 
 
 class Gpu:
@@ -195,7 +203,7 @@ class Gpu:
         self.pcie_max_width = self._uint("nvmlDeviceGetMaxPcieLinkWidth")
         self._gpm = self._gpm_samples()
         self.has_activity = self._gpm is not None
-        self._names = {}  # pid -> (name, owner): fixed for a process's life, so read once
+        self._facts = {}  # pid -> (name, owner, env, started): fixed for a process's life, so read once
 
     def _ok(self, fn, *args):
         return getattr(self.nv, fn)(self.handle, *args) == NVML_SUCCESS
@@ -271,12 +279,13 @@ class Gpu:
                 self._ok("nvmlDeviceGetComputeRunningProcesses_v3", byref(count), infos)):
             return []
         running = infos[:count.value]
-        self._names = {p.pid: self._names.get(p.pid) or (self._process_name(p.pid), process_owner(p.pid))
+        self._facts = {p.pid: self._facts.get(p.pid) or (self._process_name(p.pid),) + process_facts(p.pid)
                        for p in running}
         procs = []
         for p in running:
-            name, owner = self._names[p.pid]
-            procs.append((name, None if p.usedGpuMemory == NVML_VALUE_NOT_AVAILABLE else p.usedGpuMemory / 2**30, owner))
+            name, owner, env, started = self._facts[p.pid]
+            mem = None if p.usedGpuMemory == NVML_VALUE_NOT_AVAILABLE else p.usedGpuMemory / 2**30
+            procs.append(Process(name, mem, owner, env, started))
         return procs
 
     def _process_name(self, pid):
@@ -336,6 +345,36 @@ def versions(nv):
     if nv.nvmlSystemGetCudaDriverVersion_v2(byref(cuda)) == NVML_SUCCESS:  # e.g. 13000 -> 13.0
         parts.append("CUDA {}.{}".format(cuda.value // 1000, cuda.value % 1000 // 10))
     return "  ".join(parts)
+
+
+def process_facts(pid):
+    """(owner, conda environment, start time) of `pid` from /proc; Nones where unknown (e.g. Windows)."""
+    return process_owner(pid), conda_env(pid), start_time(pid)
+
+
+def conda_env(pid):
+    """Name of the conda environment whose Python runs `pid`: ".../envs/NAME/bin/python" -> NAME,
+    the conda root's own Python -> "base"; None outside conda."""
+    try:
+        exe = os.readlink("/proc/{}/exe".format(pid))
+    except OSError:
+        return None
+    prefix = os.path.dirname(os.path.dirname(exe))
+    if not os.path.isdir(os.path.join(prefix, "conda-meta")):
+        return None
+    return os.path.basename(prefix) if os.path.basename(os.path.dirname(prefix)) == "envs" else "base"
+
+
+def start_time(pid):
+    """When `pid` started, in seconds since the epoch."""
+    try:
+        with open("/proc/{}/stat".format(pid)) as f:
+            ticks = int(f.read().rsplit(")", 1)[1].split()[19])  # field 22, counted after "(name)"
+        with open("/proc/stat") as f:
+            boot = next(int(line.split()[1]) for line in f if line.startswith("btime"))
+    except (OSError, StopIteration, ValueError, IndexError):
+        return None
+    return boot + ticks / os.sysconf("SC_CLK_TCK")
 
 
 def process_owner(pid):
@@ -513,22 +552,36 @@ def edge(width, label, parts):
     return head + [("─" * max(0, width - width_of(head) - width_of(tail)), DIM)] + tail
 
 
+def elapsed(started):
+    """Time since `started`, compact: 42s, 5m, 2h13m, 1d4h."""
+    s = max(0, int(time.time() - started))
+    if s < 60:
+        return "{}s".format(s)
+    if s < 3600:
+        return "{}m".format(s // 60)
+    if s < 86400:
+        return "{}h{}m".format(s // 3600, s % 3600 // 60)
+    return "{}d{}h".format(s // 86400, s % 86400 // 3600)
+
+
 def process_label(processes, room):
-    """Processes grouped by owner, owners and processes by memory, biggest first:
-    "train.py 15.1G  eval.py 0.5G   kim: bench.py 3.2G" (our own processes carry no owner).
-    As many whole entries as fit in `room` cells, then "+N" for the rest."""
+    """Processes grouped by owner and conda environment, groups and processes by memory, biggest
+    first: "migi: train.py 2h13m 15.1G  eval.py 5m 0.5G   kim/torch: a.py 1d4h 9.0G" (our own
+    processes carry no owner). As many whole entries as fit in `room` cells, then "+N" for the rest."""
     def mem(process):
-        return process[1] or 0
+        return process.mem or 0
     groups = {}
     for process in sorted(processes, key=mem, reverse=True):
-        groups.setdefault(process[2], []).append(process)
-    ordered = sorted(groups.values(), key=lambda group: sum(map(mem, group)), reverse=True)
+        groups.setdefault((process.owner, process.env), []).append(process)
     entries = []
-    for group in ordered:
-        for j, (name, used, owner) in enumerate(group):
+    for (owner, env), group in sorted(groups.items(), key=lambda item: sum(map(mem, item[1])), reverse=True):
+        tag = "/".join(part for part in (owner, env) if part)
+        for j, process in enumerate(group):
             gap = "" if not entries else "  " if j else "   "
-            entries.append([(gap, "")] + ([(owner + ": ", DIM)] if owner and not j else []) + [(name, PROC)]
-                           + ([] if used is None else [(" {:.1f}G".format(used), DIM)]))
+            details = [elapsed(process.started)] if process.started is not None else []
+            details += [] if process.mem is None else ["{:.1f}G".format(process.mem)]
+            entries.append([(gap, "")] + ([(tag + ": ", DIM)] if tag and not j else []) + [(process.name, PROC)]
+                           + ([(" " + " ".join(details), DIM)] if details else []))
     label = []
     for i, entry in enumerate(entries):
         rest = len(entries) - i - 1

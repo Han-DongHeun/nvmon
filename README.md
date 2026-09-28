@@ -33,7 +33,8 @@ ssh -t HOST nvmon  # over ssh: -t gives it a terminal
   and Tensor Core activity. A GPU can read 100 % while its cores sit at 30 %.
 - **MEM**, **PCIe** traffic in each direction against the link's top speed, power, temperature,
   fan and clock.
-- Processes on each GPU, grouped by account (your own unlabelled), script names for Python.
+- Processes on each GPU with run time and memory, grouped by account and conda environment
+  (your own account unlabelled), script names for Python.
 - Warnings only when something is off: `SLOWED: power cap | too hot | hw brake` when the clock is held back,
   `PCIe DEGRADED: x16 -> x8` when the card runs on fewer lanes than it supports.
 

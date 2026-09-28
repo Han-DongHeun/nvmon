@@ -437,18 +437,18 @@ def degraded(gpu):
 def panel(gpu, width, height):
     graph_w = max(0, width - CHROME_W - INFO_W)
     s = gpu.now
-    # Right-hand parts as (segment, rank): shown cause to effect (power -> heat -> fan -> clock),
-    # dropped lowest rank first when space runs out. Fixed widths keep them from shifting.
-    limit = num(s.power_limit, "{:.0f}")  # power padded to the limit's width
-    parts = [] if s.slowdown is None else [(s.slowdown, 9)]
-    if degraded(gpu):
-        parts += [(("PCIe DEGRADED: x{} -> x{}".format(gpu.pcie_max_width, s.pcie_width), WARN), 8)]
-    parts += [(("{} / {} W".format(num(s.power, "{:.0f}").rjust(len(limit)), limit), ""), 2)]
-    parts += [] if s.temp is None else [(("{:>3}°C".format(s.temp), TEMP[min(max(s.temp, 0), 100)]), 4)]
-    parts += [] if s.fan is None else [(("FAN {:>3}%".format(s.fan), ""), 1)]
-    parts += [] if s.clock is None else [(("{:>4} MHz".format(s.clock), s.slowdown[1] if s.slowdown else ""), 3)]
-    top = edge(width, [("GPU {}".format(gpu.index), BOLD), ("  " + gpu.name, "")], parts)
     split = 2 + graph_w + 1  # column of the graph | stats divider
+    # Top-edge parts as (segment, rank, pinned): shown cause to effect (power -> heat -> fan ->
+    # clock), dropped lowest rank first when space runs out. Fixed widths keep them from shifting.
+    limit = num(s.power_limit, "{:.0f}")  # power padded to the limit's width
+    parts = [] if s.slowdown is None else [(s.slowdown, 9, False)]
+    if degraded(gpu):
+        parts += [(("PCIe DEGRADED: x{} -> x{}".format(gpu.pcie_max_width, s.pcie_width), WARN), 8, False)]
+    parts += [(("{} / {} W".format(num(s.power, "{:.0f}").rjust(len(limit)), limit), ""), 2, True)]
+    parts += [] if s.temp is None else [(("{:>3}°C".format(s.temp), TEMP[min(max(s.temp, 0), 100)]), 4, False)]
+    parts += [] if s.fan is None else [(("FAN {:>3}%".format(s.fan), ""), 1, False)]
+    parts += [] if s.clock is None else [(("{:>4} MHz".format(s.clock), s.slowdown[1] if s.slowdown else ""), 3, False)]
+    top = edge(width, split, [("GPU {}".format(gpu.index), BOLD), ("  " + gpu.name, "")], parts)
     bottom = bottom_edge(width, split, process_label(s.processes, split - 4))
     body = [[("│ ", DIM)] + g + (RULE if i is None
                                   else [(" │ ", DIM)] + i + [(" │", DIM)])
@@ -456,29 +456,48 @@ def panel(gpu, width, height):
     return [top] + body + [bottom]
 
 
-def edge(width, label, parts):
-    """Top border, "╭─ label ───── parts ─╮", fitted to `width`.
+def joined(parts):
+    """Segments of `parts` ((segment, ...) tuples), two spaces apart, framed by single spaces."""
+    note = [seg for i, part in enumerate(parts) for seg in ([("  ", "")] if i else []) + [part[0]]]
+    return [(" ", "")] + note + [(" ", "")] if note else []
 
-    `parts` are (segment, rank). The GPU number (the label's first segment) always shows: when
-    space runs out the part with the lowest rank goes first, keeping the others in order. The
-    other label segments show whole or not at all, so nothing is left half-written.
-    """
-    parts = list(parts)
-    while True:
-        note = [seg for i, (part, _) in enumerate(parts) for seg in ([("  ", "")] if i else []) + [part]]
-        tail = ([(" ", "")] + note + [(" ", "")] if note else []) + [("─╮", DIM)]
-        room = width - 4 - width_of(tail)  # 4 = "╭─" + a space on each side of the label
-        if not parts or room >= width_of(label[:1]):
-            break
-        parts.remove(min(parts, key=lambda part: part[1]))
+
+def head(label, room):
+    """ "╭─ label " within `room` label cells. The first segment (the GPU number) is cut if need
+    be; the others show whole or not at all, so nothing is left half-written."""
     kept = clip(label[:1], room)
     for segment in label[1:]:
         if width_of(kept) + len(segment[0]) > room:
             break
         kept.append(segment)
-    label = kept
-    head = [("╭─", DIM)] + ([(" ", "")] + label + [(" ", "")] if label else [])
-    return head + [("─" * max(0, width - width_of(head) - width_of(tail)), DIM)] + tail
+    return [("╭─", DIM)] + ([(" ", "")] + kept + [(" ", "")] if kept else [])
+
+
+def edge(width, split, label, parts):
+    """Top border, "╭─ label ──── pinned ─── parts ─╮", fitted to `width`.
+
+    `parts` are (segment, rank, pinned). Pinned parts sit flush against the graph | stats divider
+    (column `split`) from the left while all the other parts fit right of it; otherwise every part
+    flows together at the right end. When space runs out the lowest rank goes first, keeping the
+    others in order; the GPU number always shows.
+    """
+    pinned, loose = [p for p in parts if p[2]], [p for p in parts if not p[2]]
+    tail = joined(loose) + [("─╮", DIM)]
+    middle = joined(pinned)
+    room = split - width_of(middle) - 4  # 4 = "╭─" + a space on each side of the label
+    if pinned and width_of(tail) < width - split and room >= width_of(label[:1]):
+        left = head(label, room)
+        return (left + [("─" * (split - width_of(left) - width_of(middle)), DIM)] + middle
+                + [("─" * (width - split - width_of(tail)), DIM)] + tail)
+    parts = list(parts)
+    while True:
+        tail = joined(parts) + [("─╮", DIM)]
+        room = width - 4 - width_of(tail)
+        if not parts or room >= width_of(label[:1]):
+            break
+        parts.remove(min(parts, key=lambda part: part[1]))
+    left = head(label, room)
+    return left + [("─" * max(0, width - width_of(left) - width_of(tail)), DIM)] + tail
 
 
 def process_label(processes, room):

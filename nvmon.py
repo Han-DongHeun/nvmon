@@ -407,15 +407,15 @@ def info(gpu, height):
     # A link's top speed: its generation's per-lane rate times the lanes it runs on now.
     lanes = s.pcie_width or gpu.pcie_max_width
     top = PCIE_LANE_GBS.get(gpu.pcie_max_gen, 0) * (lanes or 0)
-    cap = ("/{:.0f}".format(top), WARN if degraded(gpu) else "") if top else ("", "")
+    cap = (" / {:.0f}".format(top), WARN if degraded(gpu) else "") if top else ("", "")
 
-    def link(label, kb):  # e.g. "CPU -> GPU  0.16/63 GB/s", like MEM's used/total
+    def link(label, kb):  # e.g. "CPU -> GPU  0.16 / 63 GB/s", like MEM's used/total
         return row([(label + ("-" if kb is None else "{:.2f}".format(kb / 1e6)).rjust(6), ""), cap, (" GB/s", "")])
 
     lines = [
         row(busy),
-        row([("MEM {}/{} GiB".format(num(s.mem_used, "{:.1f}"), total), "")]),
-        row([("PWR {}/{} W".format(num(s.power, "{:.0f}"), limit), "")]),
+        row([("MEM {} / {} GiB".format(num(s.mem_used, "{:.1f}"), total), "")]),
+        row([("PWR {} / {} W".format(num(s.power, "{:.0f}"), limit), "")]),
         link("CPU -> GPU ", s.rx),
         link("GPU -> CPU ", s.tx),
     ]

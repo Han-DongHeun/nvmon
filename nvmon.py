@@ -60,7 +60,7 @@ TEMP = _gradient([(30, (95, 135, 215)), (45, (95, 175, 175)), (60, GREEN), (72, 
 # Warnings on the top edge: yellow = worth a look, orange = slowed, red = act.
 WARN, SLOW, ALERT = _rgb(YELLOW), _rgb(ORANGE), _rgb(RED)
 # Everything else sticks to the 256-colour palette.
-DIM, FAINT, PROC = _fg(240), _fg(236), _fg(110)
+DIM, FAINT, PROC = _fg(240), _fg(237), _fg(110)
 BOLD, RESET = "\x1b[1m", "\x1b[0m"
 
 
@@ -444,13 +444,13 @@ def info(gpu, height):
     top = PCIE_LANE_GBS.get(gpu.pcie_max_gen, 0) * (lanes or 0)
     cap = (" / {:.0f}".format(top), WARN if degraded(gpu) else "") if top else ("", "")
 
-    def link(label, rate):  # e.g. "CPU -> GPU  0.16 / 63 GB/s", like MEM's used/total
-        return row([(label + ("-" if rate is None else "{:.2f}".format(rate / 1e9)).rjust(6), ""), cap, (" GB/s", "")])
+    def link(label, rate):  # " CPU -> GPU ... 0.16 / 63 GB/s", flush right like MEM's used / total
+        return row([(label, "")], [("-" if rate is None else "{:.2f}".format(rate / 1e9), ""), cap, (" GB/s", "")])
 
     gpu_row = row(busy)
     mem_row = row([("MEM ", "")] + share(s.mem_used, s.mem_total),
                   [("{} / {} GiB".format(num(s.mem_used, "{:.1f}"), total), "")])
-    title, to_gpu, to_cpu = row([("PCIe transfer", "")]), link(" CPU -> GPU ", s.rx), link(" GPU -> CPU ", s.tx)
+    title, to_gpu, to_cpu = row([("PCIe transfer", "")]), link(" CPU -> GPU", s.rx), link(" GPU -> CPU", s.tx)
     # The rule (None) after MEM and the PCIe title only appear when there is room.
     if height >= 6:
         return [gpu_row, mem_row, None, title, to_gpu, to_cpu] + [row([])] * (height - 6)

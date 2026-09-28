@@ -25,7 +25,7 @@ from typing import NamedTuple, Optional
 __version__ = "0.1.0"
 
 INFO_W = 30                          # width of the stats column
-INFO_ROWS = 3                        # GPU + MEM, PWR, PCIe
+INFO_ROWS = 4                        # GPU, MEM, PWR, PCIe
 CHROME_W = 7                         # "│ " + " │ " + " │" around graph and stats
 MIN_GRAPH_W = 30                     # a narrower graph is not worth a second column
 MAX_INNER_H = 8                      # tallest graph: 8 rows x 8 sub-levels = 64 steps
@@ -333,11 +333,14 @@ def rate(kib):
 def info(gpu, height):
     s = gpu.now
     total, limit = num(s.mem_total, "{:.1f}"), num(s.power_limit, "{:.0f}")
-    lines = [  # used values are padded to the width of their maximum so nothing shifts
-        row([("GPU ", "")] + share(s.util, 100)
-            + [("  MEM {}/{} GiB".format(num(s.mem_used, "{:.1f}").rjust(len(total)), total), "")]),
-        row([("PWR {}/{} W".format(num(s.power, "{:.0f}").rjust(len(limit)), limit), "")]),
-        row([("TX {}   RX {}".format(rate(s.tx), rate(s.rx)), "")]),
+    # Percentages line up in one column; the absolute values sit flush right.
+    lines = [
+        row([("GPU ", "")] + share(s.util, 100)),
+        row([("MEM ", "")] + share(s.mem_used, s.mem_total),
+            [("{}/{} GiB".format(num(s.mem_used, "{:.1f}"), total), "")]),
+        row([("PWR ", "")] + share(s.power, s.power_limit),
+            [("{}/{} W".format(num(s.power, "{:.0f}"), limit), "")]),
+        row([], [("TX {}   RX {}".format(rate(s.tx), rate(s.rx)), "")]),
     ]
     return lines[:height] + [row([])] * (height - len(lines))  # a short panel keeps the top lines
 

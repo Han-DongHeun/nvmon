@@ -427,6 +427,10 @@ def info(gpu, height):
     return lines[:-1] + [row([])] * (height - len(lines)) + lines[-1:]
 
 
+# The rule above the PCIe rows doubles as their title: " ├─ PCIe transfer ────┤".
+RULE = [(" ├─ ", DIM), ("PCIe transfer", ""), (" " + "─" * (INFO_W - len("PCIe transfer") - 1) + "┤", DIM)]
+
+
 def degraded(gpu):
     """True when the PCIe link runs on fewer lanes than card and slot allow, e.g. a loose card."""
     s = gpu.now
@@ -446,7 +450,7 @@ def panel(gpu, width, height):
     top = edge(width, [("GPU {}".format(gpu.index), BOLD), ("  " + gpu.name, "")], parts)
     split = 2 + graph_w + 1  # column of the graph | stats divider
     bottom = bottom_edge(width, split, process_label(s.processes, split - 4))
-    body = [[("│ ", DIM)] + g + ([(" ├" + "─" * (INFO_W + 2) + "┤", DIM)] if i is None
+    body = [[("│ ", DIM)] + g + (RULE if i is None
                                   else [(" │ ", DIM)] + i + [(" │", DIM)])
             for g, i in zip(graph(gpu.history, graph_w, height), info(gpu, height))]
     return [top] + body + [bottom]

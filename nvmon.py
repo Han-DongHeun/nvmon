@@ -444,7 +444,7 @@ def panel(gpu, width, height):
     parts += [] if s.fan is None else [("FAN {:>3}%".format(s.fan), "")]
     parts += [] if s.temp is None else [("{:>3}°C".format(s.temp), TEMP[min(max(s.temp, 0), 100)])]
     limit = num(s.power_limit, "{:.0f}")  # power padded to the limit's width
-    parts += [("PWR {} / {} W".format(num(s.power, "{:.0f}").rjust(len(limit)), limit), "")]
+    parts += [("{} / {} W".format(num(s.power, "{:.0f}").rjust(len(limit)), limit), "")]
     parts += [] if s.clock is None else [("{:>4} MHz".format(s.clock), s.slowdown[1] if s.slowdown else "")]
     top = edge(width, [("GPU {}".format(gpu.index), BOLD), ("  " + gpu.name, "")], parts)
     split = 2 + graph_w + 1  # column of the graph | stats divider

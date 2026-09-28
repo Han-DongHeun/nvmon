@@ -11,12 +11,11 @@ On a wide terminal, eight GPUs go into two columns:
 ## Install
 
 ```bash
-uv tool install nvmon          # or: pipx install nvmon
+pip install nvmon
 ```
 
-From GitHub: `uv tool install git+https://github.com/Han-DongHeun/nvmon`, update with
-`uv tool upgrade nvmon`. On a server without internet, copy `nvmon.py` over and run it with any
-Python 3.6+.
+Using uv? `uv tool install nvmon`. On a server without internet, copy `nvmon.py` over and run it
+with any Python 3.6+.
 
 ## Usage
 

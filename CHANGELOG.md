@@ -9,6 +9,10 @@ What changes for you in each release. The same notes appear on the
   it uses stand out, and `f` shows only those. `t` asks it to stop (SIGTERM), `k` ends it at once
   (SIGKILL), each after a `y`; only your own jobs, and only once nvmon has checked they are still the
   same. `p` lists every job with its utilization and command line, sorted by whichever heading you click.
+- When the GPUs do not fit the window, their boxes scroll (wheel, PgUp/PgDn). The boxes are a line
+  shorter: the "PCIe transfer" title is gone, as CPU -> GPU and GPU -> CPU say it already.
+- `NVMON_COLORS=256` for terminals without 24-bit colour; the README says how to fix broken lines in
+  Xshell, PuTTY and the like.
 - No more stutter when another program uses the GPU driver at the same time, such as someone
   running `watch nvidia-smi`. The screen now refreshes on time and keeps the last numbers until the
   driver answers. If it has not answered for a second, the top line says so.

@@ -36,7 +36,7 @@ PYPI_JSON = "https://pypi.org/pypi/nvmon/json"
 INFO_W = 32                          # width of the stats column
 CHROME_W = 7                         # "│ " + " │ " + " │" around graph and stats
 MIN_GRAPH_W = 30                     # a narrower graph is not worth a second column
-MAX_INNER_H = 6                      # tallest panel: the full stats column (graph: 6 x 8 levels)
+MAX_INNER_H = 5                      # tallest panel: the full stats column (graph: 5 x 8 levels)
 HISTORY = 1024                       # samples kept per GPU; wider than any terminal
 BLOCKS = " ▁▂▃▄▅▆▇█"                 # a character cell filled in 1/8 steps
 
@@ -45,8 +45,20 @@ def _fg(n):
     return "\x1b[38;5;{}m".format(n)
 
 
+# NVMON_COLORS=256 is for terminals without 24-bit colour (Xshell unless told, older PuTTY, macOS Terminal).
+TRUECOLOR = os.environ.get("NVMON_COLORS") != "256"
+
+
 def _rgb(rgb):
-    return "\x1b[38;2;{};{};{}m".format(*rgb)
+    """The code for colour `rgb`: 24-bit, or with NVMON_COLORS=256 the nearest of the 256-colour palette."""
+    if TRUECOLOR:
+        return "\x1b[38;2;{};{};{}m".format(*rgb)
+    levels = (0, 95, 135, 175, 215, 255)  # the palette's 6 x 6 x 6 cube, then 24 greys
+    cube = [min(range(6), key=lambda i: abs(levels[i] - v)) for v in rgb]
+    grey = min(23, max(0, round((sum(rgb) / 3 - 8) / 10)))
+    options = [(16 + 36 * cube[0] + 6 * cube[1] + cube[2], [levels[i] for i in cube]),
+               (232 + grey, [8 + 10 * grey] * 3)]
+    return _fg(min(options, key=lambda o: sum((a - b) ** 2 for a, b in zip(o[1], rgb)))[0])
 
 
 def _gradient(stops):
@@ -804,18 +816,16 @@ def info(gpu, height):
     top = PCIE_LANE_GBS.get(gpu.pcie_max_gen, 0) * (lanes or 0)
     cap = (" / {:.0f}".format(top), WARN if degraded(gpu) else "") if top else ("", "")
 
-    def link(label, rate):  # " CPU -> GPU ... 0.16 / 63 GB/s", flush right like MEM's used / total
+    def link(label, rate):  # "CPU -> GPU ... 0.16 / 63 GB/s", flush right like MEM's used / total
         return row([(label, "")], [("-" if rate is None else "{:.2f}".format(rate / 1e9), ""), cap, (" GB/s", "")])
 
     gpu_row = row(busy)
     mem_row = row([("MEM ", "")] + share(s.mem_used, s.mem_total),
                   [("{} / {} GiB".format(num(s.mem_used, "{:.1f}"), total), "")])
-    title, to_gpu, to_cpu = row([("PCIe transfer", "")]), link(" CPU -> GPU", s.rx), link(" GPU -> CPU", s.tx)
-    # The rule (None) after MEM and the PCIe title only appear when there is room.
-    if height >= 6:
-        return [gpu_row, mem_row, None, title, to_gpu, to_cpu] + [row([])] * (height - 6)
-    if height == 5:
-        return [gpu_row, mem_row, title, to_gpu, to_cpu]
+    to_gpu, to_cpu = link("CPU -> GPU", s.rx), link("GPU -> CPU", s.tx)
+    # The rule (None) between MEM and the PCIe traffic only appears when there is room.
+    if height >= 5:
+        return [gpu_row, mem_row, None, to_gpu, to_cpu] + [row([])] * (height - 5)
     return [gpu_row, mem_row, to_gpu, to_cpu][:height]
 
 
@@ -1436,7 +1446,7 @@ def main():
     parser = argparse.ArgumentParser(
         prog="nvmon", description="A fancy NVIDIA GPU monitor for the terminal.",
         epilog="At start nvmon asks PyPI whether a newer release is out; NVMON_NO_UPDATE_CHECK=1 turns that "
-               "off. " + REPO)
+               "off. NVMON_COLORS=256 is for terminals without 24-bit colour. " + REPO)
     parser.add_argument("-i", "--interval", type=interval, default=DEFAULT_INTERVAL, metavar="SEC",
                         help="seconds between updates, at least 0.1 (default: 0.5)")
     parser.add_argument("-g", "--gpus", type=gpu_list, metavar="LIST",

@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 import nvmon  # noqa: E402
 
 # (file, columns, rows, show the process list with a job picked)
-SIZES = [("demo-wide.gif", 160, 40, False), ("demo-small.gif", 100, 30, False), ("demo-list.gif", 160, 56, True)]
+SIZES = [("demo-wide.gif", 160, 31, False), ("demo-small.gif", 100, 30, False), ("demo-list.gif", 160, 56, True)]
 FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono{}.ttf"
 CELL_W, CELL_H, PAD, SIZE = 9, 18, 14, 15
 BG, FG = (24, 24, 27), (215, 215, 215)

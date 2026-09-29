@@ -2,11 +2,15 @@
 
 A fancy NVIDIA GPU monitor for the terminal. Single Python file, no dependencies.
 
-![nvmon showing four H100 GPUs](https://raw.githubusercontent.com/Han-DongHeun/nvmon/main/docs/demo.gif)
+![nvmon showing eight H100 GPUs in two columns](https://raw.githubusercontent.com/Han-DongHeun/nvmon/main/docs/demo-wide.gif)
 
-On a wide terminal, eight GPUs go into two columns:
+It fits the window. In a small one the boxes get shorter, and scroll once they no longer fit:
 
-![nvmon showing eight H100 GPUs in two columns](https://raw.githubusercontent.com/Han-DongHeun/nvmon/main/docs/demo-grid.gif)
+![nvmon in a small window, scrolling through the GPUs](https://raw.githubusercontent.com/Han-DongHeun/nvmon/main/docs/demo-small.gif)
+
+`p` lists every job; a picked one stands out on the GPUs it uses:
+
+![nvmon with the process list open and a torchrun job picked](https://raw.githubusercontent.com/Han-DongHeun/nvmon/main/docs/demo-list.gif)
 
 ## Install
 
@@ -34,10 +38,11 @@ Hold Shift to select text with the mouse.
 
 ## What it shows
 
-- **GPU**: share of time any kernel ran. **cores / tensor** (H100 and newer): share of SMs busy
-  and Tensor Core activity. A GPU can read 100 % while its cores sit at 30 %.
-- **MEM**, **PCIe** traffic in each direction against the link's top speed, power, temperature,
-  fan and clock.
+- **GPU**: how much of the time something ran on it. **cores / tensor** (H100 and newer): how much
+  of the chip that work kept busy, and how much of it was matrix math on the Tensor Cores. A GPU
+  reads 100 % as soon as one small kernel runs all the time, while its cores may sit at 30 %.
+- **MEM**, data sent **CPU -> GPU** and **GPU -> CPU** against the link's top speed, power,
+  temperature, fan and clock.
 - Processes on each GPU with run time and memory, grouped by account and conda environment
   (your own account unlabelled), script names for Python.
 - Warnings only when something is off: `SLOWED: power cap | too hot | hw brake` when the clock is held back,
@@ -48,6 +53,11 @@ Hold Shift to select text with the mouse.
 - Needs an NVIDIA driver and a truecolor terminal. In tmux, add
   `set -ag terminal-overrides ",*:RGB"` to `~/.tmux.conf`.
 - On Windows, run it in Windows Terminal; Git Bash's default window is not a terminal to Python.
+- Broken lines or boxes (Xshell, PuTTY and the like): the terminal draws line and block characters two
+  cells wide, as some Korean, Chinese and Japanese fonts do. Set its encoding to UTF-8, turn off
+  "ambiguous characters as wide", and pick a font whose line characters are one cell wide.
+- Odd colours: the terminal lacks 24-bit colour. In Xshell, turn on Tools > Options > Advanced >
+  Use true color; elsewhere, run nvmon with `NVMON_COLORS=256`.
 - When a newer release is out, the bottom line says so, with the command that updates your install.
   nvmon asks PyPI once at start; `NVMON_NO_UPDATE_CHECK=1` turns that off.
 

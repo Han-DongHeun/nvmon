@@ -1256,12 +1256,10 @@ def main():
     if not sys.stdout.isatty():
         sys.exit("nvmon: output is not a terminal (over ssh, use: ssh -t HOST nvmon)")
 
+    # NVML is never shut down: exiting frees it as well, while nvmlShutdown can keep a busy driver, and so
+    # the shell prompt, waiting for a second.
     try:
         nv = load_nvml()
-    except NvmlError as e:
-        sys.exit("nvmon: {}".format(e))
-    poller = None
-    try:
         gpus = open_gpus(nv, args.gpus)
         missing = sorted((args.gpus or set()) - {g.index for g in gpus})
         if missing:
@@ -1304,9 +1302,6 @@ def main():
         pass
     except NvmlError as e:
         sys.exit("nvmon: {}".format(e))
-    finally:
-        if poller is None or poller.done.is_set():  # leave NVML be while a call is still inside it
-            nv.nvmlShutdown()
 
 
 if __name__ == "__main__":

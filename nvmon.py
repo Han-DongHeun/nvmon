@@ -68,6 +68,7 @@ TEMP = _gradient([(30, (95, 135, 215)), (45, (95, 175, 175)), (60, GREEN), (72, 
 WARN, SLOW, ALERT = _rgb(YELLOW), _rgb(ORANGE), _rgb(RED)
 # Everything else sticks to the 256-colour palette.
 DIM, FAINT, PROC = _fg(240), _fg(237), _fg(110)
+NEWS = PROC  # a newer release is news, not trouble: the process names' calm blue, not warning yellow
 BOLD, RESET = "\x1b[1m", "\x1b[0m"
 
 
@@ -763,7 +764,7 @@ def footer(width, newer=None):
     right, left = [("Esc / q quit", DIM)], []
     if newer:
         version, command = newer
-        notice = [("update available: " + version, WARN)]
+        notice = [("update available: " + version, NEWS)]
         how = [(" ({})".format(command or "new nvmon.py: " + RELEASES), "")]
         link = [("   what's new: " + RELEASES, DIM)] if command else []  # a copied nvmon.py already links there
         # As much as fits beside "Esc / q quit": the link goes first, then how to update.

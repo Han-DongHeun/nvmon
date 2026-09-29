@@ -43,6 +43,8 @@ ssh -t HOST nvmon  # over ssh: -t gives it a terminal
 - Needs an NVIDIA driver and a truecolor terminal. In tmux, add
   `set -ag terminal-overrides ",*:RGB"` to `~/.tmux.conf`.
 - On Windows, run it in Windows Terminal; Git Bash's default window is not a terminal to Python.
+- When a newer release is out, the bottom line says so, with the command that updates your install.
+  nvmon asks PyPI once at start; `NVMON_NO_UPDATE_CHECK=1` turns that off.
 
 ## License
 

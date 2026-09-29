@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""nvmon: a compact, btop-style NVIDIA GPU monitor with zero dependencies.
+"""nvmon: a fancy NVIDIA GPU monitor for the terminal. Single Python file, no dependencies.
 
 One box per GPU: utilization history on the left (0 % at the bottom, 100 % at
 the top); utilization, memory and PCIe traffic on the right; name, power,
 warnings, temperature, fan and clock on the top edge; processes on the bottom
 edge. It talks to the NVML library that ships with the NVIDIA driver through
 ctypes and draws with plain ANSI escape codes, so a single file runs on any
-Python >= 3.6.
+Python >= 3.6. At start it asks PyPI whether a newer release is out
+(NVMON_NO_UPDATE_CHECK=1 turns that off).
 
     nvmon [-i SECONDS] [-g 0,2,4-7]        q / Esc / Ctrl+C to quit
 """
@@ -16,17 +17,21 @@ import itertools
 import math
 import operator
 import os
+import re
 import signal
 import socket
 import sys
+import threading
 import time
 from collections import deque
-from concurrent.futures import ThreadPoolExecutor
 from ctypes import byref, c_int, c_uint, c_ulonglong, c_void_p
 from functools import lru_cache
 from typing import NamedTuple, Optional
 
 __version__ = "0.2.1"
+REPO = "https://github.com/Han-DongHeun/nvmon"
+RELEASES = REPO + "/releases"                 # release notes, and nvmon.py for those who copy the file
+PYPI_JSON = "https://pypi.org/pypi/nvmon/json"
 
 INFO_W = 32                          # width of the stats column
 CHROME_W = 7                         # "│ " + " │ " + " │" around graph and stats
@@ -154,7 +159,7 @@ def load_nvml():
         paths = ["libnvidia-ml.so.1"]
     for path in paths:
         try:
-            nv = ctypes.CDLL(path)  # CDLL releases the GIL during calls, so threads can poll GPUs in parallel
+            nv = ctypes.CDLL(path)  # CDLL releases the GIL during calls: a slow one only holds up the Poller
         except OSError:
             continue
         nv.nvmlErrorString.restype = ctypes.c_char_p
@@ -203,7 +208,8 @@ class Gpu:
         name = name.value.decode("utf-8", "replace")
         self.name = name[len("NVIDIA "):] if name.startswith("NVIDIA ") else name
         self.history = deque(maxlen=HISTORY)
-        self.now = None
+        self.sample = None  # the newest reading, written by poll()
+        self.now = None     # the reading on screen, taken from `sample` by frame()
         self.pcie_max_gen = self._uint("nvmlDeviceGetMaxPcieLinkGeneration")
         self.pcie_max_width = self._uint("nvmlDeviceGetMaxPcieLinkWidth")
         self._gpm = self._gpm_samples()
@@ -250,8 +256,8 @@ class Gpu:
         samples = [c_void_p(), c_void_p()]
         if any(self.nv.nvmlGpmSampleAlloc(byref(sample)) != NVML_SUCCESS for sample in samples):
             return None
-        # Take the first sample now, on the main thread: NVML crashes when a device's
-        # first GPM sample is taken from several threads at once.
+        # The first sample, as the baseline for the first poll. (NVML crashes when a device's
+        # first GPM samples are taken from several threads at once.)
         if not self._ok("nvmlGpmSampleGet", samples[0]):
             return None
         return samples  # [previous, current], kept for the whole run
@@ -320,6 +326,7 @@ class Gpu:
         return exe
 
     def poll(self):
+        """Read everything shown into `sample`."""
         util = Utilization()
         util = util.gpu if self._ok("nvmlDeviceGetUtilizationRates", byref(util)) else None
         used, total = self._memory()
@@ -330,7 +337,7 @@ class Gpu:
         power = self._uint("nvmlDeviceGetPowerUsage")            # mW
         limit = self._uint("nvmlDeviceGetEnforcedPowerLimit")    # mW
         cores, tensor, gpm_tx, gpm_rx = self._activity()
-        self.now = Sample(
+        self.sample = Sample(
             util=util,
             temp=self._temperature(),
             fan=self._uint("nvmlDeviceGetFanSpeed"),
@@ -347,7 +354,50 @@ class Gpu:
             slowdown=self._slowdown(),
             processes=self._listed,
         )
-        self.history.append(util or 0)
+
+    def frame(self):
+        """Put the newest reading on screen for the next frame; the graph gains one column per frame."""
+        self.now = self.sample
+        self.history.append(self.now.util or 0)
+
+
+class Poller(threading.Thread):
+    """Polls every GPU on a thread of its own, so a busy driver delays the numbers, not the screen.
+
+    The driver serves one program at a time: while someone runs nvidia-smi (half a second for eight
+    H100s), a query can wait 0.4 s, and polling on the main thread made the screen stutter.
+    """
+
+    def __init__(self, gpus):
+        super().__init__(daemon=True)  # a driver call that never returns does not keep nvmon open
+        self.gpus, self.error, self.started = gpus, None, None
+        self.wanted, self.done = threading.Event(), threading.Event()
+        self.done.set()
+        self.start()
+
+    def run(self):
+        while True:
+            self.wanted.wait()
+            self.wanted.clear()
+            try:
+                for gpu in self.gpus:
+                    gpu.poll()
+            except Exception as e:  # a bug: refresh() raises it rather than leaving the numbers frozen
+                self.error = e
+            self.done.set()
+
+    def refresh(self):
+        """Start a round of polls, unless the last one is still running."""
+        if self.error:
+            raise self.error
+        if self.done.is_set():
+            self.done.clear()
+            self.started = time.monotonic()
+            self.wanted.set()
+
+    def waiting(self):
+        """How long the running round has waited on the driver so far; 0 when none is running."""
+        return 0 if self.done.is_set() else time.monotonic() - self.started
 
 
 def versions(nv):
@@ -366,13 +416,17 @@ def process_facts(pid):
 
 
 def conda_env(pid):
-    """Name of the conda environment whose Python runs `pid`: ".../envs/NAME/bin/python" -> NAME,
-    the conda root's own Python -> "base"; None outside conda."""
+    """Name of the conda environment whose Python runs `pid`; None outside conda."""
     try:
         exe = os.readlink("/proc/{}/exe".format(pid))
     except OSError:
         return None
-    prefix = os.path.dirname(os.path.dirname(exe))
+    return conda_name(os.path.dirname(os.path.dirname(exe)))  # .../envs/NAME/bin/python
+
+
+def conda_name(prefix):
+    """The conda environment installed at `prefix`: ".../envs/NAME" -> NAME, the conda root itself
+    -> "base"; None when `prefix` is not a conda environment."""
     if not os.path.isdir(os.path.join(prefix, "conda-meta")):
         return None
     return os.path.basename(prefix) if os.path.basename(os.path.dirname(prefix)) == "envs" else "base"
@@ -419,6 +473,55 @@ def open_gpus(nv, wanted=None):
         if nv.nvmlDeviceGetHandleByIndex_v2(index, byref(handle)) == NVML_SUCCESS:
             gpus.append(Gpu(nv, index, handle))
     return gpus
+
+
+# ── new releases ─────────────────────────────────────────────────────────────
+
+class UpdateCheck(threading.Thread):
+    """Asks PyPI for the latest release in the background. Afterwards `newer` is (version, how to
+    update) when that release is newer than this one; it stays None otherwise, and on any failure."""
+
+    def __init__(self):
+        super().__init__(daemon=True)  # a slow network never holds up quitting
+        self.newer = None
+
+    def run(self):
+        try:
+            import json
+            import urllib.request
+            with urllib.request.urlopen(PYPI_JSON, timeout=5) as response:
+                latest = json.load(response)["info"]["version"]
+            # Nothing from the network reaches the screen but a plain release number such as 0.2.2.
+            if re.fullmatch(r"[0-9]+(\.[0-9]+)*", latest) and \
+                    tuple(map(int, latest.split("."))) > tuple(map(int, __version__.split("."))):
+                self.newer = latest, update_command()
+        except Exception:  # offline, firewalled, a proxy in the way, an odd answer: no notice, no noise
+            pass
+
+
+def update_command():
+    """How to update this copy of nvmon, judged from where it runs; None for a copied nvmon.py."""
+    prefix = sys.prefix
+
+    def has(name):
+        return os.path.exists(os.path.join(prefix, name))
+    if has("uv-receipt.toml"):  # `uv tool install`; `uvx nvmon` runs that same install too
+        return "uv tool upgrade nvmon"
+    if has("pipx_metadata.json"):
+        return "pipx upgrade nvmon"
+    if os.path.basename(os.path.dirname(os.path.abspath(__file__))) not in ("site-packages", "dist-packages"):
+        return None
+    if os.path.basename(os.path.dirname(prefix)).startswith("archive-v"):  # uvx: a throwaway env in uv's cache
+        return "uvx nvmon@latest"
+    env = conda_name(prefix)
+    if env:
+        return "in env {}: pip install -U nvmon".format(env)
+    try:
+        with open(os.path.join(prefix, "pyvenv.cfg")) as f:
+            made_by_uv = any(line.startswith("uv =") for line in f)
+    except OSError:  # not a virtual environment
+        made_by_uv = False
+    return "uv pip install -U nvmon" if made_by_uv else "pip install -U nvmon"  # uv's venvs have no pip
 
 
 # ── rendering ────────────────────────────────────────────────────────────────
@@ -642,20 +745,31 @@ def spread(width, left, right):
     return clip(pad(clip(left, room - 1), room) + right, width)
 
 
-def header(width, interval, driver):
-    """Top line: name, version, host, local time | driver, refresh interval."""
+def header(width, interval, driver, waiting=0):
+    """Top line: name, version, host, local time | driver (or how long it has kept us waiting), refresh."""
     now = time.time()
     stamp = time.strftime("%Y-%m-%d %a %H:%M:%S", time.localtime(now)) + ".{:02d}".format(int(now % 1 * 100))
     left = [("nvmon", BOLD), (" " + __version__, DIM), ("  " + socket.gethostname(), ""), ("  " + stamp, "")]
     right = [("refresh ", DIM), ("{:g}s".format(interval), "")]
-    if driver and width_of(left) + 2 + len(driver) + 3 + width_of(right) <= width:  # dropped when narrow
+    if waiting >= 1:  # the numbers below are that old: something is keeping the driver busy, or it hangs
+        right = [("driver: no answer for {:.0f}s   ".format(waiting), WARN)] + right
+    elif driver and width_of(left) + 2 + len(driver) + 3 + width_of(right) <= width:  # dropped when narrow
         right = [(driver + "   ", DIM)] + right
     return spread(width, left, right)
 
 
-def footer(width):
-    """Bottom line: how to quit."""
-    return spread(width, [], [("Esc / q quit", DIM)])
+def footer(width, newer=None):
+    """Bottom line: a newer release when there is one, with how to update | how to quit."""
+    right, left = [("Esc / q quit", DIM)], []
+    if newer:
+        version, command = newer
+        notice = [("update available: " + version, WARN)]
+        how = [(" ({})".format(command or "new nvmon.py: " + RELEASES), "")]
+        link = [("   what's new: " + RELEASES, DIM)] if command else []  # a copied nvmon.py already links there
+        # As much as fits beside "Esc / q quit": the link goes first, then how to update.
+        left = next((option for option in (notice + how + link, notice + how)
+                     if width_of(option) + 2 + width_of(right) <= width), notice)
+    return spread(width, left, right)
 
 
 def paint(lines):
@@ -694,7 +808,7 @@ class Screen:
         """Sleep for `seconds`; returns True early if q or Esc is pressed."""
         end = time.monotonic() + seconds
         if not self._keys:
-            time.sleep(seconds)
+            time.sleep(max(0, seconds))
             return False
         if os.name == "nt":
             import msvcrt
@@ -776,12 +890,15 @@ def gpu_list(spec):
 
 
 def main():
-    parser = argparse.ArgumentParser(prog="nvmon", description="Compact btop-style NVIDIA GPU monitor.")
+    parser = argparse.ArgumentParser(
+        prog="nvmon", description="A fancy NVIDIA GPU monitor for the terminal.",
+        epilog="At start nvmon asks PyPI whether a newer release is out; NVMON_NO_UPDATE_CHECK=1 turns that "
+               "off. " + REPO)
     parser.add_argument("-i", "--interval", type=float, default=0.5, metavar="SEC",
                         help="seconds between updates (default: 0.5)")
     parser.add_argument("-g", "--gpus", type=gpu_list, metavar="LIST",
                         help="only these GPUs, e.g. 0,2,4-7 (default: all)")
-    parser.add_argument("-V", "--version", action="version", version="nvmon " + __version__)
+    parser.add_argument("-V", "--version", action="version", version="nvmon {} {}".format(__version__, REPO))
     args = parser.parse_args()
     if not 0 < args.interval < math.inf:  # also rejects NaN
         parser.error("--interval must be a positive number of seconds")
@@ -792,6 +909,7 @@ def main():
         nv = load_nvml()
     except NvmlError as e:
         sys.exit("nvmon: {}".format(e))
+    poller = None
     try:
         gpus = open_gpus(nv, args.gpus)
         missing = sorted((args.gpus or set()) - {g.index for g in gpus})
@@ -800,28 +918,38 @@ def main():
         if not gpus:
             sys.exit("nvmon: no accessible NVIDIA GPU")
         driver = versions(nv)
+        update = UpdateCheck()
+        if not os.environ.get("NVMON_NO_UPDATE_CHECK"):
+            update.start()
         signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(128 + signum))
-        with ThreadPoolExecutor(len(gpus)) as pool, Screen() as screen:
-            # Without GPM (before Hopper) the PCIe query blocks for 20 ms, so such GPUs poll side by
-            # side on threads. Otherwise one after another is quicker: threads would only add overhead.
-            poll_all = map if all(g.has_activity for g in gpus) else pool.map
+        for g in gpus:
+            g.poll()  # the first numbers, before the screen opens
+        poller = Poller(gpus)
+        with Screen() as screen:
             deadline = time.monotonic()
             while True:
-                list(poll_all(Gpu.poll, gpus))
+                for g in gpus:
+                    g.frame()
                 width, height = os.get_terminal_size()
-                screen.draw([header(width, args.interval, driver)] + render(gpus, width, height - 2)
-                            + [footer(width)])
+                screen.draw([header(width, args.interval, driver, poller.waiting())]
+                            + render(gpus, width, height - 2) + [footer(width, update.newer)])
                 # Fixed-rate ticks; a late tick restarts the schedule instead of bursting.
-                now = time.monotonic()
-                deadline = max(deadline + args.interval, now)
-                if screen.wait(deadline - now):
+                deadline = max(deadline + args.interval, time.monotonic())
+                # The next frame's polls start ahead of it: half a tick, at most 0.5 s (a busy driver was seen
+                # to take 0.4 s). Should the driver answer later still, the frame keeps the last numbers but
+                # comes on time.
+                if screen.wait(deadline - min(args.interval / 2, 0.5) - time.monotonic()):
+                    break
+                poller.refresh()
+                if screen.wait(deadline - time.monotonic()):
                     break
     except KeyboardInterrupt:
         pass
     except NvmlError as e:
         sys.exit("nvmon: {}".format(e))
     finally:
-        nv.nvmlShutdown()
+        if poller is None or poller.done.is_set():  # leave NVML be while a call is still inside it
+            nv.nvmlShutdown()
 
 
 if __name__ == "__main__":

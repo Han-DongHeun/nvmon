@@ -12,11 +12,24 @@ jobs:
       - uses: astral-sh/setup-uv@v10.2.0
       - name: Tag must match __version__
         run: test "v$(python3 -c 'import nvmon; print(nvmon.__version__)')" = "$GITHUB_REF_NAME"
+      - name: Release notes from CHANGELOG.md
+        # The lines under "## <version>" up to the next "## "; no notes, no release.
+        run: |
+          awk -v version="${GITHUB_REF_NAME#v}" '/^## / { if (found) exit; found = ($2 == version); next } found' \
+            CHANGELOG.md > release-notes.md
+          test -n "$(tr -d '[:space:]' < release-notes.md)" \
+            || { echo "CHANGELOG.md has no notes under '## ${GITHUB_REF_NAME#v}'"; exit 1; }
       - run: uv build
       - uses: actions/upload-artifact@v7
         with:
           name: dist
           path: dist/
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release
+          path: |
+            nvmon.py
+            release-notes.md
 
   publish:
     needs: build
@@ -30,3 +43,18 @@ jobs:
           name: dist
           path: dist/
       - uses: pypa/gh-action-pypi-publish@release/v1
+
+  release:
+    needs: publish  # the release page, with nvmon.py for those who copy the file, once PyPI has it
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: release
+      - run: >-
+          gh release create "$GITHUB_REF_NAME" nvmon.py --repo "$GITHUB_REPOSITORY"
+          --title "nvmon ${GITHUB_REF_NAME#v}" --notes-file release-notes.md
+        env:
+          GH_TOKEN: ${{ github.token }}

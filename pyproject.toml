@@ -27,6 +27,7 @@ classifiers = [
 [project.urls]
 Source = "https://github.com/Han-DongHeun/nvmon"
 Issues = "https://github.com/Han-DongHeun/nvmon/issues"
+Changelog = "https://github.com/Han-DongHeun/nvmon/releases"
 
 [project.scripts]
 nvmon = "nvmon:main"

@@ -27,8 +27,10 @@ nvmon -g 0,2,4-7   # only these GPUs
 ssh -t HOST nvmon  # over ssh: -t gives it a terminal
 ```
 
-Click a process, or press Tab, to pick its job: the GPUs it uses stand out, `f` shows only those,
-`t` stops it and `k` kills it (after a `y`). `p` lists every job. Hold Shift to select text with the mouse.
+Click a process, or press Tab, to pick its job: the GPUs it uses stand out, and `f` shows only those.
+`t` asks the job to stop (SIGTERM: it may save and exit), `k` ends it at once (SIGKILL); both ask for a
+`y` first. `p` lists every job with its utilization and command line; click a heading to sort by it.
+Hold Shift to select text with the mouse.
 
 ## What it shows
 

@@ -80,6 +80,7 @@ def heat(t):
 # ── NVML (libnvidia-ml / nvml.dll, part of the NVIDIA driver) ───────────────
 
 NVML_SUCCESS = 0
+NVML_ERROR_NOT_FOUND, NVML_ERROR_INSUFFICIENT_SIZE = 6, 7
 # Failures that hold for as long as we run: the GPU, or this driver version, lacks the query.
 NVML_ERROR_NOT_SUPPORTED, NVML_ERROR_FUNCTION_NOT_FOUND, NVML_ERROR_ARGUMENT_VERSION_MISMATCH = 3, 13, 25
 NVML_TEMPERATURE_GPU = 0
@@ -177,6 +178,7 @@ def check(nv, rc):
 class Process(NamedTuple):
     pid: int
     name: str                     # script name for Python, else the executable
+    command: str                  # the command line from `name` on, e.g. "train.py --lr 3e-4"
     mem: Optional[float]          # GPU memory, GiB
     owner: Optional[str]          # account; None for our own processes
     env: Optional[str]            # conda environment
@@ -201,6 +203,12 @@ class Sample(NamedTuple):
     tensor: Optional[float]       # % Tensor Core activity (GPM)
     slowdown: Optional[tuple]     # (label, colour) when the clock is held back
     processes: list               # [Process]
+    process_util: Optional[dict]  # pid -> % of time its kernels ran; None unless the process list is open
+
+
+class ProcessUtil(ctypes.Structure):  # nvmlProcessUtilizationSample_t
+    _fields_ = [("pid", c_uint), ("timeStamp", c_ulonglong), ("smUtil", c_uint), ("memUtil", c_uint),
+                ("encUtil", c_uint), ("decUtil", c_uint)]
 
 
 class Gpu:
@@ -220,17 +228,22 @@ class Gpu:
         self.has_activity = self._gpm is not None
         self._facts = {}  # pid -> what _facts_of says: fixed for a process's life, so read once
         self._listed, self._listed_mem = [], None  # process list, and the memory in use when it was read
+        # Per-process utilization: the driver's samples since `seen` (µs), read at most every second.
+        self._util, self._util_due, self._util_seen, self._util_buf = None, 0, 0, (ProcessUtil * 128)()
 
-    def _ok(self, fn, *args):
-        """Run the device query `fn`; True on success. A query this GPU or driver cannot answer is not
+    def _call(self, fn, *args):
+        """Run the device query `fn`; its NVML return code. A query this GPU or driver cannot answer is not
         asked again: the answer costs time too (0.3 ms of CPU for a fanless H100 to say it has no fan)."""
         if fn in self._unsupported:
-            return False
+            return NVML_ERROR_NOT_SUPPORTED
         query = getattr(self.nv, fn, None)  # None: a driver older than this function
         rc = query(self.handle, *args) if query else NVML_ERROR_FUNCTION_NOT_FOUND
         if rc in (NVML_ERROR_NOT_SUPPORTED, NVML_ERROR_FUNCTION_NOT_FOUND, NVML_ERROR_ARGUMENT_VERSION_MISMATCH):
             self._unsupported.add(fn)
-        return rc == NVML_SUCCESS
+        return rc
+
+    def _ok(self, fn, *args):
+        return self._call(fn, *args) == NVML_SUCCESS
 
     def _uint(self, fn, *args):
         """Scalar query; None when this GPU does not support it (e.g. fan on an H100)."""
@@ -302,18 +315,19 @@ class Gpu:
         procs = []
         for p in running:
             mem = None if p.usedGpuMemory == NVML_VALUE_NOT_AVAILABLE else p.usedGpuMemory / 2**30
-            name, owner, env, started, job, launcher = self._facts[p.pid]
-            procs.append(Process(p.pid, name, mem, owner, env, started, job, launcher))
+            name, command, owner, env, started, job, launcher = self._facts[p.pid]
+            procs.append(Process(p.pid, name, command, mem, owner, env, started, job, launcher))
         return procs
 
     def _facts_of(self, pid):
-        """(name, owner, conda environment, start time, job, launcher name) of `pid`."""
+        """(name, command, owner, conda environment, start time, job, launcher name) of `pid`."""
         launcher = launcher_of(pid)
-        return ((self._process_name(pid),) + process_facts(pid)
-                + ((launcher, self._process_name(launcher)) if launcher else (pid, None)))
+        return (self._command(pid) + process_facts(pid)
+                + ((launcher, self._command(launcher)[0]) if launcher else (pid, None)))
 
-    def _process_name(self, pid):
-        """Short name; for a Python interpreter, the script or module it runs (train.py, torch.distributed.run)."""
+    def _command(self, pid):
+        """(short name, command line from it on) of `pid`. For a Python interpreter the name is the script
+        or module it runs: ("train.py", "train.py --lr 3e-4"), ("torch.distributed.run", ...)."""
         try:
             with open("/proc/{}/cmdline".format(pid), "rb") as f:
                 argv = [a for a in f.read().decode("utf-8", "replace").split("\0") if a]
@@ -322,20 +336,41 @@ class Gpu:
         if not argv:
             name = ctypes.create_string_buffer(256)
             if self.nv.nvmlSystemGetProcessName(pid, name, 256) != NVML_SUCCESS:
-                return str(pid)
+                return str(pid), ""
             argv = [name.value.decode("utf-8", "replace")]
-        exe = os.path.basename(argv[0])
+        exe, rest = os.path.basename(argv[0]), argv[1:]
         if exe.startswith("python"):
-            args = iter(argv[1:])
-            for arg in args:
-                if arg == "-m":
-                    return next(args, exe)
+            for i, arg in enumerate(rest):
+                if arg == "-m" and i + 1 < len(rest):
+                    return rest[i + 1], " ".join(rest[i + 1:])
                 if not arg.startswith("-"):
-                    return os.path.basename(arg)
-        return exe
+                    name = os.path.basename(arg)
+                    return name, " ".join([name] + rest[i + 1:])
+        return exe, " ".join([exe] + rest)
 
-    def poll(self):
-        """Read everything shown into `sample`."""
+    def _process_util(self):
+        """{pid: % of the time its kernels ran} since the last call; None where the GPU cannot tell
+        (with MIG, say). The driver takes some 2 ms to answer, so this is asked only while it is shown."""
+        for _ in range(3):
+            count = c_uint(len(self._util_buf))
+            rc = self._call("nvmlDeviceGetProcessUtilization", self._util_buf, byref(count),
+                            c_ulonglong(self._util_seen))
+            if rc != NVML_ERROR_INSUFFICIENT_SIZE:
+                break
+            self._util_buf = (ProcessUtil * (2 * count.value))()
+        if rc == NVML_ERROR_NOT_FOUND:  # no new samples: nothing ran
+            return {}
+        if rc != NVML_SUCCESS:
+            return None
+        samples = self._util_buf[:count.value]
+        self._util_seen = max([self._util_seen] + [s.timeStamp for s in samples])
+        runs = {}
+        for s in samples:
+            runs.setdefault(s.pid, []).append(s.smUtil)
+        return {pid: sum(values) / len(values) for pid, values in runs.items()}
+
+    def poll(self, detail=False):
+        """Read everything shown into `sample`; with `detail`, the processes' utilization too."""
         util = Utilization()
         util = util.gpu if self._ok("nvmlDeviceGetUtilizationRates", byref(util)) else None
         used, total = self._memory()
@@ -343,6 +378,11 @@ class Gpu:
         # being allocated or freed, so the list is read again only when the memory in use has changed.
         if used is None or used != self._listed_mem:
             self._listed, self._listed_mem = self._processes(), used
+        if not detail:
+            self._util = None
+        elif time.monotonic() >= self._util_due:
+            self._util = self._process_util() if self._listed else {}
+            self._util_due = time.monotonic() + 1
         power = self._uint("nvmlDeviceGetPowerUsage")            # mW
         limit = self._uint("nvmlDeviceGetEnforcedPowerLimit")    # mW
         cores, tensor, gpm_tx, gpm_rx = self._activity()
@@ -362,6 +402,7 @@ class Gpu:
             tensor=tensor,
             slowdown=self._slowdown(),
             processes=self._listed,
+            process_util=self._util,
         )
 
     def frame(self):
@@ -380,6 +421,7 @@ class Poller(threading.Thread):
     def __init__(self, gpus):
         super().__init__(daemon=True)  # a driver call that never returns does not keep nvmon open
         self.gpus, self.error, self.started = gpus, None, None
+        self.detail = False  # read the processes' utilization too: the process list is open
         self.wanted, self.done = threading.Event(), threading.Event()
         self.done.set()
         self.start()
@@ -390,7 +432,7 @@ class Poller(threading.Thread):
             self.wanted.clear()
             try:
                 for gpu in self.gpus:
-                    gpu.poll()
+                    gpu.poll(self.detail)
             except Exception as e:  # a bug: refresh() raises it rather than leaving the numbers frozen
                 self.error = e
             self.done.set()
@@ -540,27 +582,35 @@ class Job(NamedTuple):
     launcher: Optional[str]       # e.g. torchrun
     members: tuple                # (pid, start time) of its GPU processes
     gpus: tuple                   # the GPUs it uses
+    util: Optional[float]         # % of the time its kernels ran, over its GPUs; None when unknown
     mem: float                    # GiB, on all of them
     started: Optional[float]
     owner: Optional[str]
     env: Optional[str]
+    command: str                  # its biggest process's command line
 
 
 def jobs(gpus):
-    """The jobs on `gpus`: our own first, then by memory, biggest first."""
+    """The jobs on `gpus`, in the order of the GPUs they use."""
     parts = {}
     for gpu in gpus:
         for p in gpu.now.processes:
-            parts.setdefault(p.job, []).append((gpu.index, p))
+            parts.setdefault(p.job, []).append((gpu, p))
     found = []
     for pid, entries in parts.items():
         procs = [p for _, p in entries]
         main = max(procs, key=lambda p: p.mem or 0)
         starts = [p.started for p in procs if p.started is not None]
+        # Its share of each of its GPUs, averaged: a DDP job reads like one of its GPUs.
+        shares = {}
+        for gpu, p in entries:
+            if gpu.now.process_util is not None:
+                shares[gpu.index] = shares.get(gpu.index, 0) + gpu.now.process_util.get(p.pid, 0)
         found.append(Job(pid, main.name, main.launcher, tuple(sorted({(p.pid, p.started) for p in procs})),
-                         tuple(sorted({index for index, _ in entries})), sum(p.mem or 0 for p in procs),
-                         min(starts) if starts else None, main.owner, main.env))
-    return sorted(found, key=lambda job: (job.owner is not None, -job.mem))
+                         tuple(sorted({gpu.index for gpu, _ in entries})),
+                         sum(shares.values()) / len(shares) if shares else None, sum(p.mem or 0 for p in procs),
+                         min(starts) if starts else None, main.owner, main.env, main.command))
+    return sorted(found, key=lambda job: (job.gpus, job.pid))
 
 
 def ranges(numbers):
@@ -574,10 +624,14 @@ def ranges(numbers):
     return ",".join(str(a) if a == b else "{}-{}".format(a, b) for a, b in spans)
 
 
+def account(job):
+    """"kim/torch": whose it is, and the conda environment; our own go without an account."""
+    return "/".join(part for part in (job.owner, job.env) if part)
+
+
 def about(job):
     """"kim/torch · torchrun job · GPUs 4-5 · 30.2G · 2h13m"."""
-    who = "/".join(part for part in (job.owner, job.env) if part)
-    parts = [who] if who else []
+    parts = [account(job)] if account(job) else []
     parts.append("{} job".format(job.launcher) if job.launcher else "PID {}".format(job.pid))
     parts.append("GPU{} {}".format("s" if len(job.gpus) > 1 else "", ranges(job.gpus)))
     parts.append("{:.1f}G".format(job.mem))
@@ -588,23 +642,23 @@ def stop(job, name):
     """Send signal `name` ("SIGTERM" or "SIGKILL") to `job`, once /proc confirms its PIDs still are the
     processes we saw: started when we saw them, holding a GPU open (inside a container, NVML can report
     PIDs of the host), and ours. SIGTERM goes to the launcher, which then ends its workers; SIGKILL, which
-    it cannot pass on, goes to each worker as well. Returns a note on what happened."""
+    it cannot pass on, goes to each worker as well. Returns (a note on what happened, whether it was sent)."""
     if os.name == "nt":
-        return [("stopping processes works on Linux", WARN)]
+        return [("stopping processes works on Linux", WARN)], False
     for pid, started in job.members:
         if start_time(pid) != started or not holds_gpu(pid) or (job.launcher and parent_of(pid) != job.pid):
-            return [("{} has changed meanwhile: nothing sent".format(job.name), WARN)]
+            return [("{} has changed meanwhile: nothing sent".format(job.name), WARN)], False
     if uid_of(job.pid) != os.getuid():
-        return [("only your own processes can be stopped", WARN)]
+        return [("only your own processes can be stopped", WARN)], False
     targets = [job.pid] + ([pid for pid, _ in job.members] if name == "SIGKILL" and job.launcher else [])
     try:
         for pid in targets:
             os.kill(pid, getattr(signal, name))
     except ProcessLookupError:
-        return [("{} has already ended".format(job.name), "")]
+        return [("{} has already ended".format(job.name), "")], False
     except PermissionError:
-        return [("not allowed to signal PID {}".format(job.pid), WARN)]
-    return [("sent {} to {} (PID {})".format(name, job.launcher or job.name, job.pid), "")]
+        return [("not allowed to signal PID {}".format(job.pid), WARN)], False
+    return [("sent {} to {} (PID {})".format(name, job.launcher or job.name, job.pid), "")], True
 
 
 # ── new releases ─────────────────────────────────────────────────────────────
@@ -881,18 +935,52 @@ def render(gpus, width, height, selected=None):
     return lines + [[(" " * width, "")]] * (height - len(lines))
 
 
-def process_list(jobs, width, rows, selected, top):
-    """The list p opens, `rows` lines: a heading, the jobs from index `top` on (clicking one means it; the
-    `selected` one reversed), and how many more there are."""
-    lines = [[(" PID      account/env    process                   GPUs       memory     time", DIM)]]
+# The process list's columns: heading, width (">" when flush right), the cell for a job as (text, style),
+# and the key it sorts by. "command" takes whatever width is left.
+COLUMNS = [
+    ("PID", 8, lambda j: (str(j.pid), ""), lambda j: j.pid),
+    ("account/env", 14, lambda j: (account(j), ""), account),
+    ("process", 22, lambda j: (j.name + ("  {} workers".format(len(j.members)) if len(j.members) > 1 else ""),
+                               PROC), lambda j: j.name.lower()),
+    ("GPUs", 8, lambda j: (ranges(j.gpus), ""), lambda j: j.gpus),
+    (">util", 5, lambda j: share(j.util, 100)[0] if j.util is not None else ("-", ""),
+     lambda j: -1 if j.util is None else j.util),
+    (">memory", 7, lambda j: ("{:.1f}G".format(j.mem), ""), lambda j: j.mem),
+    (">time", 7, lambda j: (elapsed(j.started) if j.started is not None else "-", ""),
+     lambda j: -(j.started or 0)),
+    ("command", 0, lambda j: (j.command, DIM), lambda j: j.command),
+]
+SORTS = {heading.lstrip(">"): key for heading, _, _, key in COLUMNS}
+
+
+def cells(values, width, fill=("",)):
+    """One list line of `width` cells from (text, style, ...) values, one per column, two spaces apart;
+    `fill` = (style, ...) of the spaces between, so a selected row stays one bar and clicks anywhere."""
+    line, used = [(" ",) + fill], 1
+    for (heading, size, _, _), (text, *rest) in zip(COLUMNS, values):
+        size = size or max(0, width - used - 1)
+        text = text[:size].rjust(size) if heading.startswith(">") else text[:size].ljust(size)
+        line += [(text,) + tuple(rest), (" " if heading == "command" else "  ",) + fill]
+        used += size + 2
+    return line
+
+
+def process_list(jobs, width, rows, selected, top, sort):
+    """The list p opens, `rows` lines: the headings (clicking one sorts by it; `sort` = (column, descending)),
+    the jobs from index `top` on (clicking one means it; the `selected` one reversed), how many more."""
+    column, descending = sort
+    head = []
+    for heading, _, _, _ in COLUMNS:
+        name = heading.lstrip(">")
+        head.append((name + ("▼" if descending else "▲") if name == column else name,
+                     "" if name == column else DIM, ("sort", name)))
+    lines = [cells(head, width)]
     shown = jobs[top:top + rows - 2]
     for job in shown:
-        name = job.name + ("  {} workers".format(len(job.members)) if len(job.members) > 1 else "")
-        who = "/".join(part for part in (job.owner, job.env) if part)
-        time_ = elapsed(job.started) if job.started is not None else "-"
-        text = " {:<8} {:<14} {:<25} {:<9} {:>7.1f}G {:>8}".format(job.pid, who[:14], name[:25],
-                                                                   ranges(job.gpus)[:9], job.mem, time_)
-        lines.append([(text, SELECTED if job.pid == selected else "", job.pid)])
+        chosen = job.pid == selected
+        values = [cell(job) for _, _, cell, _ in COLUMNS]
+        lines.append(cells([(text, SELECTED if chosen else colour, job.pid) for text, colour in values], width,
+                           (SELECTED if chosen else "", job.pid)))
     if not jobs:
         lines.append([(" no processes on these GPUs", DIM)])
     above, below = top, len(jobs) - top - len(shown)
@@ -962,8 +1050,10 @@ class View:
         self.only = False                 # show only the GPUs it uses
         self.listing = False              # the process list is open
         self.top, self.follow = 0, True   # the list's first job; keep the selected one in view
+        self.sort = ("GPUs", False)       # the list's order, and the order Tab and the arrows go in
         self.asking = None                # "SIGTERM" or "SIGKILL" awaiting y or n
         self.note = None                  # (segments, until): what the last stop did
+        self.sent = None                  # (PID, when) of a SIGTERM, to point at k if the job lives on
         self.lines, self.jobs = [], []    # the last screen drawn, and the jobs on it
         self.clicked = (0, None)          # (when, what): the last click, to tell a double click
 
@@ -972,17 +1062,31 @@ class View:
 
     def screen(self, gpus, width, height, top_line, newer):
         """The whole screen: `top_line`, the GPU boxes (and the list, when open), the bottom line."""
-        self.jobs = jobs(gpus)
+        column, descending = self.sort
+        self.jobs = sorted(jobs(gpus), key=lambda job: (SORTS[column](job), job.pid), reverse=descending)
         job = self.selected()
         if job is None:  # nothing selected, or its job ended
             self.job, self.only, self.asking = None, False, None
+        self.remind()
         shown = [g for g in gpus if not self.only or g.index in job.gpus]
-        rows = min(len(self.jobs) + 2, max(4, (height - 2) // 3)) if self.listing else 0
+        rows = min(len(self.jobs) + 2, max(4, (height - 2) // 2)) if self.listing else 0
         body = render(shown, width, height - 2 - rows, self.job)
         if rows:
-            body += process_list(self.jobs, width, rows, self.job, self.scrolled(rows - 2))
+            body += process_list(self.jobs, width, rows, self.job, self.scrolled(rows - 2), self.sort)
         self.lines = [top_line] + body + [self.bottom_line(width, job, newer)]
         return self.lines
+
+    def remind(self):
+        """A job still there 5 s after its SIGTERM may be stuck, or slow to save: say that k ends it."""
+        if not self.sent:
+            return
+        pid, when = self.sent
+        job = next((job for job in self.jobs if job.pid == pid), None)
+        if job and time.monotonic() - when > 5:
+            self.note = ([("{} is still running 5 s after SIGTERM; k kills it at once".format(job.name), WARN)],
+                         time.monotonic() + 6)
+        if not job or time.monotonic() - when > 5:
+            self.sent = None
 
     def scrolled(self, room):
         """The list's first job, kept in range and, after the selection moved, on the selected job."""
@@ -1003,7 +1107,8 @@ class View:
             left = [(job.name, PROC, job.pid), ("  " + about(job), DIM, job.pid)]
             return spread(width, note or left, keys(*hints, ("Esc", "back")))
         if self.listing:
-            return spread(width, note or [("click or ↑↓ to pick a job", DIM)], keys(("Esc", "close")))
+            return spread(width, note or [("click a job or a heading", DIM)],
+                          keys(("s", "sort by next"), ("r", "reverse"), ("Esc", "close")))
         return spread(width, note, keys(("p", "processes"), ("Esc / q", "quit"))) if note else footer(width, newer)
 
     def question(self, job):
@@ -1032,9 +1137,13 @@ class View:
             if self.listing:
                 self.top, self.follow = self.top + 3 * value[0], False
             return True
+        if kind == "sort":  # a heading clicked: sort by it; again, the other way round
+            column, descending = self.sort
+            self.sort, self.follow = (value[0], not descending if value[0] == column else False), True
+            return True
         if kind == "click":
             target = self.target(*value)
-            if isinstance(target, tuple):  # a key hint on the bottom line
+            if isinstance(target, tuple):  # a key hint on the bottom line, or a heading of the list
                 return self.handle(target)
             if target == LIST:
                 self.listing = True
@@ -1049,7 +1158,9 @@ class View:
         key = value[0].lower() if len(value[0]) == 1 else value[0]
         if self.asking:  # y stops; anything else, n and Esc among them, lets it be
             if key == "y":
-                self.note = (stop(self.selected(), self.asking), time.monotonic() + 4)
+                note, sent = stop(self.selected(), self.asking)
+                self.note = (note, time.monotonic() + 4)
+                self.sent = (self.job, time.monotonic()) if sent and self.asking == "SIGTERM" else None
             self.asking = None
             return key != "q"
         if key == "q":
@@ -1065,6 +1176,13 @@ class View:
                 return False
         elif key == "p":
             self.listing = not self.listing
+        elif self.listing and key in ("s", "r"):  # the next column, or the other way round
+            names, (column, descending) = list(SORTS), self.sort
+            if key == "s":
+                self.sort = (names[(names.index(column) + 1) % len(names)], False)
+            else:
+                self.sort = (column, not descending)
+            self.follow = True
         elif key in MOVES and self.jobs:
             order = [job.pid for job in self.jobs]
             i = order.index(self.job) if self.job in order else (-1 if MOVES[key] > 0 else len(order))
@@ -1291,6 +1409,7 @@ def main():
                     # the last numbers but comes on time.
                     poll_at, redraw = frame_at - min(args.interval / 2, 0.5), True
                 if poll_at is not None and now >= poll_at:
+                    poller.detail = view.listing  # the processes' utilization costs the driver 2 ms a GPU
                     poller.refresh()
                     poll_at = None
                 if redraw:

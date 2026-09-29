@@ -6,8 +6,9 @@ What changes for you in each release. The same notes appear on the
 ## Unreleased
 
 - Processes: click one, or press Tab, to pick its job (a torchrun job's workers count as one). The GPUs
-  it uses stand out, `f` shows only those, `t` stops it and `k` kills it after a `y`, and `p` lists every
-  job. Only your own jobs can be stopped, and only once nvmon has checked they are still the same.
+  it uses stand out, and `f` shows only those. `t` asks it to stop (SIGTERM), `k` ends it at once
+  (SIGKILL), each after a `y`; only your own jobs, and only once nvmon has checked they are still the
+  same. `p` lists every job with its utilization and command line, sorted by whichever heading you click.
 - No more stutter when another program uses the GPU driver at the same time, such as someone
   running `watch nvidia-smi`. The screen now refreshes on time and keeps the last numbers until the
   driver answers. If it has not answered for a second, the top line says so.

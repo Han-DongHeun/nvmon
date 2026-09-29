@@ -999,7 +999,7 @@ class View:
         note = self.note[0] if self.note and time.monotonic() < self.note[1] else None
         if job:
             hints = [("f", "all GPUs" if self.only else "only these GPUs")]
-            hints += [("t", "stop"), ("k", "kill")] if job.owner is None else []
+            hints += [("t", "stop"), ("k", "kill")] if job.owner is None and os.name != "nt" else []
             left = [(job.name, PROC, job.pid), ("  " + about(job), DIM, job.pid)]
             return spread(width, note or left, keys(*hints, ("Esc", "back")))
         if self.listing:

@@ -12,6 +12,10 @@ It fits the window. In a small one the boxes get shorter, and scroll once they n
 
 ![nvmon with the process list open and a torchrun job picked](https://raw.githubusercontent.com/Han-DongHeun/nvmon/main/docs/demo-list.gif)
 
+`g` turns the graphs off, for more GPUs in less room:
+
+![nvmon without graphs, the GPUs as cards three to a row](https://raw.githubusercontent.com/Han-DongHeun/nvmon/main/docs/demo-cards.gif)
+
 ## Install
 
 ```bash
@@ -34,6 +38,9 @@ ssh -t HOST nvmon  # over ssh: -t gives it a terminal
 Click a process, or press Tab, to pick its job: the GPUs it uses stand out, and `f` shows only those.
 `t` asks the job to stop (SIGTERM: it may save and exit), `k` ends it at once (SIGKILL); both ask for a
 `y` first. `p` lists every job with its utilization and command line; click a heading to sort by it.
+
+The GPU numbers at the bottom left hide a GPU when clicked, and show it again; so does the number's
+key. `g` turns the graphs on and off, `c` switches the colours: 24-bit, 256, black and white.
 Hold Shift to select text with the mouse.
 
 ## What it shows
@@ -57,7 +64,8 @@ Hold Shift to select text with the mouse.
   cells wide, as some Korean, Chinese and Japanese fonts do. Set its encoding to UTF-8, turn off
   "ambiguous characters as wide", and pick a font whose line characters are one cell wide.
 - Odd colours: the terminal lacks 24-bit colour. In Xshell, turn on Tools > Options > Advanced >
-  Use true color; elsewhere, run nvmon with `NVMON_COLORS=256`.
+  Use true color; elsewhere, press `c`, or run nvmon with `NVMON_COLORS=256` to start that way.
+  `NVMON_COLORS=mono` (or `NO_COLOR=1`) starts in black and white.
 - When a newer release is out, the bottom line says so, with the command that updates your install.
   nvmon asks PyPI once at start; `NVMON_NO_UPDATE_CHECK=1` turns that off.
 

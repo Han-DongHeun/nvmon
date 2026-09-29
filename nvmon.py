@@ -45,20 +45,45 @@ def _fg(n):
     return "\x1b[38;5;{}m".format(n)
 
 
-# NVMON_COLORS=256 is for terminals without 24-bit colour (Xshell unless told, older PuTTY, macOS Terminal).
-TRUECOLOR = os.environ.get("NVMON_COLORS") != "256"
-
-
 def _rgb(rgb):
-    """The code for colour `rgb`: 24-bit, or with NVMON_COLORS=256 the nearest of the 256-colour palette."""
-    if TRUECOLOR:
-        return "\x1b[38;2;{};{};{}m".format(*rgb)
+    return "\x1b[38;2;{};{};{}m".format(*rgb)
+
+
+def _nearest256(rgb):
+    """The 256-colour palette's code nearest to colour `rgb`."""
     levels = (0, 95, 135, 175, 215, 255)  # the palette's 6 x 6 x 6 cube, then 24 greys
     cube = [min(range(6), key=lambda i: abs(levels[i] - v)) for v in rgb]
     grey = min(23, max(0, round((sum(rgb) / 3 - 8) / 10)))
     options = [(16 + 36 * cube[0] + 6 * cube[1] + cube[2], [levels[i] for i in cube]),
                (232 + grey, [8 + 10 * grey] * 3)]
     return _fg(min(options, key=lambda o: sum((a - b) ** 2 for a, b in zip(o[1], rgb)))[0])
+
+
+# Styles are written in 24-bit colour and turned into what the terminal shows as they are sent, see restyle:
+# "256" for terminals without 24-bit colour (Xshell unless told, older PuTTY, macOS Terminal), "mono" for
+# greys alone. The c key goes through them; NVMON_COLORS picks the first, and NO_COLOR means mono.
+COLOUR_MODES = ("truecolor", "256", "mono")
+COLOUR_ARG = re.compile(r"\x1b\[38;(?:2;(\d+);(\d+);(\d+)|5;(\d+))m")
+
+
+@lru_cache(maxsize=None)
+def restyle(style, mode):
+    """`style` in colour `mode`: 24-bit colours become the nearest of the 256-colour palette, or in mono go,
+    along with the palette's other hues; greys, bold, faint and reverse video stay."""
+    if mode == "truecolor":
+        return style
+
+    def swap(m):
+        if m.group(4):  # a palette colour: in mono only its greys (232-255) stay
+            return m.group(0) if mode != "mono" or int(m.group(4)) >= 232 else ""
+        return _nearest256([int(v) for v in m.group(1, 2, 3)]) if mode == "256" else ""
+    return COLOUR_ARG.sub(swap, style)
+
+
+def colour_mode():
+    """The colour mode to start in."""
+    wanted = os.environ.get("NVMON_COLORS", "")
+    return wanted if wanted in COLOUR_MODES else "mono" if os.environ.get("NO_COLOR") else "truecolor"
 
 
 def _gradient(stops):
@@ -391,7 +416,7 @@ class Gpu:
         if used is None or used != self._listed_mem:
             self._listed, self._listed_mem = self._processes(), used
         if not detail:
-            self._util = None
+            self._util, self._util_due = None, 0  # shown again, it is read at once
         elif time.monotonic() >= self._util_due:
             self._util = self._process_util() if self._listed else {}
             self._util_due = time.monotonic() + 1
@@ -434,6 +459,7 @@ class Poller(threading.Thread):
         super().__init__(daemon=True)  # a driver call that never returns does not keep nvmon open
         self.gpus, self.error, self.started = gpus, None, None
         self.detail = set()  # the GPUs to read the processes' utilization of, see View.detail
+        self.rounds = 0      # rounds of polls done
         self.wanted, self.done = threading.Event(), threading.Event()
         self.done.set()
         self.start()
@@ -447,6 +473,7 @@ class Poller(threading.Thread):
                     gpu.poll(gpu.index in self.detail)
             except Exception as e:  # a bug: refresh() raises it rather than leaving the numbers frozen
                 self.error = e
+            self.rounds += 1
             self.done.set()
 
     def refresh(self):
@@ -734,8 +761,6 @@ def update_command():
 # A line is a list of (text, style) segments; every character is one cell wide. A segment that can be
 # clicked carries a third item, what the click means: a job's PID, or ("key", name) and the like.
 
-# A horizontal rule across the stats column, joined to the borders.
-RULE = [(" ├" + "─" * (INFO_W + 2) + "┤", DIM)]
 SELECTED = "\x1b[7m" + PROC  # the selected job: reverse video, on the process names' blue
 FADED = "\x1b[2m"            # "faint": GPUs the selected job does not use
 
@@ -788,9 +813,9 @@ def graph(history, width, height):
     return rows
 
 
-def row(left, right=()):
-    """One stats line: `left`, then the `right` segments flush right; exactly INFO_W cells."""
-    room = INFO_W - width_of(right)
+def row(left, right=(), width=INFO_W):
+    """One stats line: `left`, then the `right` segments flush right; exactly `width` cells."""
+    room = width - width_of(right)
     return pad(clip(left, room - 1 if right else room), room) + list(right)
 
 
@@ -805,7 +830,8 @@ def num(value, fmt):
     return "-" if value is None else fmt.format(value)
 
 
-def info(gpu, height):
+def info(gpu, height, width=INFO_W):
+    """The stats column, `width` cells wide; None for the rule between MEM and the PCIe traffic."""
     s = gpu.now
     total = num(s.mem_total, "{:.1f}")
     busy = [("GPU ", "")] + share(s.util, 100)
@@ -817,15 +843,16 @@ def info(gpu, height):
     cap = (" / {:.0f}".format(top), WARN if degraded(gpu) else "") if top else ("", "")
 
     def link(label, rate):  # "CPU -> GPU ... 0.16 / 63 GB/s", flush right like MEM's used / total
-        return row([(label, "")], [("-" if rate is None else "{:.2f}".format(rate / 1e9), ""), cap, (" GB/s", "")])
+        return row([(label, "")], [("-" if rate is None else "{:.2f}".format(rate / 1e9), ""), cap, (" GB/s", "")],
+                   width)
 
-    gpu_row = row(busy)
+    gpu_row = row(busy, (), width)
     mem_row = row([("MEM ", "")] + share(s.mem_used, s.mem_total),
-                  [("{} / {} GiB".format(num(s.mem_used, "{:.1f}"), total), "")])
+                  [("{} / {} GiB".format(num(s.mem_used, "{:.1f}"), total), "")], width)
     to_gpu, to_cpu = link("CPU -> GPU", s.rx), link("GPU -> CPU", s.tx)
     # The rule (None) between MEM and the PCIe traffic only appears when there is room.
     if height >= 5:
-        return [gpu_row, mem_row, None, to_gpu, to_cpu] + [row([])] * (height - 5)
+        return [gpu_row, mem_row, None, to_gpu, to_cpu] + [row([], (), width)] * (height - 5)
     return [gpu_row, mem_row, to_gpu, to_cpu][:height]
 
 
@@ -835,11 +862,10 @@ def degraded(gpu):
     return bool(s.pcie_width and gpu.pcie_max_width and s.pcie_width < gpu.pcie_max_width)
 
 
-def panel(gpu, width, height, selected=None):
-    """One GPU's box; faded when a job is `selected` and it does not run here."""
-    graph_w = max(0, width - CHROME_W - INFO_W)
+def panel(gpu, width, height, selected=None, graphs=True):
+    """One GPU's box, the utilization graph beside the stats or, without `graphs`, a card of the stats
+    alone; faded when a job is `selected` and it does not run here."""
     s = gpu.now
-    split = 2 + graph_w + 1  # column of the graph | stats divider
     # Both sides as (segments, rank); when space runs out the lowest rank goes first:
     # fan, name, power, clock, temperature, PCIe warning, slowdown warning. The GPU number stays.
     # Fixed widths keep things from shifting.
@@ -853,10 +879,17 @@ def panel(gpu, width, height, selected=None):
     parts += [] if s.fan is None else [([("FAN {:>3}%".format(s.fan), "")], 1)]
     parts += [] if s.clock is None else [([("{:>4} MHz".format(s.clock), s.slowdown[1] if s.slowdown else "")], 4)]
     top = edge(width, label, parts)
+    if graphs:
+        graph_w = max(0, width - CHROME_W - INFO_W)
+        split = 2 + graph_w + 1  # column of the graph | stats divider
+        rule = [(" ├" + "─" * (INFO_W + 2) + "┤", DIM)]  # across the stats, joined to the borders
+        body = [[("│ ", DIM)] + g + (rule if i is None else [(" │ ", DIM)] + i + [(" │", DIM)])
+                for g, i in zip(graph(gpu.history, graph_w, height), info(gpu, height))]
+    else:
+        split = width - 1  # the processes take the whole bottom edge
+        rule = [("├" + "─" * (width - 2) + "┤", DIM)]
+        body = [rule if i is None else [("│ ", DIM)] + i + [(" │", DIM)] for i in info(gpu, height, width - 4)]
     bottom = bottom_edge(width, split, process_label(s.processes, split - 4, selected, gpu.index))
-    body = [[("│ ", DIM)] + g + (RULE if i is None
-                                  else [(" │ ", DIM)] + i + [(" │", DIM)])
-            for g, i in zip(graph(gpu.history, graph_w, height), info(gpu, height))]
     lines = [top] + body + [bottom]
     if selected is None or any(p.job == selected for p in s.processes):
         return lines
@@ -943,23 +976,28 @@ def bottom_edge(width, split, label):
 MIN_INNER_H = 2  # the shortest a box gets; when even that leaves GPUs out, the boxes scroll
 
 
-def layout(count, width, height):
+CARD_W = 48  # the narrowest a box without graph gets: room for the name, power, temperature and clock
+
+
+def layout(count, width, height, graphs=True):
     """(columns, inner height) for `count` GPU boxes in `width` x `height` cells."""
-    # Two columns only when one column cannot show every GPU at full height.
-    two_fit = width // 2 >= CHROME_W + INFO_W + MIN_GRAPH_W
-    cols = 2 if two_fit and count * (MAX_INNER_H + 2) > height else 1
+    if graphs:  # two columns only when one column cannot show every GPU at full height
+        two_fit = width // 2 >= CHROME_W + INFO_W + MIN_GRAPH_W
+        cols = 2 if two_fit and count * (MAX_INNER_H + 2) > height else 1
+    else:  # cards: as many side by side as fit
+        cols = max(1, width // CARD_W)
     rows = max(1, math.ceil(count / cols))
     return cols, max(MIN_INNER_H, min(MAX_INNER_H, height // rows - 2))
 
 
-def render(gpus, width, height, selected=None, shape=None):
+def render(gpus, width, height, selected=None, shape=None, graphs=True):
     """The GPU boxes, in `shape` = (columns, inner height) or else the layout that fits: exactly `height`
     lines of exactly `width` cells."""
-    cols, inner = shape or layout(len(gpus), width, height)
+    cols, inner = shape or layout(len(gpus), width, height, graphs)
     rows = math.ceil(len(gpus) / cols)
     lines = []
     for r in range(rows):
-        panels = [panel(g, width // cols, inner, selected) for g in gpus[r * cols:(r + 1) * cols]]
+        panels = [panel(g, width // cols, inner, selected, graphs) for g in gpus[r * cols:(r + 1) * cols]]
         lines += [[seg for part in parts for seg in part] for parts in zip(*panels)]
     lines = [pad(clip(line, width), width) for line in lines[:height]]
     return lines + [[(" " * width, "")]] * (height - len(lines))
@@ -1059,20 +1097,25 @@ def keys(*hints):
     return out
 
 
-def footer(width, newer=None):
-    """Bottom line: a newer release when there is one, with how to update | the keys."""
-    right, left = keys(("p", "processes"), ("Esc / q", "quit")), []
+def footer(width, newer=None, picker=()):
+    """Bottom line: the GPU `picker`, a newer release when there is one with how to update | the keys."""
+    picker, notice, how, link = list(picker), [], [], []
     if newer:
         version, command = newer
-        notice = [("update available: " + version, NEWS)]
+        notice = ([("   ", "")] if picker else []) + [("update available: " + version, NEWS)]
         how = [(" ({})".format(command or "new nvmon.py: " + RELEASES), "")]
         link = [("   what's new: " + RELEASES, DIM)] if command else []  # a copied nvmon.py already links there
-        # As much as fits beside the keys: the link goes first, then how to update.
-        left = next((option for option in (notice + how + link, notice + how)
-                     if width_of(option) + 2 + width_of(right) <= width), notice)
+    every = keys(("g", "graphs"), ("c", "colours"), ("p", "processes"), ("Esc / q", "quit"))
+    few = keys(("p", "processes"), ("Esc / q", "quit"))
+    # As much as fits: the link goes first, then how to update, the keys for graphs and colours, the picker.
+    options = [(picker + notice + how + link, every), (picker + notice + how, every), (picker + notice + how, few),
+               (picker + notice, few), (notice[1:] if picker else notice, few)]
+    left, right = next((option for option in options if width_of(option[0]) + 2 + width_of(option[1]) <= width),
+                       options[-1])
     return spread(width, left, right)
 
 
+COLOUR_NAMES = {"truecolor": "24-bit", "256": "256, for terminals without 24-bit colour", "mono": "black and white"}
 MOVES = {"tab": 1, "down": 1, "up": -1, "backtab": -1, "pgdn": 10, "pgup": -10, "home": -10**6, "end": 10**6}
 
 
@@ -1080,7 +1123,10 @@ class View:
     """What the screen shows around the numbers, and what keys and clicks do to it: the selected job,
     only its GPUs, the process list, a question before stopping, a note on how that went."""
 
-    def __init__(self):
+    def __init__(self, colours="truecolor"):
+        self.colours = colours            # one of COLOUR_MODES
+        self.graphs = True                # the boxes show the utilization graph, else they are cards
+        self.hidden, self.indices = set(), []  # the GPUs left out, and all there are
         self.job = None                   # the selected job's PID
         self.only = False                 # show only the GPUs it uses
         self.listing = False              # the process list is open
@@ -1106,7 +1152,8 @@ class View:
         if job is None:  # nothing selected, or its job ended
             self.job, self.only, self.asking = None, False, None
         self.remind()
-        shown = [g for g in gpus if not self.only or g.index in job.gpus]
+        self.indices = [g.index for g in gpus]
+        shown = [g for g in gpus if (g.index in job.gpus if self.only else g.index not in self.hidden)]
         rows = min(len(self.jobs) + 2, max(4, (height - 2) // 2)) if self.listing else 0
         body = self.boxes(shown, width, height - 2 - rows)
         self.list_at = 1 + len(body) if rows else None
@@ -1116,22 +1163,23 @@ class View:
             room = max(0, width - COMMAND_AT - 1)
             self.shift = max(0, min(self.shift, len(job.command) + 1 - room)) if job else 0
             body += process_list(self.jobs, width, rows, self.job, self.scrolled(rows - 2), self.sort, self.shift)
-        self.lines = [top_line] + body + [self.bottom_line(width, job, newer)]
+        self.lines = [top_line] + body + [self.bottom_line(width, job, newer, gpus)]
         return self.lines
 
     def boxes(self, gpus, width, height):
         """The GPU boxes in `height` lines; when not all fit, the rows from gpu_top on and a line on that."""
-        cols, inner = layout(len(gpus), width, height)
+        cols, inner = layout(len(gpus), width, height, self.graphs)
         rows = math.ceil(len(gpus) / cols)
         if rows * (inner + 2) <= height:
             self.gpu_top, self.gpu_page = 0, rows
-            return render(gpus, width, height, self.job, (cols, inner))
+            return render(gpus, width, height, self.job, (cols, inner), self.graphs)
         self.gpu_page = max(1, (height - 1) // (inner + 2))
         self.gpu_top = max(0, min(self.gpu_top, rows - self.gpu_page))
         part = gpus[self.gpu_top * cols:(self.gpu_top + self.gpu_page) * cols]
         note = "GPUs {} of {} shown · wheel or PgUp/PgDn for the rest".format(
             ranges([g.index for g in part]), len(gpus))
-        return render(part, width, height - 1, self.job, (cols, inner)) + [spread(width, [], [(note, DIM)])]
+        return (render(part, width, height - 1, self.job, (cols, inner), self.graphs)
+                + [spread(width, [], [(note, DIM)])])
 
     def detail(self, gpus):
         """The GPUs whose processes' utilization is shown: all with the list open, else the selected
@@ -1162,7 +1210,15 @@ class View:
         self.top = max(0, min(self.top, len(order) - room))
         return self.top
 
-    def bottom_line(self, width, job, newer):
+    def picker(self, gpus):
+        """"GPUs 0 1 2 3" for the bottom line, the hidden ones faint; a click on a number (or the key)
+        hides that GPU or shows it again."""
+        if len(gpus) < 2:
+            return []
+        return [("GPUs", DIM)] + [(" {}".format(g.index), FAINT if g.index in self.hidden else BOLD, ("gpu", g.index))
+                                  for g in gpus]
+
+    def bottom_line(self, width, job, newer, gpus):
         if self.asking:
             return spread(width, [(self.question(job), WARN)], keys(("y", "yes"), ("n", "no")))
         note = self.note[0] if self.note and time.monotonic() < self.note[1] else None
@@ -1174,7 +1230,9 @@ class View:
         if self.listing:
             return spread(width, note or [("click a job or a heading", DIM)],
                           keys(("s", "sort by next"), ("r", "reverse"), ("Esc", "close")))
-        return spread(width, note, keys(("p", "processes"), ("Esc / q", "quit"))) if note else footer(width, newer)
+        if note:
+            return spread(width, note, keys(("p", "processes"), ("Esc / q", "quit")))
+        return footer(width, newer, self.picker(gpus))
 
     def question(self, job):
         """"stop train.py: SIGTERM to its torchrun (PID 48213), which ends its 2 workers?" and the like."""
@@ -1211,6 +1269,13 @@ class View:
         if kind == "list":  # "+" under a GPU: the list, from that GPU's first job
             self.listing, self.follow = True, False
             self.top = next((i for i, job in enumerate(self.jobs) if value[0] in job.gpus), self.top)
+            return True
+        if kind == "gpu":  # a GPU's number at the bottom: hide that GPU, or show it again; one always stays
+            index = value[0]
+            if index in self.hidden:
+                self.hidden.discard(index)
+            elif len(self.hidden) + 1 < len(self.indices):
+                self.hidden.add(index)
             return True
         if kind == "sort":  # a heading clicked: sort by it; again, the other way round
             column, descending = self.sort
@@ -1250,6 +1315,13 @@ class View:
                 return False
         elif key == "p":
             self.listing = not self.listing
+        elif key == "g":
+            self.graphs = not self.graphs
+        elif key == "c":
+            self.colours = COLOUR_MODES[(COLOUR_MODES.index(self.colours) + 1) % len(COLOUR_MODES)]
+            self.note = ([("colours: " + COLOUR_NAMES[self.colours], "")], time.monotonic() + 3)
+        elif key.isdigit() and int(key) in self.indices:
+            self.handle(("gpu", int(key)))
         elif self.listing and key in ("s", "r"):  # the next column, or the other way round
             names, (column, descending) = list(SORTS), self.sort
             if key == "s":
@@ -1275,13 +1347,15 @@ class View:
         return True
 
 
-def paint(lines):
-    """Join lines into one string, sending a style code only where the style changes."""
+def paint(lines, mode="truecolor"):
+    """Join lines into one string in colour `mode`, sending a style code only where the style changes."""
     out, current = [], ""
     for i, line in enumerate(lines):
         if i:
             out.append("\r\n")
         for text, style, *_ in line:
+            if mode != "truecolor":
+                style = restyle(style, mode)
             if style != current:
                 # One colour replaces another directly; anything else (bold, plain) needs a reset first.
                 colours = style.startswith("\x1b[38") and current.startswith("\x1b[38")
@@ -1376,9 +1450,9 @@ class Screen:
             self._keys = False
         return events(data)
 
-    def draw(self, lines):
+    def draw(self, lines, mode):
         # 2026 = synchronized output: terminals that know it swap the frame in at once.
-        self._write("\x1b[?2026h\x1b[H" + paint(lines) + "\x1b[?2026l")
+        self._write("\x1b[?2026h\x1b[H" + paint(lines, mode) + "\x1b[?2026l")
 
     @staticmethod
     def _write(text):
@@ -1446,7 +1520,8 @@ def main():
     parser = argparse.ArgumentParser(
         prog="nvmon", description="A fancy NVIDIA GPU monitor for the terminal.",
         epilog="At start nvmon asks PyPI whether a newer release is out; NVMON_NO_UPDATE_CHECK=1 turns that "
-               "off. NVMON_COLORS=256 is for terminals without 24-bit colour. " + REPO)
+               "off. NVMON_COLORS=256 is for terminals without 24-bit colour, NVMON_COLORS=mono (or NO_COLOR=1) "
+               "for black and white; the c key switches between them. " + REPO)
     parser.add_argument("-i", "--interval", type=interval, default=DEFAULT_INTERVAL, metavar="SEC",
                         help="seconds between updates, at least 0.1 (default: 0.5)")
     parser.add_argument("-g", "--gpus", type=gpu_list, metavar="LIST",
@@ -1473,9 +1548,12 @@ def main():
         signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(128 + signum))
         for g in gpus:
             g.poll()  # the first numbers, before the screen opens
-        poller, view = Poller(gpus), View()
+        poller, view = Poller(gpus), View(colour_mode())
         with Screen() as screen:
-            frame_at, poll_at, redraw = time.monotonic(), None, True
+            # peek = (GPUs, round): when more GPUs' processes are to show their utilization, as after a click on
+            # a job, the screen takes the newest numbers as soon as those GPUs have been read, not at the next
+            # frame; or once that round of polls is over, for a GPU that cannot tell (with MIG, say).
+            frame_at, poll_at, redraw, peek = time.monotonic(), None, True, None
             while True:
                 now = time.monotonic()
                 if now >= frame_at:  # a new frame: the newest numbers, one more graph column each
@@ -1487,18 +1565,31 @@ def main():
                     # the last numbers but comes on time.
                     poll_at, redraw = frame_at - min(args.interval / 2, 0.5), True
                 if poll_at is not None and now >= poll_at:
-                    poller.detail = view.detail(gpus)
                     poller.refresh()
                     poll_at = None
+                if peek is not None:
+                    wanted, last = peek
+                    if poller.rounds >= last or all(g.sample.process_util is not None for g in gpus
+                                                    if g.index in wanted):
+                        for g in gpus:  # the graphs move on at the next frame, as ever
+                            g.now = g.sample
+                        peek, redraw = None, True
+                    else:
+                        poller.refresh()  # after the round running, should it have passed those GPUs
                 if redraw:
                     width, height = os.get_terminal_size()
                     screen.draw(view.screen(gpus, width, height,
-                                            header(width, args.interval, driver, poller.waiting()), update.newer))
+                                            header(width, args.interval, driver, poller.waiting()), update.newer),
+                                view.colours)
                 # Keys and clicks redraw at once; the numbers move on at the next frame.
-                events = screen.read((poll_at or frame_at) - time.monotonic())
+                events = screen.read(0.01 if peek is not None else (poll_at or frame_at) - time.monotonic())
                 if not all(map(view.handle, events)):
                     break
-                redraw = bool(events)
+                redraw, detail = bool(events), view.detail(gpus)
+                if detail - poller.detail:  # at the latest the next round, or the one after the round running
+                    busy = not poller.done.is_set()
+                    peek = (detail - poller.detail | (peek[0] if peek else set()), poller.rounds + 1 + busy)
+                poller.detail = detail
     except KeyboardInterrupt:
         pass
     except NvmlError as e:

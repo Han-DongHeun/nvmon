@@ -15,8 +15,9 @@ from PIL import Image, ImageDraw, ImageFont
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 import nvmon  # noqa: E402
 
-# (file, columns, rows, show the process list with a job picked)
-SIZES = [("demo-wide.gif", 160, 31, False), ("demo-small.gif", 100, 30, False), ("demo-list.gif", 160, 56, True)]
+# (file, columns, rows, what is on: "list" = the process list with a job picked, "cards" = no graphs)
+SIZES = [("demo-wide.gif", 160, 31, None), ("demo-small.gif", 100, 30, None), ("demo-list.gif", 160, 56, "list"),
+         ("demo-cards.gif", 160, 23, "cards")]
 FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono{}.ttf"
 CELL_W, CELL_H, PAD, SIZE = 9, 18, 14, 15
 BG, FG = (24, 24, 27), (215, 215, 215)
@@ -61,12 +62,13 @@ def record(seconds, warm_up=70):
         if tick < 0:
             time.sleep(max(0, 0.5 - (time.monotonic() - start)))
             continue
-        for name, cols, rows, listing in SIZES:
+        for name, cols, rows, mode in SIZES:
             view = views[name]
-            if listing and tick == 0:  # the list open, the biggest job with a launcher picked
+            if mode == "list" and tick == 0:  # the list open, the biggest job with a launcher picked
                 view.screen(gpus, cols, rows, [], None)
                 view.listing = True
                 view.job = max(view.jobs, key=lambda job: (job.launcher is not None, job.mem)).pid
+            view.graphs = mode != "cards"
             frames[name].append(view.screen(gpus, cols, rows, nvmon.header(cols, 0.5, driver), None))
         time.sleep(max(0, 0.5 - (time.monotonic() - start)))
     return frames

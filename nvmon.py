@@ -67,7 +67,7 @@ TEMP = _gradient([(30, (95, 135, 215)), (45, (95, 175, 175)), (60, GREEN), (72, 
 # Warnings on the top edge: yellow = worth a look, orange = slowed, red = act.
 WARN, SLOW, ALERT = _rgb(YELLOW), _rgb(ORANGE), _rgb(RED)
 # Everything else sticks to the 256-colour palette.
-DIM, FAINT, PROC = _fg(240), _fg(237), _fg(110)
+DIM, FAINT, PROC = _fg(240), _fg(238), _fg(110)
 NEWS = PROC  # a newer release is news, not trouble: the process names' calm blue, not warning yellow
 BOLD, RESET = "\x1b[1m", "\x1b[0m"
 
@@ -421,7 +421,7 @@ class Poller(threading.Thread):
     def __init__(self, gpus):
         super().__init__(daemon=True)  # a driver call that never returns does not keep nvmon open
         self.gpus, self.error, self.started = gpus, None, None
-        self.detail = False  # read the processes' utilization too: the process list is open
+        self.detail = set()  # the GPUs to read the processes' utilization of, see View.detail
         self.wanted, self.done = threading.Event(), threading.Event()
         self.done.set()
         self.start()
@@ -432,7 +432,7 @@ class Poller(threading.Thread):
             self.wanted.clear()
             try:
                 for gpu in self.gpus:
-                    gpu.poll(self.detail)
+                    gpu.poll(gpu.index in self.detail)
             except Exception as e:  # a bug: refresh() raises it rather than leaving the numbers frozen
                 self.error = e
             self.done.set()
@@ -630,12 +630,20 @@ def account(job):
 
 
 def about(job):
-    """"kim/torch · torchrun job · GPUs 4-5 · 30.2G · 2h13m"."""
-    parts = [account(job)] if account(job) else []
-    parts.append("{} job".format(job.launcher) if job.launcher else "PID {}".format(job.pid))
-    parts.append("GPU{} {}".format("s" if len(job.gpus) > 1 else "", ranges(job.gpus)))
-    parts.append("{:.1f}G".format(job.mem))
-    return " · ".join(parts + ([elapsed(job.started)] if job.started is not None else []))
+    """"kim/torch · GPUs 4-5 · util 86% · 30.2G · 2h13m · torchrun job" as segments, util in its colour;
+    the launcher, often a long name, comes last, where a narrow line cuts first."""
+    parts = [(account(job), DIM)] if account(job) else []
+    parts.append(("GPU{} {}".format("s" if len(job.gpus) > 1 else "", ranges(job.gpus)), DIM))
+    if job.util is not None:
+        parts.append(("util ", DIM, "{:.0f}%".format(job.util), heat(job.util / 100)))
+    parts.append(("{:.1f}G".format(job.mem), DIM))
+    if job.started is not None:
+        parts.append((elapsed(job.started), DIM))
+    parts.append(("{} job".format(job.launcher) if job.launcher else "PID {}".format(job.pid), DIM))
+    out = []
+    for part in parts:
+        out += ([(" · ", DIM)] if out else []) + [part[i:i + 2] for i in range(0, len(part), 2)]
+    return out
 
 
 def stop(job, name):
@@ -712,13 +720,12 @@ def update_command():
 
 # ── rendering ────────────────────────────────────────────────────────────────
 # A line is a list of (text, style) segments; every character is one cell wide. A segment that can be
-# clicked carries a third item, what the click means: a job's PID, LIST, or ("key", name).
+# clicked carries a third item, what the click means: a job's PID, or ("key", name) and the like.
 
 # A horizontal rule across the stats column, joined to the borders.
 RULE = [(" ├" + "─" * (INFO_W + 2) + "┤", DIM)]
 SELECTED = "\x1b[7m" + PROC  # the selected job: reverse video, on the process names' blue
 FADED = "\x1b[2m"            # "faint": GPUs the selected job does not use
-LIST = "list"                # what "+N" means when clicked: the process list
 
 
 def width_of(line):
@@ -836,7 +843,7 @@ def panel(gpu, width, height, selected=None):
     parts += [] if s.fan is None else [([("FAN {:>3}%".format(s.fan), "")], 1)]
     parts += [] if s.clock is None else [([("{:>4} MHz".format(s.clock), s.slowdown[1] if s.slowdown else "")], 4)]
     top = edge(width, label, parts)
-    bottom = bottom_edge(width, split, process_label(s.processes, split - 4, selected))
+    bottom = bottom_edge(width, split, process_label(s.processes, split - 4, selected, gpu.index))
     body = [[("│ ", DIM)] + g + (RULE if i is None
                                   else [(" │ ", DIM)] + i + [(" │", DIM)])
             for g, i in zip(graph(gpu.history, graph_w, height), info(gpu, height))]
@@ -882,11 +889,12 @@ def elapsed(started):
     return "{}d{}h".format(s // 86400, s % 86400 // 3600)
 
 
-def process_label(processes, room, selected=None):
+def process_label(processes, room, selected=None, index=None):
     """Processes grouped by owner and conda environment, groups and processes by memory, biggest
     first: "migi: train.py 2h13m 15.1G · eval.py 5m 0.5G   kim/torch: a.py 1d4h 9.0G" (our own
-    processes carry no owner). As many whole entries as fit in `room` cells, then "+N" for the rest.
-    Each entry, when clicked, means its job; the `selected` job's names are reversed."""
+    processes carry no owner). As many whole entries as fit in `room` cells, then "+N" for the rest, or
+    "+" when none is left out: clicked, it opens the process list at GPU `index`. Each entry, when
+    clicked, means its job; the `selected` job's names are reversed."""
     def mem(process):
         return process.mem or 0
     groups = {}
@@ -902,14 +910,16 @@ def process_label(processes, room, selected=None):
             name = (process.name, SELECTED if process.job == selected else PROC, process.job)
             entries.append(gap + ([(tag + ": ", DIM)] if tag and not j else []) + [name]
                            + ([(" " + " ".join(details), DIM, process.job)] if details else []))
+    def more(n):
+        return ("  +{}".format(n) if n else "  +", DIM, ("list", index))
     label = []
     for i, entry in enumerate(entries):
         rest = len(entries) - i - 1
-        if width_of(label + entry) + (len("  +{}".format(rest)) if rest else 0) > room:
+        if width_of(label + entry) + len(more(rest)[0]) > room:
             # The first entry is always shown, cut if need be; later ones collapse into the count.
-            return clip(entry, room) if not label else label + [("  +{}".format(rest + 1), DIM, LIST)]
+            return clip(entry, room - len(more(rest)[0])) + [more(rest)] if not label else label + [more(rest + 1)]
         label += entry
-    return label
+    return label + [more(0)] if label else []
 
 
 def bottom_edge(width, split, label):
@@ -920,13 +930,23 @@ def bottom_edge(width, split, label):
             + [("─" * max(0, width - split - 1) + "╯", DIM)])
 
 
-def render(gpus, width, height, selected=None):
-    """The GPU boxes: exactly `height` lines of exactly `width` cells."""
+MIN_INNER_H = 2  # the shortest a box gets; when even that leaves GPUs out, the boxes scroll
+
+
+def layout(count, width, height):
+    """(columns, inner height) for `count` GPU boxes in `width` x `height` cells."""
     # Two columns only when one column cannot show every GPU at full height.
     two_fit = width // 2 >= CHROME_W + INFO_W + MIN_GRAPH_W
-    cols = 2 if two_fit and len(gpus) * (MAX_INNER_H + 2) > height else 1
+    cols = 2 if two_fit and count * (MAX_INNER_H + 2) > height else 1
+    rows = max(1, math.ceil(count / cols))
+    return cols, max(MIN_INNER_H, min(MAX_INNER_H, height // rows - 2))
+
+
+def render(gpus, width, height, selected=None, shape=None):
+    """The GPU boxes, in `shape` = (columns, inner height) or else the layout that fits: exactly `height`
+    lines of exactly `width` cells."""
+    cols, inner = shape or layout(len(gpus), width, height)
     rows = math.ceil(len(gpus) / cols)
-    inner = max(1, min(MAX_INNER_H, height // rows - 2))
     lines = []
     for r in range(rows):
         panels = [panel(g, width // cols, inner, selected) for g in gpus[r * cols:(r + 1) * cols]]
@@ -951,6 +971,7 @@ COLUMNS = [
     ("command", 0, lambda j: (j.command, DIM), lambda j: j.command),
 ]
 SORTS = {heading.lstrip(">"): key for heading, _, _, key in COLUMNS}
+COMMAND_AT = 1 + sum(size + 2 for _, size, _, _ in COLUMNS[:-1])  # the column where commands start
 
 
 def cells(values, width, fill=("",)):
@@ -965,9 +986,11 @@ def cells(values, width, fill=("",)):
     return line
 
 
-def process_list(jobs, width, rows, selected, top, sort):
+def process_list(jobs, width, rows, selected, top, sort, shift=0):
     """The list p opens, `rows` lines: the headings (clicking one sorts by it; `sort` = (column, descending)),
-    the jobs from index `top` on (clicking one means it; the `selected` one reversed), how many more."""
+    the jobs from index `top` on (clicking one means it; the `selected` one reversed, its command moved
+    `shift` characters on), how many more. A command too long to show ends in "…"."""
+    room = max(0, width - COMMAND_AT - 1)
     column, descending = sort
     head = []
     for heading, _, _, _ in COLUMNS:
@@ -979,6 +1002,8 @@ def process_list(jobs, width, rows, selected, top, sort):
     for job in shown:
         chosen = job.pid == selected
         values = [cell(job) for _, _, cell, _ in COLUMNS]
+        command = "…" + job.command[shift:] if chosen and shift else job.command
+        values[-1] = (command if len(command) <= room else command[:max(0, room - 1)] + "…", DIM)
         lines.append(cells([(text, SELECTED if chosen else colour, job.pid) for text, colour in values], width,
                            (SELECTED if chosen else "", job.pid)))
     if not jobs:
@@ -1010,7 +1035,7 @@ def header(width, interval, driver, waiting=0):
     return spread(width, left, right)
 
 
-KEY_NAMES = {"\r": "enter", "\n": "enter", "\t": "tab", "\x1b": "esc", "A": "up", "B": "down", "H": "home",
+KEY_NAMES = {"\r": "enter", "\n": "enter", "\t": "tab", "\x1b": "esc", "A": "up", "B": "down", "C": "right", "D": "left", "H": "home",
              "F": "end", "Z": "backtab", "1~": "home", "4~": "end", "5~": "pgup", "6~": "pgdn",
              "Esc": "esc", "Esc / q": "q"}
 
@@ -1055,6 +1080,9 @@ class View:
         self.note = None                  # (segments, until): what the last stop did
         self.sent = None                  # (PID, when) of a SIGTERM, to point at k if the job lives on
         self.lines, self.jobs = [], []    # the last screen drawn, and the jobs on it
+        self.gpu_top, self.gpu_page = 0, 1  # the first row of boxes shown, and how many rows fit
+        self.list_at = None               # the screen row where the list starts, when it is open
+        self.shift, self.shifted = 0, None  # how far the selected job's command is scrolled, and whose
         self.clicked = (0, None)          # (when, what): the last click, to tell a double click
 
     def selected(self):
@@ -1070,11 +1098,38 @@ class View:
         self.remind()
         shown = [g for g in gpus if not self.only or g.index in job.gpus]
         rows = min(len(self.jobs) + 2, max(4, (height - 2) // 2)) if self.listing else 0
-        body = render(shown, width, height - 2 - rows, self.job)
+        body = self.boxes(shown, width, height - 2 - rows)
+        self.list_at = 1 + len(body) if rows else None
         if rows:
-            body += process_list(self.jobs, width, rows, self.job, self.scrolled(rows - 2), self.sort)
+            if self.shifted != self.job:
+                self.shift, self.shifted = 0, self.job
+            room = max(0, width - COMMAND_AT - 1)
+            self.shift = max(0, min(self.shift, len(job.command) + 1 - room)) if job else 0
+            body += process_list(self.jobs, width, rows, self.job, self.scrolled(rows - 2), self.sort, self.shift)
         self.lines = [top_line] + body + [self.bottom_line(width, job, newer)]
         return self.lines
+
+    def boxes(self, gpus, width, height):
+        """The GPU boxes in `height` lines; when not all fit, the rows from gpu_top on and a line on that."""
+        cols, inner = layout(len(gpus), width, height)
+        rows = math.ceil(len(gpus) / cols)
+        if rows * (inner + 2) <= height:
+            self.gpu_top, self.gpu_page = 0, rows
+            return render(gpus, width, height, self.job, (cols, inner))
+        self.gpu_page = max(1, (height - 1) // (inner + 2))
+        self.gpu_top = max(0, min(self.gpu_top, rows - self.gpu_page))
+        part = gpus[self.gpu_top * cols:(self.gpu_top + self.gpu_page) * cols]
+        note = "GPUs {} of {} shown · wheel or PgUp/PgDn for the rest".format(
+            ranges([g.index for g in part]), len(gpus))
+        return render(part, width, height - 1, self.job, (cols, inner)) + [spread(width, [], [(note, DIM)])]
+
+    def detail(self, gpus):
+        """The GPUs whose processes' utilization is shown: all with the list open, else the selected
+        job's. Only those are asked, as the driver takes some 2 ms a GPU to answer."""
+        if self.listing:
+            return {g.index for g in gpus}
+        job = self.selected()
+        return set(job.gpus) if job else set()
 
     def remind(self):
         """A job still there 5 s after its SIGTERM may be stuck, or slow to save: say that k ends it."""
@@ -1104,7 +1159,7 @@ class View:
         if job:
             hints = [("f", "all GPUs" if self.only else "only these GPUs")]
             hints += [("t", "stop"), ("k", "kill")] if job.owner is None and os.name != "nt" else []
-            left = [(job.name, PROC, job.pid), ("  " + about(job), DIM, job.pid)]
+            left = [(job.name, PROC, job.pid), ("  ", DIM)] + about(job)
             return spread(width, note or left, keys(*hints, ("Esc", "back")))
         if self.listing:
             return spread(width, note or [("click a job or a heading", DIM)],
@@ -1133,9 +1188,19 @@ class View:
     def handle(self, event):
         """Act on one key or mouse event; False means quit."""
         kind, value = event[0], event[1:]
-        if kind == "wheel":
-            if self.listing:
-                self.top, self.follow = self.top + 3 * value[0], False
+        if kind == "wheel":  # over the list it scrolls the list, or the selected job's command sideways;
+            step, row, col = value  # anywhere else, the GPU boxes
+            if self.list_at is not None and row >= self.list_at:
+                if col >= COMMAND_AT and self.target(row, col) == self.job:
+                    self.shift = max(0, self.shift + 8 * step)
+                else:
+                    self.top, self.follow = self.top + 3 * step, False
+            else:
+                self.gpu_top += step
+            return True
+        if kind == "list":  # "+" under a GPU: the list, from that GPU's first job
+            self.listing, self.follow = True, False
+            self.top = next((i for i, job in enumerate(self.jobs) if value[0] in job.gpus), self.top)
             return True
         if kind == "sort":  # a heading clicked: sort by it; again, the other way round
             column, descending = self.sort
@@ -1143,17 +1208,16 @@ class View:
             return True
         if kind == "click":
             target = self.target(*value)
-            if isinstance(target, tuple):  # a key hint on the bottom line, or a heading of the list
+            if isinstance(target, tuple):  # a key hint, a heading of the list, "+" under a GPU
                 return self.handle(target)
-            if target == LIST:
-                self.listing = True
-            elif target is None:
-                self.asking = None
+            # A job picks it; the picked job again, or a place meaning nothing, lets it go. A double click
+            # on a job picks it and shows only its GPUs, or all of them again.
+            now = time.monotonic()
+            if target is not None and self.clicked[1] == target and now - self.clicked[0] < 0.4:
+                self.job, self.only = target, not self.only
             else:
-                now = time.monotonic()
-                if self.clicked[1] == target and now - self.clicked[0] < 0.4:  # a double click
-                    self.only = not self.only
-                self.job, self.asking, self.follow, self.clicked = target, None, True, (now, target)
+                self.job = target if target is not None and target != self.job else None
+            self.asking, self.follow, self.clicked = None, True, (now, target)
             return True
         key = value[0].lower() if len(value[0]) == 1 else value[0]
         if self.asking:  # y stops; anything else, n and Esc among them, lets it be
@@ -1183,6 +1247,10 @@ class View:
             else:
                 self.sort = (column, not descending)
             self.follow = True
+        elif key in ("pgup", "pgdn") and not self.listing:  # a page of GPU boxes
+            self.gpu_top += self.gpu_page * (1 if key == "pgdn" else -1)
+        elif key in ("left", "right") and self.listing:  # the selected job's command, sideways
+            self.shift = max(0, self.shift + (8 if key == "right" else -8))
         elif key in MOVES and self.jobs:
             order = [job.pid for job in self.jobs]
             i = order.index(self.job) if self.job in order else (-1 if MOVES[key] > 0 else len(order))
@@ -1223,7 +1291,7 @@ INPUT = re.compile(rb"\x1b\[<(?P<button>\d+);(?P<x>\d+);(?P<y>\d+)(?P<act>[Mm])"
 
 def events(data):
     """The input in `data`, the bytes a terminal sends: ("key", name) events, ("click", row, column) for
-    a left-button press, ("wheel", +1 down or -1 up)."""
+    a left-button press, ("wheel", +1 down or -1 up, row, column)."""
     out = []
     for m in INPUT.finditer(data):
         if m.group("button") or m.group("old"):
@@ -1234,7 +1302,7 @@ def events(data):
                 button, x, y = (c - 32 for c in m.group("old"))
                 press = button & 3 != 3
             if button & 64:
-                out.append(("wheel", 1 if button & 1 else -1))
+                out.append(("wheel", 1 if button & 1 else -1, y - 1, x - 1))
             elif press and button & 3 == 0 and not button & 32:  # left button down, not a drag
                 out.append(("click", y - 1, x - 1))
         elif m.group("end"):
@@ -1248,7 +1316,7 @@ def events(data):
     return out
 
 
-WINDOWS_KEYS = {"H": "up", "P": "down", "G": "home", "O": "end", "I": "pgup", "Q": "pgdn", "\x0f": "backtab"}
+WINDOWS_KEYS = {"H": "up", "P": "down", "K": "left", "M": "right", "G": "home", "O": "end", "I": "pgup", "Q": "pgdn", "\x0f": "backtab"}
 
 
 class Screen:
@@ -1409,7 +1477,7 @@ def main():
                     # the last numbers but comes on time.
                     poll_at, redraw = frame_at - min(args.interval / 2, 0.5), True
                 if poll_at is not None and now >= poll_at:
-                    poller.detail = view.listing  # the processes' utilization costs the driver 2 ms a GPU
+                    poller.detail = view.detail(gpus)
                     poller.refresh()
                     poll_at = None
                 if redraw:

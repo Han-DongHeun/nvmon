@@ -61,7 +61,7 @@ def _nearest256(rgb):
 
 # Styles are written in 24-bit colour and turned into what the terminal shows as they are sent, see restyle:
 # "256" for terminals without 24-bit colour (Xshell unless told, older PuTTY, macOS Terminal), "mono" for
-# greys alone. The c key goes through them; NVMON_COLORS picks the first, and NO_COLOR means mono.
+# greys alone. nvmon starts in the one colour_mode picks; the c key goes through them.
 COLOUR_MODES = ("truecolor", "256", "mono")
 COLOUR_ARG = re.compile(r"\x1b\[38;(?:2;(\d+);(\d+);(\d+)|5;(\d+))m")
 
@@ -80,10 +80,17 @@ def restyle(style, mode):
     return COLOUR_ARG.sub(swap, style)
 
 
-def colour_mode():
-    """The colour mode to start in."""
+def colour_mode(truecolor):
+    """The colour mode to start in: NVMON_COLORS when set, black and white under NO_COLOR, else 24-bit when
+    the terminal is known to show it (it said so, see Screen.probe, or COLORTERM does), else 256. Unsure means
+    256, which every terminal of today shows and which looks nearly the same; 24-bit colour where it is not
+    understood comes out in odd colours."""
     wanted = os.environ.get("NVMON_COLORS", "")
-    return wanted if wanted in COLOUR_MODES else "mono" if os.environ.get("NO_COLOR") else "truecolor"
+    if wanted in COLOUR_MODES:
+        return wanted
+    if os.environ.get("NO_COLOR"):
+        return "mono"
+    return "truecolor" if truecolor or os.environ.get("COLORTERM") in ("truecolor", "24bit") else "256"
 
 
 def _gradient(stops):
@@ -1137,7 +1144,7 @@ class View:
         self.sent = None                  # (PID, when) of a SIGTERM, to point at k if the job lives on
         self.lines, self.jobs = [], []    # the last screen drawn, and the jobs on it
         self.gpu_top, self.gpu_page = 0, 1  # the first row of boxes shown, and how many rows fit
-        self.list_at = None               # the screen row where the list starts, when it is open
+        self.list_rows = range(0)         # the screen rows the list takes, when it is open
         self.shift, self.shifted = 0, None  # how far the selected job's command is scrolled, and whose
         self.clicked = (0, None)          # (when, what): the last click, to tell a double click
 
@@ -1156,7 +1163,7 @@ class View:
         shown = [g for g in gpus if (g.index in job.gpus if self.only else g.index not in self.hidden)]
         rows = min(len(self.jobs) + 2, max(4, (height - 2) // 2)) if self.listing else 0
         body = self.boxes(shown, width, height - 2 - rows)
-        self.list_at = 1 + len(body) if rows else None
+        self.list_rows = range(1 + len(body), 1 + len(body) + rows)
         if rows:
             if self.shifted != self.job:
                 self.shift, self.shifted = 0, self.job
@@ -1258,7 +1265,7 @@ class View:
         kind, value = event[0], event[1:]
         if kind == "wheel":  # over the list it scrolls the list, or the selected job's command sideways;
             step, row, col = value  # anywhere else, the GPU boxes
-            if self.list_at is not None and row >= self.list_at:
+            if row in self.list_rows:
                 if col >= COMMAND_AT and self.target(row, col) == self.job:
                     self.shift = max(0, self.shift + 8 * step)
                 else:
@@ -1285,9 +1292,11 @@ class View:
             target = self.target(*value)
             if isinstance(target, tuple):  # a key hint, a heading of the list, "+" under a GPU
                 return self.handle(target)
-            # A job picks it; the picked job again, or a place meaning nothing, lets it go. A double click
-            # on a job picks it and shows only its GPUs, or all of them again.
+            # A job picks it; the picked job again, or a place meaning nothing, lets it go, and outside the
+            # list closes that too. A double click on a job picks it and shows only its GPUs, or all again.
             now = time.monotonic()
+            if target is None and value[0] not in self.list_rows:
+                self.listing = False
             if target is not None and self.clicked[1] == target and now - self.clicked[0] < 0.4:
                 self.job, self.only = target, not self.only
             else:
@@ -1347,13 +1356,23 @@ class View:
         return True
 
 
-def paint(lines, mode="truecolor"):
-    """Join lines into one string in colour `mode`, sending a style code only where the style changes."""
+# For terminals that draw the line, block and other characters above two cells wide, as they may for Korean,
+# Chinese and Japanese (Unicode calls their width "ambiguous"): ASCII look-alikes, one for one.
+ASCII = str.maketrans({"─": "-", "│": "|", "├": "+", "┤": "+", "╭": "+", "╮": "+", "╰": "+", "╯": "+",
+                       "▁": "_", "▂": "_", "▃": "_", "▄": "=", "▅": "=", "▆": "#", "▇": "#", "█": "#",
+                       "°": " ", "·": "-", "…": "~", "↑": "^", "↓": "v", "▲": "^", "▼": "v"})
+
+
+def paint(lines, mode="truecolor", ascii=False):
+    """Join lines into one string in colour `mode`, and with `ascii` in ASCII, sending a style code only where
+    the style changes."""
     out, current = [], ""
     for i, line in enumerate(lines):
         if i:
             out.append("\r\n")
         for text, style, *_ in line:
+            if ascii:
+                text = text.translate(ASCII)
             if mode != "truecolor":
                 style = restyle(style, mode)
             if style != current:
@@ -1369,7 +1388,8 @@ def paint(lines, mode="truecolor"):
 
 INPUT = re.compile(rb"\x1b\[<(?P<button>\d+);(?P<x>\d+);(?P<y>\d+)(?P<act>[Mm])"  # mouse, SGR encoding
                    rb"|\x1b\[M(?P<old>...)"                                     # mouse, the old encoding
-                   rb"|\x1b[\[O](?P<args>[0-9;]*)(?P<end>[A-Za-z~])"             # arrows, Home, PgUp and such
+                   rb"|\x1b[\[O](?P<args>[?0-9;]*)(?P<end>[A-Za-z~])"            # arrows, Home, PgUp and such
+                   rb"|(?P<report>\x1bP[^\x1b]*\x1b\\)"                           # a late answer to Screen.probe
                    rb"|(?P<char>.)", re.DOTALL)                                 # any other key; a lone ESC is Esc
 
 
@@ -1389,6 +1409,8 @@ def events(data):
                 out.append(("wheel", 1 if button & 1 else -1, y - 1, x - 1))
             elif press and button & 3 == 0 and not button & 32:  # left button down, not a drag
                 out.append(("click", y - 1, x - 1))
+        elif m.group("report"):
+            continue
         elif m.group("end"):
             args, end = m.group("args").decode(), m.group("end").decode()
             name = KEY_NAMES.get(args + end) or KEY_NAMES.get(end)
@@ -1413,7 +1435,31 @@ class Screen:
         self._restore = [enable_vt(), raw_keys() if self._keys else (lambda: None)]
         # 1000 + 1006: clicks and the wheel come in as SGR-encoded sequences (Shift+drag still selects text).
         self._write("\x1b[?1049h\x1b[?25l\x1b[?7l" + ("\x1b[?1000h\x1b[?1006h" if self._mouse else ""))
+        # Windows Terminal and the console of Windows 10 on show 24-bit colour and draw lines one cell wide.
+        self.wide, self.truecolor = self.probe() if self._mouse else (False, os.name == "nt")
         return self
+
+    def probe(self):
+        """(wide, truecolor), as the terminal answers: whether it draws a line character two cells wide, and
+        whether it keeps a 24-bit colour. Terminals answer in turn and all of them the last question, DA1,
+        so that answer ends the wait: a round trip, even over ssh. No answer within a second means neither."""
+        self._write("\x1b[H─\x1b[6n"                  # where the cursor is after one line character
+                    "\x1b[38;2;1;2;3m\x1bP$qm\x1b\\"  # DECRQSS: the colour set now, as the terminal kept it
+                    + RESET + "\x1b[c")                 # DA1: what the terminal is
+        import select
+        fd, data, end = sys.stdin.fileno(), b"", time.monotonic() + 1
+        while not re.search(rb"\x1b\[\?[0-9;]*c", data):
+            left = end - time.monotonic()
+            if left <= 0 or not select.select([fd], [], [], left)[0]:
+                break
+            more = os.read(fd, 1024)
+            if not more:
+                break
+            data += more
+        cursor = re.search(rb"\x1b\[\d+;(\d+)R", data)
+        colour = re.search(rb"\x1bP1\$r([0-9;:]*)m", data)
+        return (bool(cursor) and int(cursor.group(1)) > 2,
+                bool(colour) and bool(re.search(rb"38[;:]2[;:]+1[;:]2[;:]3", colour.group(1))))
 
     def __exit__(self, *exc):
         self._write(RESET + ("\x1b[?1006l\x1b[?1000l" if self._mouse else "") + "\x1b[?7h\x1b[?25h\x1b[?1049l")
@@ -1452,7 +1498,7 @@ class Screen:
 
     def draw(self, lines, mode):
         # 2026 = synchronized output: terminals that know it swap the frame in at once.
-        self._write("\x1b[?2026h\x1b[H" + paint(lines, mode) + "\x1b[?2026l")
+        self._write("\x1b[?2026h\x1b[H" + paint(lines, mode, self.wide) + "\x1b[?2026l")
 
     @staticmethod
     def _write(text):
@@ -1520,8 +1566,8 @@ def main():
     parser = argparse.ArgumentParser(
         prog="nvmon", description="A fancy NVIDIA GPU monitor for the terminal.",
         epilog="At start nvmon asks PyPI whether a newer release is out; NVMON_NO_UPDATE_CHECK=1 turns that "
-               "off. NVMON_COLORS=256 is for terminals without 24-bit colour, NVMON_COLORS=mono (or NO_COLOR=1) "
-               "for black and white; the c key switches between them. " + REPO)
+               "off. Colours are 24-bit where the terminal says it shows them, else 256; NVMON_COLORS=truecolor, 256 "
+               "or mono (also NO_COLOR=1) starts in the one named, and the c key switches. " + REPO)
     parser.add_argument("-i", "--interval", type=interval, default=DEFAULT_INTERVAL, metavar="SEC",
                         help="seconds between updates, at least 0.1 (default: 0.5)")
     parser.add_argument("-g", "--gpus", type=gpu_list, metavar="LIST",
@@ -1548,8 +1594,9 @@ def main():
         signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(128 + signum))
         for g in gpus:
             g.poll()  # the first numbers, before the screen opens
-        poller, view = Poller(gpus), View(colour_mode())
+        poller, view = Poller(gpus), View()
         with Screen() as screen:
+            view.colours = colour_mode(screen.truecolor)
             # peek = (GPUs, round): when more GPUs' processes are to show their utilization, as after a click on
             # a job, the screen takes the newest numbers as soon as those GPUs have been read, not at the next
             # frame; or once that round of polls is over, for a GPU that cannot tell (with MIG, say).

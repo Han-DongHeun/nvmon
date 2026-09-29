@@ -8,14 +8,17 @@ What changes for you in each release. The same notes appear on the
 - Processes: click one, or press Tab, to pick its job (a torchrun job's workers count as one). The GPUs
   it uses stand out, and `f` shows only those. `t` asks it to stop (SIGTERM), `k` ends it at once
   (SIGKILL), each after a `y`; only your own jobs, and only once nvmon has checked they are still the
-  same. `p` lists every job with its utilization and command line, sorted by whichever heading you click. A picked job's utilization shows at once.
+  same. `p` lists every job with its utilization and command line, sorted by whichever heading you click;
+  a click on an empty spot closes it. A picked job's utilization shows at once.
 - Hide GPUs you don't need: click their numbers at the bottom left, or press the number's key; again
   to show them. `g` turns the graphs off, leaving compact cards, several to a row.
-- `c` switches the colours: 24-bit, 256, black and white. `NVMON_COLORS=256` or `NVMON_COLORS=mono`
+- Works in Xshell, PuTTY and the like without setting them up: nvmon asks the terminal how it draws.
+  Where lines come out two cells wide (Korean, Chinese, Japanese settings), boxes and graphs are drawn
+  in ASCII; where 24-bit colour is not known to work, 256 colours are used.
+- `c` switches the colours: 24-bit, 256, black and white. `NVMON_COLORS=truecolor`, `256` or `mono`
   (also `NO_COLOR=1`) starts that way.
 - When the GPUs do not fit the window, their boxes scroll (wheel, PgUp/PgDn). The boxes are a line
   shorter: the "PCIe transfer" title is gone, as CPU -> GPU and GPU -> CPU say it already.
-- The README says how to fix broken lines in Xshell, PuTTY and the like.
 - No more stutter when another program uses the GPU driver at the same time, such as someone
   running `watch nvidia-smi`. The screen now refreshes on time and keeps the last numbers until the
   driver answers. If it has not answered for a second, the top line says so.

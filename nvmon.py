@@ -895,8 +895,12 @@ DEFAULT_INTERVAL, MIN_INTERVAL = 0.5, 0.1  # seconds
 
 def interval(text):
     """argparse type for -i: seconds between updates. The GPU's own readings change every 0.1-0.2 s, so
-    anything faster would only keep the driver busier and counts as MIN_INTERVAL; nan or inf, the default."""
-    seconds = float(text)
+    anything faster would only keep the driver busier and counts as MIN_INTERVAL; what is not a number of
+    seconds (abc, nan, inf) means the default."""
+    try:
+        seconds = float(text)
+    except ValueError:
+        return DEFAULT_INTERVAL
     return max(MIN_INTERVAL, seconds) if math.isfinite(seconds) else DEFAULT_INTERVAL
 
 

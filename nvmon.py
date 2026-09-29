@@ -28,7 +28,7 @@ from ctypes import byref, c_int, c_uint, c_ulonglong, c_void_p
 from functools import lru_cache
 from typing import NamedTuple, Optional
 
-__version__ = "0.2.1"
+__version__ = "0.2.1+dev"  # "+dev": work past this release; the release commit sets the next number
 REPO = "https://github.com/Han-DongHeun/nvmon"
 RELEASES = REPO + "/releases"                 # release notes, and nvmon.py for those who copy the file
 PYPI_JSON = "https://pypi.org/pypi/nvmon/json"
@@ -492,9 +492,9 @@ class UpdateCheck(threading.Thread):
             import urllib.request
             with urllib.request.urlopen(PYPI_JSON, timeout=5) as response:
                 latest = json.load(response)["info"]["version"]
+            ours = tuple(map(int, __version__.split("+")[0].split(".")))  # a "+dev" build counts as its release
             # Nothing from the network reaches the screen but a plain release number such as 0.2.2.
-            if re.fullmatch(r"[0-9]+(\.[0-9]+)*", latest) and \
-                    tuple(map(int, latest.split("."))) > tuple(map(int, __version__.split("."))):
+            if re.fullmatch(r"[0-9]+(\.[0-9]+)*", latest) and tuple(map(int, latest.split("."))) > ours:
                 self.newer = latest, update_command()
         except Exception:  # offline, firewalled, a proxy in the way, an odd answer: no notice, no noise
             pass
@@ -890,20 +890,27 @@ def gpu_list(spec):
     return picked
 
 
+DEFAULT_INTERVAL, MIN_INTERVAL = 0.5, 0.1  # seconds
+
+
+def interval(text):
+    """argparse type for -i: seconds between updates. The GPU's own readings change every 0.1-0.2 s, so
+    anything faster would only keep the driver busier and counts as MIN_INTERVAL; nan or inf, the default."""
+    seconds = float(text)
+    return max(MIN_INTERVAL, seconds) if math.isfinite(seconds) else DEFAULT_INTERVAL
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="nvmon", description="A fancy NVIDIA GPU monitor for the terminal.",
         epilog="At start nvmon asks PyPI whether a newer release is out; NVMON_NO_UPDATE_CHECK=1 turns that "
                "off. " + REPO)
-    parser.add_argument("-i", "--interval", type=float, default=0.5, metavar="SEC",
-                        help="seconds between updates, 0.1 or more (default: 0.5)")
+    parser.add_argument("-i", "--interval", type=interval, default=DEFAULT_INTERVAL, metavar="SEC",
+                        help="seconds between updates, at least 0.1 (default: 0.5)")
     parser.add_argument("-g", "--gpus", type=gpu_list, metavar="LIST",
                         help="only these GPUs, e.g. 0,2,4-7 (default: all)")
     parser.add_argument("-V", "--version", action="version", version="nvmon {} {}".format(__version__, REPO))
     args = parser.parse_args()
-    # The GPU's own readings change every 0.1-0.2 s: refreshing faster would only keep the driver busier.
-    if not 0.1 <= args.interval < math.inf:  # also rejects NaN
-        parser.error("--interval must be at least 0.1 seconds")
     if not sys.stdout.isatty():
         sys.exit("nvmon: output is not a terminal (over ssh, use: ssh -t HOST nvmon)")
 

@@ -12,4 +12,4 @@ What changes for you in each release. The same notes appear on the
 - A newer release is announced at the bottom left, with the command that updates your install and
   a link to what's new. nvmon asks PyPI once at start; `NVMON_NO_UPDATE_CHECK=1` turns that off.
 - `nvmon -V` and `nvmon -h` show the project's address.
-- `-i` takes 0.1 s or more: the GPU's own readings don't change faster than that.
+- `-i` below 0.1 s counts as 0.1 s, since the GPU's own readings don't change faster than that.

@@ -41,8 +41,9 @@ Click a process, or press Tab, to pick its job: the GPUs it uses stand out, and 
 Click an empty spot to let the job go and close the list.
 
 The GPU numbers at the bottom left hide a GPU when clicked, and show it again; so does the number's
-key. `g` turns the graphs on and off, `c` switches the colours: 24-bit, 256, black and white.
-Hold Shift to select text with the mouse.
+key. `g` turns the graphs on and off, `c` switches to black and white and back. These, the list's
+order and the GPUs hidden stay for the next run, for each computer you connect from (in
+`~/.config/nvmon/settings.json`). Hold Shift to select text with the mouse.
 
 ## What it shows
 
@@ -65,8 +66,6 @@ Hold Shift to select text with the mouse.
   that does not say it shows 24-bit colour gets 256 colours, which look nearly the same.
 - Boxes still broken: the terminal moves on one cell, but its font draws the characters two wide. Pick a
   font whose line characters are one cell wide, and make sure the encoding is UTF-8.
-- `NVMON_COLORS=truecolor`, `256` or `mono` (also `NO_COLOR=1`) starts in those colours; `c`
-  switches while it runs.
 - When a newer release is out, the bottom line says so, with the command that updates your install.
   nvmon asks PyPI once at start; `NVMON_NO_UPDATE_CHECK=1` turns that off.
 

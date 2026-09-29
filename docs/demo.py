@@ -88,12 +88,9 @@ def palette256(n):
 def colours(style):
     """(foreground, background, bold) for one of nvmon's styles."""
     fg, bg, faint = FG, BG, style.startswith(nvmon.FADED)
-    rgb = re.search(r"\x1b\[38;2;(\d+);(\d+);(\d+)m", style)
-    c256 = re.search(r"\x1b\[38;5;(\d+)m", style)
-    if rgb:
-        fg = tuple(int(v) for v in rgb.groups())
-    elif c256:
-        fg = palette256(int(c256.group(1)))
+    for layer, r, g, b, code in re.findall(r"\x1b\[([34])8;(?:2;(\d+);(\d+);(\d+)|5;(\d+))m", style):
+        colour = palette256(int(code)) if code else (int(r), int(g), int(b))
+        fg, bg = (colour, bg) if layer == "3" else (fg, colour)
     if faint:
         fg = tuple((a + b) // 2 for a, b in zip(fg, BG))
     if "\x1b[7m" in style:
@@ -145,6 +142,8 @@ def picture(lines, cols, rows, fonts):
                 if ch in BLOCKS:
                     top = y + CELL_H - CELL_H * BLOCKS[ch] // 8
                     draw.rectangle([x, top, x + CELL_W - 1, y + CELL_H - 1], fill=fg)
+                elif ch == "▀":  # the graph's full cells: the upper half; the lower half is the background
+                    draw.rectangle([x, y, x + CELL_W - 1, y + CELL_H // 2 - 1], fill=fg)
                 elif not box(draw, ch, x, y, fg):
                     draw.text((x, y + 1), ch, font=fonts[bold], fill=fg)
             col += len(text)

@@ -14,6 +14,7 @@ Python >= 3.6. At start it asks PyPI whether a newer release is out
 import argparse
 import ctypes
 import itertools
+import json
 import math
 import operator
 import os
@@ -49,47 +50,60 @@ def _rgb(rgb):
     return "\x1b[38;2;{};{};{}m".format(*rgb)
 
 
+def _oklab(rgb):
+    """Colour `rgb` in OKLab (Björn Ottosson, 2020): a space where equal distances look equally different."""
+    def linear(c):  # sRGB's gamma undone
+        c /= 255
+        return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
+    r, g, b = map(linear, rgb)
+    l, m, s = (v ** (1 / 3) for v in (0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b,
+                                       0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b,
+                                       0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b))
+    return (0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s,
+            1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s,
+            0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s)
+
+
+# The 256-colour palette from 16 on, as (code, OKLab): a 6 x 6 x 6 cube, then 24 greys.
+_LEVELS = (0, 95, 135, 175, 215, 255)
+PALETTE = ([(16 + i, _oklab((_LEVELS[i // 36], _LEVELS[i // 6 % 6], _LEVELS[i % 6]))) for i in range(216)]
+           + [(232 + i, _oklab((8 + 10 * i,) * 3)) for i in range(24)])
+
+
 def _nearest256(rgb):
-    """The 256-colour palette's code nearest to colour `rgb`."""
-    levels = (0, 95, 135, 175, 215, 255)  # the palette's 6 x 6 x 6 cube, then 24 greys
-    cube = [min(range(6), key=lambda i: abs(levels[i] - v)) for v in rgb]
-    grey = min(23, max(0, round((sum(rgb) / 3 - 8) / 10)))
-    options = [(16 + 36 * cube[0] + 6 * cube[1] + cube[2], [levels[i] for i in cube]),
-               (232 + grey, [8 + 10 * grey] * 3)]
-    return _fg(min(options, key=lambda o: sum((a - b) ** 2 for a, b in zip(o[1], rgb)))[0])
+    """The palette code that looks nearest to colour `rgb`. Nearest in plain RGB would, for a green between
+    two of the palette's, as soon take a dull olive as the next green."""
+    lab = _oklab(rgb)
+    return min(PALETTE, key=lambda entry: sum((a - b) ** 2 for a, b in zip(entry[1], lab)))[0]
 
 
-# Styles are written in 24-bit colour and turned into what the terminal shows as they are sent, see restyle:
-# "256" for terminals without 24-bit colour (Xshell unless told, older PuTTY, macOS Terminal), "mono" for
-# greys alone. nvmon starts in the one colour_mode picks; the c key goes through them.
-COLOUR_MODES = ("truecolor", "256", "mono")
-COLOUR_ARG = re.compile(r"\x1b\[38;(?:2;(\d+);(\d+);(\d+)|5;(\d+))m")
+# Styles are written in 24-bit colour and turned, as they are sent (restyle), into what the terminal shows:
+# 24-bit colour or 256 colours, as colour_mode finds, or black and white, which c switches on and off.
+COLOUR_ARG = re.compile(r"\x1b\[([34])8;(?:2;(\d+);(\d+);(\d+)|5;(\d+))m")
 
 
 @lru_cache(maxsize=None)
 def restyle(style, mode):
-    """`style` in colour `mode`: 24-bit colours become the nearest of the 256-colour palette, or in mono go,
-    along with the palette's other hues; greys, bold, faint and reverse video stay."""
+    """`style` in colour `mode` ("truecolor", "256" or "mono"): 24-bit colours become the nearest of the
+    256-colour palette or, in mono, go along with the palette's other hues; greys, bold, faint and reverse
+    video stay."""
     if mode == "truecolor":
         return style
 
     def swap(m):
-        if m.group(4):  # a palette colour: in mono only its greys (232-255) stay
-            return m.group(0) if mode != "mono" or int(m.group(4)) >= 232 else ""
-        return _nearest256([int(v) for v in m.group(1, 2, 3)]) if mode == "256" else ""
+        layer, code = m.group(1), m.group(5)  # layer 3: the foreground, 4: the background
+        if code:  # a palette colour: in mono only its greys (232-255) stay
+            return m.group(0) if mode != "mono" or int(code) >= 232 else ""
+        if mode == "mono":
+            return ""
+        return "\x1b[{}8;5;{}m".format(layer, _nearest256([int(v) for v in m.group(2, 3, 4)]))
     return COLOUR_ARG.sub(swap, style)
 
 
 def colour_mode(truecolor):
-    """The colour mode to start in: NVMON_COLORS when set, black and white under NO_COLOR, else 24-bit when
-    the terminal is known to show it (it said so, see Screen.probe, or COLORTERM does), else 256. Unsure means
-    256, which every terminal of today shows and which looks nearly the same; 24-bit colour where it is not
-    understood comes out in odd colours."""
-    wanted = os.environ.get("NVMON_COLORS", "")
-    if wanted in COLOUR_MODES:
-        return wanted
-    if os.environ.get("NO_COLOR"):
-        return "mono"
+    """"truecolor" where the terminal is known to show 24-bit colour (it said so, see Screen.probe, or
+    COLORTERM does), else "256": every terminal of today shows those, and they look nearly the same, while
+    24-bit colour where it is not understood comes out in odd colours."""
     return "truecolor" if truecolor or os.environ.get("COLORTERM") in ("truecolor", "24bit") else "256"
 
 
@@ -104,8 +118,9 @@ def _gradient(stops):
 
 
 GREEN, YELLOW, ORANGE, RED = (95, 175, 95), (215, 215, 95), (215, 135, 95), (215, 95, 95)
-# Utilization and shares: green -> yellow -> orange -> red over 0-100 %.
-HEAT = _gradient([(0, GREEN), (20, (175, 215, 95)), (40, YELLOW), (60, (215, 175, 95)), (80, ORANGE), (100, RED)])
+# Utilization and shares: green -> yellow -> orange -> red over 0-100 %. The yellow-green sits at 30 %, not 20:
+# from green to it is a long way to the eye, and so equal steps in % look about equally big.
+HEAT = _gradient([(0, GREEN), (30, (175, 215, 95)), (40, YELLOW), (60, (215, 175, 95)), (80, ORANGE), (100, RED)])
 # Temperature in °C: idle GPUs sit at 30-45, busy ones at 60-80, most throttle from about 85-90.
 TEMP = _gradient([(30, (95, 135, 215)), (45, (95, 175, 175)), (60, GREEN), (72, YELLOW), (80, ORANGE), (88, RED)])
 # Warnings on the top edge: yellow = worth a look, orange = slowed, red = act.
@@ -727,7 +742,6 @@ class UpdateCheck(threading.Thread):
 
     def run(self):
         try:
-            import json
             import urllib.request
             with urllib.request.urlopen(PYPI_JSON, timeout=5) as response:
                 latest = json.load(response)["info"]["version"]
@@ -793,20 +807,35 @@ def pad(line, width):
 
 
 @lru_cache(maxsize=None)
-def graph_row(r, height):
-    """The (block, colour) cell that row `r` (0 = bottom) of a `height`-row graph shows for each
-    level 0 .. 8 * height.
+def graph_row(r, height, two_tone=True):
+    """The (block, style) cell that row `r` (0 = bottom) of a `height`-row graph shows for each level
+    0 .. 8 * height.
 
-    Each cell takes the colour of the level its top reaches: full cells shade row by row,
-    and the ragged top edge shows the exact colour of each value.
+    The colour goes with the height, as a gradient behind the bars would. A cell holds one character in one
+    colour on one background, so two colours at most: a full cell is "▀" in its upper half's colour on its
+    lower half's, which makes twice as many bands as rows, each the colour of its middle; no other split of a
+    cell comes closer to a smooth gradient. The ragged top is a block from the bottom in the colour of what it
+    covers. Without `two_tone` (black and white; faded boxes, as faint leaves backgrounds bright) a full cell
+    is one colour.
     """
     steps = height * 8
-    fills = (min(8, max(0, level - r * 8)) for level in range(steps + 1))
-    # Blank and full cells share the row colour so they join into long runs.
-    return [(BLOCKS[f], heat((r * 8 + (f or 8)) / steps)) for f in fills]
+
+    def at(level):  # the colour at `level`, in eighths of a cell from the bottom
+        return heat(level / steps)
+
+    cells = []
+    for level in range(steps + 1):
+        fill = min(8, max(0, level - r * 8))
+        if fill == 8 and two_tone:
+            cells.append(("▀", at(r * 8 + 6) + at(r * 8 + 2).replace("\x1b[38;", "\x1b[48;")))  # 48: background
+        elif fill:
+            cells.append((BLOCKS[fill], at(r * 8 + fill / 2)))
+        else:
+            cells.append((" ", ""))
+    return cells
 
 
-def graph(history, width, height):
+def graph(history, width, height, two_tone=True):
     """Stacked block chart, newest sample on the right, top row first."""
     vals = list(history)[-width:] if width > 0 else []
     steps = height * 8
@@ -815,7 +844,7 @@ def graph(history, width, height):
     text_of, style_of = operator.itemgetter(0), operator.itemgetter(1)
     rows = []
     for r in reversed(range(height)):
-        cells = map(graph_row(r, height).__getitem__, levels)
+        cells = map(graph_row(r, height, two_tone).__getitem__, levels)
         rows.append([("".join(map(text_of, run)), style) for style, run in itertools.groupby(cells, key=style_of)])
     return rows
 
@@ -869,10 +898,11 @@ def degraded(gpu):
     return bool(s.pcie_width and gpu.pcie_max_width and s.pcie_width < gpu.pcie_max_width)
 
 
-def panel(gpu, width, height, selected=None, graphs=True):
+def panel(gpu, width, height, selected=None, graphs=True, two_tone=True):
     """One GPU's box, the utilization graph beside the stats or, without `graphs`, a card of the stats
-    alone; faded when a job is `selected` and it does not run here."""
+    alone; faded when a job is `selected` and it does not run here. `two_tone`: see graph_row."""
     s = gpu.now
+    faded = selected is not None and not any(p.job == selected for p in s.processes)
     # Both sides as (segments, rank); when space runs out the lowest rank goes first:
     # fan, name, power, clock, temperature, PCIe warning, slowdown warning. The GPU number stays.
     # Fixed widths keep things from shifting.
@@ -891,14 +921,14 @@ def panel(gpu, width, height, selected=None, graphs=True):
         split = 2 + graph_w + 1  # column of the graph | stats divider
         rule = [(" ├" + "─" * (INFO_W + 2) + "┤", DIM)]  # across the stats, joined to the borders
         body = [[("│ ", DIM)] + g + (rule if i is None else [(" │ ", DIM)] + i + [(" │", DIM)])
-                for g, i in zip(graph(gpu.history, graph_w, height), info(gpu, height))]
+                for g, i in zip(graph(gpu.history, graph_w, height, two_tone and not faded), info(gpu, height))]
     else:
         split = width - 1  # the processes take the whole bottom edge
         rule = [("├" + "─" * (width - 2) + "┤", DIM)]
         body = [rule if i is None else [("│ ", DIM)] + i + [(" │", DIM)] for i in info(gpu, height, width - 4)]
     bottom = bottom_edge(width, split, process_label(s.processes, split - 4, selected, gpu.index))
     lines = [top] + body + [bottom]
-    if selected is None or any(p.job == selected for p in s.processes):
+    if not faded:
         return lines
     return [[(seg[0], FADED + (seg[1] if seg[1] != BOLD else "")) + seg[2:] for seg in line] for line in lines]
 
@@ -997,14 +1027,14 @@ def layout(count, width, height, graphs=True):
     return cols, max(MIN_INNER_H, min(MAX_INNER_H, height // rows - 2))
 
 
-def render(gpus, width, height, selected=None, shape=None, graphs=True):
+def render(gpus, width, height, selected=None, shape=None, graphs=True, two_tone=True):
     """The GPU boxes, in `shape` = (columns, inner height) or else the layout that fits: exactly `height`
     lines of exactly `width` cells."""
     cols, inner = shape or layout(len(gpus), width, height, graphs)
     rows = math.ceil(len(gpus) / cols)
     lines = []
     for r in range(rows):
-        panels = [panel(g, width // cols, inner, selected, graphs) for g in gpus[r * cols:(r + 1) * cols]]
+        panels = [panel(g, width // cols, inner, selected, graphs, two_tone) for g in gpus[r * cols:(r + 1) * cols]]
         lines += [[seg for part in parts for seg in part] for parts in zip(*panels)]
     lines = [pad(clip(line, width), width) for line in lines[:height]]
     return lines + [[(" " * width, "")]] * (height - len(lines))
@@ -1122,7 +1152,6 @@ def footer(width, newer=None, picker=()):
     return spread(width, left, right)
 
 
-COLOUR_NAMES = {"truecolor": "24-bit", "256": "256, for terminals without 24-bit colour", "mono": "black and white"}
 MOVES = {"tab": 1, "down": 1, "up": -1, "backtab": -1, "pgdn": 10, "pgup": -10, "home": -10**6, "end": 10**6}
 
 
@@ -1130,8 +1159,9 @@ class View:
     """What the screen shows around the numbers, and what keys and clicks do to it: the selected job,
     only its GPUs, the process list, a question before stopping, a note on how that went."""
 
-    def __init__(self, colours="truecolor"):
-        self.colours = colours            # one of COLOUR_MODES
+    def __init__(self):
+        self.shows = "truecolor"          # the colours the terminal shows, see colour_mode
+        self.mono = False                 # black and white instead (c)
         self.graphs = True                # the boxes show the utilization graph, else they are cards
         self.hidden, self.indices = set(), []  # the GPUs left out, and all there are
         self.job = None                   # the selected job's PID
@@ -1147,6 +1177,22 @@ class View:
         self.list_rows = range(0)         # the screen rows the list takes, when it is open
         self.shift, self.shifted = 0, None  # how far the selected job's command is scrolled, and whose
         self.clicked = (0, None)          # (when, what): the last click, to tell a double click
+
+    @property
+    def colours(self):
+        """What paint draws in: the terminal's colours, or "mono"."""
+        return "mono" if self.mono else self.shows
+
+    def restore(self, saved, indices):
+        """Take up what an earlier run kept (Settings.load); of the GPUs `indices`, one always stays shown."""
+        self.graphs, self.mono = saved.get("graphs", self.graphs), saved.get("mono", self.mono)
+        self.sort = saved.get("sort", self.sort)
+        hidden = saved.get("hidden", set()) & set(indices)
+        self.hidden = hidden if len(hidden) < len(indices) else set()
+
+    def kept(self):
+        """What is kept for the next run: see Settings."""
+        return {"graphs": self.graphs, "mono": self.mono, "sort": self.sort, "hidden": set(self.hidden)}
 
     def selected(self):
         return next((job for job in self.jobs if job.pid == self.job), None)
@@ -1179,13 +1225,13 @@ class View:
         rows = math.ceil(len(gpus) / cols)
         if rows * (inner + 2) <= height:
             self.gpu_top, self.gpu_page = 0, rows
-            return render(gpus, width, height, self.job, (cols, inner), self.graphs)
+            return render(gpus, width, height, self.job, (cols, inner), self.graphs, not self.mono)
         self.gpu_page = max(1, (height - 1) // (inner + 2))
         self.gpu_top = max(0, min(self.gpu_top, rows - self.gpu_page))
         part = gpus[self.gpu_top * cols:(self.gpu_top + self.gpu_page) * cols]
         note = "GPUs {} of {} shown · wheel or PgUp/PgDn for the rest".format(
             ranges([g.index for g in part]), len(gpus))
-        return (render(part, width, height - 1, self.job, (cols, inner), self.graphs)
+        return (render(part, width, height - 1, self.job, (cols, inner), self.graphs, not self.mono)
                 + [spread(width, [], [(note, DIM)])])
 
     def detail(self, gpus):
@@ -1326,9 +1372,10 @@ class View:
             self.listing = not self.listing
         elif key == "g":
             self.graphs = not self.graphs
-        elif key == "c":
-            self.colours = COLOUR_MODES[(COLOUR_MODES.index(self.colours) + 1) % len(COLOUR_MODES)]
-            self.note = ([("colours: " + COLOUR_NAMES[self.colours], "")], time.monotonic() + 3)
+        elif key == "c":  # black and white, or the terminal's colours again
+            self.mono = not self.mono
+            shows = "24-bit" if self.shows == "truecolor" else "256, all this terminal shows"
+            self.note = ([("black and white" if self.mono else "colours: " + shows, "")], time.monotonic() + 3)
         elif key.isdigit() and int(key) in self.indices:
             self.handle(("gpu", int(key)))
         elif self.listing and key in ("s", "r"):  # the next column, or the other way round
@@ -1360,6 +1407,7 @@ class View:
 # Chinese and Japanese (Unicode calls their width "ambiguous"): ASCII look-alikes, one for one.
 ASCII = str.maketrans({"─": "-", "│": "|", "├": "+", "┤": "+", "╭": "+", "╮": "+", "╰": "+", "╯": "+",
                        "▁": "_", "▂": "_", "▃": "_", "▄": "=", "▅": "=", "▆": "#", "▇": "#", "█": "#",
+                       "▀": " ",  # the graph's full cells: their background alone, a solid block
                        "°": " ", "·": "-", "…": "~", "↑": "^", "↓": "v", "▲": "^", "▼": "v"})
 
 
@@ -1376,12 +1424,82 @@ def paint(lines, mode="truecolor", ascii=False):
             if mode != "truecolor":
                 style = restyle(style, mode)
             if style != current:
-                # One colour replaces another directly; anything else (bold, plain) needs a reset first.
-                colours = style.startswith("\x1b[38") and current.startswith("\x1b[38")
+                # One colour replaces another directly; anything else (bold, a background, plain) needs a
+                # reset first.
+                colours = (style.startswith("\x1b[38") and current.startswith("\x1b[38")
+                           and "\x1b[48" not in current)
                 out.append(style if colours else RESET + style)
                 current = style
             out.append(text)
     return "".join(out) + RESET
+
+
+# ── settings ─────────────────────────────────────────────────────────────────
+
+def client():
+    """Where the person looking sits: the address their ssh session comes from, else "local". Settings go by
+    it, as one account is often used from several computers, each with a terminal of its own."""
+    for name in ("SSH_CONNECTION", "SSH_CLIENT"):
+        address = os.environ.get(name, "").split()
+        if address:
+            return address[0]
+    return "local"
+
+
+class Settings:
+    """What stays from one run to the next, for each client (see client): graphs on or off, black and white,
+    the list's order, and the GPUs hidden, those for each machine, as several often share a home directory.
+    Kept in ~/.config/nvmon/settings.json (%APPDATA%\\nvmon on Windows); a file that cannot be read or written
+    only means that nothing is kept."""
+
+    def __init__(self):
+        base = (os.environ.get("APPDATA") if os.name == "nt" else None) or os.environ.get("XDG_CONFIG_HOME")
+        base = base or os.path.join(os.path.expanduser("~"), ".config")
+        self.path, self.client = os.path.join(base, "nvmon", "settings.json"), client()
+
+    def _read(self):
+        try:
+            with open(self.path, encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def load(self, host):
+        """This client's settings as View.restore takes them, the GPUs hidden those on `host`."""
+        mine = self._read().get(self.client)
+        mine = mine if isinstance(mine, dict) else {}
+        out = {name: mine[name] for name in ("graphs", "mono") if isinstance(mine.get(name), bool)}
+        sort = mine.get("sort")
+        if isinstance(sort, list) and len(sort) == 2 and sort[0] in SORTS and isinstance(sort[1], bool):
+            out["sort"] = tuple(sort)
+        hidden = mine.get("hidden")
+        if isinstance(hidden, dict) and isinstance(hidden.get(host), list):
+            out["hidden"] = {i for i in hidden[host] if isinstance(i, int)}
+        return out
+
+    def save(self, kept, indices, host):
+        """Keep `kept` (View.kept) for this client; for GPUs that are not `indices` (nvmon -g), what was
+        kept for them. Everyone else's settings stay as the file has them now."""
+        data = self._read()
+        mine = data.get(self.client) if isinstance(data.get(self.client), dict) else {}
+        hidden = mine.get("hidden") if isinstance(mine.get("hidden"), dict) else {}
+        earlier = hidden.get(host) if isinstance(hidden.get(host), list) else []
+        hidden[host] = sorted({i for i in earlier if isinstance(i, int) and i not in indices} | kept["hidden"])
+        mine.update(graphs=kept["graphs"], mono=kept["mono"], sort=list(kept["sort"]),
+                    hidden={name: gpus for name, gpus in hidden.items() if gpus})
+        data[self.client] = mine
+        temp = "{}.{}".format(self.path, os.getpid())
+        try:
+            os.makedirs(os.path.dirname(self.path), exist_ok=True)
+            with open(temp, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=1, sort_keys=True)
+            os.replace(temp, self.path)  # at once: a run stopped halfway leaves the old file whole
+        except OSError:  # a home that is read-only, full, not there
+            try:
+                os.remove(temp)
+            except OSError:
+                pass
 
 
 # ── terminal ─────────────────────────────────────────────────────────────────
@@ -1566,8 +1684,9 @@ def main():
     parser = argparse.ArgumentParser(
         prog="nvmon", description="A fancy NVIDIA GPU monitor for the terminal.",
         epilog="At start nvmon asks PyPI whether a newer release is out; NVMON_NO_UPDATE_CHECK=1 turns that "
-               "off. Colours are 24-bit where the terminal says it shows them, else 256; NVMON_COLORS=truecolor, 256 "
-               "or mono (also NO_COLOR=1) starts in the one named, and the c key switches. " + REPO)
+               "off. Colours are 24-bit where the terminal says it shows them, else 256. Graphs on or off, black and "
+               "white, the list's order and hidden GPUs are kept for each computer you connect from, in "
+               "~/.config/nvmon/settings.json. " + REPO)
     parser.add_argument("-i", "--interval", type=interval, default=DEFAULT_INTERVAL, metavar="SEC",
                         help="seconds between updates, at least 0.1 (default: 0.5)")
     parser.add_argument("-g", "--gpus", type=gpu_list, metavar="LIST",
@@ -1594,9 +1713,12 @@ def main():
         signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(128 + signum))
         for g in gpus:
             g.poll()  # the first numbers, before the screen opens
+        host, settings, indices = socket.gethostname(), Settings(), [g.index for g in gpus]
         poller, view = Poller(gpus), View()
+        view.restore(settings.load(host), indices)
+        kept = view.kept()
         with Screen() as screen:
-            view.colours = colour_mode(screen.truecolor)
+            view.shows = colour_mode(screen.truecolor)
             # peek = (GPUs, round): when more GPUs' processes are to show their utilization, as after a click on
             # a job, the screen takes the newest numbers as soon as those GPUs have been read, not at the next
             # frame; or once that round of polls is over, for a GPU that cannot tell (with MIG, say).
@@ -1630,7 +1752,11 @@ def main():
                                 view.colours)
                 # Keys and clicks redraw at once; the numbers move on at the next frame.
                 events = screen.read(0.01 if peek is not None else (poll_at or frame_at) - time.monotonic())
-                if not all(map(view.handle, events)):
+                going = all(map(view.handle, events))
+                if view.kept() != kept:  # a setting changed: keep it for next time
+                    kept = view.kept()
+                    settings.save(kept, indices, host)
+                if not going:
                     break
                 redraw, detail = bool(events), view.detail(gpus)
                 if detail - poller.detail:  # at the latest the next round, or the one after the round running

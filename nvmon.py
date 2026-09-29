@@ -896,13 +896,14 @@ def main():
         epilog="At start nvmon asks PyPI whether a newer release is out; NVMON_NO_UPDATE_CHECK=1 turns that "
                "off. " + REPO)
     parser.add_argument("-i", "--interval", type=float, default=0.5, metavar="SEC",
-                        help="seconds between updates (default: 0.5)")
+                        help="seconds between updates, 0.1 or more (default: 0.5)")
     parser.add_argument("-g", "--gpus", type=gpu_list, metavar="LIST",
                         help="only these GPUs, e.g. 0,2,4-7 (default: all)")
     parser.add_argument("-V", "--version", action="version", version="nvmon {} {}".format(__version__, REPO))
     args = parser.parse_args()
-    if not 0 < args.interval < math.inf:  # also rejects NaN
-        parser.error("--interval must be a positive number of seconds")
+    # The GPU's own readings change every 0.1-0.2 s: refreshing faster would only keep the driver busier.
+    if not 0.1 <= args.interval < math.inf:  # also rejects NaN
+        parser.error("--interval must be at least 0.1 seconds")
     if not sys.stdout.isatty():
         sys.exit("nvmon: output is not a terminal (over ssh, use: ssh -t HOST nvmon)")
 

@@ -27,6 +27,9 @@ nvmon -g 0,2,4-7   # only these GPUs
 ssh -t HOST nvmon  # over ssh: -t gives it a terminal
 ```
 
+Click a process, or press Tab, to pick its job: the GPUs it uses stand out, `f` shows only those,
+`t` stops it and `k` kills it (after a `y`). `p` lists every job. Hold Shift to select text with the mouse.
+
 ## What it shows
 
 - **GPU**: share of time any kernel ran. **cores / tensor** (H100 and newer): share of SMs busy

@@ -175,11 +175,14 @@ def check(nv, rc):
 
 
 class Process(NamedTuple):
+    pid: int
     name: str                     # script name for Python, else the executable
     mem: Optional[float]          # GPU memory, GiB
     owner: Optional[str]          # account; None for our own processes
     env: Optional[str]            # conda environment
     started: Optional[float]      # start time, seconds since the epoch
+    job: int                      # the job it is part of: its launcher's PID (torchrun...), else its own
+    launcher: Optional[str]       # the launcher's name; None when the job is just this process
 
 
 class Sample(NamedTuple):
@@ -215,7 +218,7 @@ class Gpu:
         self.pcie_max_width = self._uint("nvmlDeviceGetMaxPcieLinkWidth")
         self._gpm = self._gpm_samples()
         self.has_activity = self._gpm is not None
-        self._facts = {}  # pid -> (name, owner, env, started): fixed for a process's life, so read once
+        self._facts = {}  # pid -> what _facts_of says: fixed for a process's life, so read once
         self._listed, self._listed_mem = [], None  # process list, and the memory in use when it was read
 
     def _ok(self, fn, *args):
@@ -295,14 +298,19 @@ class Gpu:
         if not self._ok("nvmlDeviceGetComputeRunningProcesses_v3", byref(count), infos):
             return []
         running = infos[:count.value]
-        self._facts = {p.pid: self._facts.get(p.pid) or (self._process_name(p.pid),) + process_facts(p.pid)
-                       for p in running}
+        self._facts = {p.pid: self._facts.get(p.pid) or self._facts_of(p.pid) for p in running}
         procs = []
         for p in running:
-            name, owner, env, started = self._facts[p.pid]
             mem = None if p.usedGpuMemory == NVML_VALUE_NOT_AVAILABLE else p.usedGpuMemory / 2**30
-            procs.append(Process(name, mem, owner, env, started))
+            name, owner, env, started, job, launcher = self._facts[p.pid]
+            procs.append(Process(p.pid, name, mem, owner, env, started, job, launcher))
         return procs
+
+    def _facts_of(self, pid):
+        """(name, owner, conda environment, start time, job, launcher name) of `pid`."""
+        launcher = launcher_of(pid)
+        return ((self._process_name(pid),) + process_facts(pid)
+                + ((launcher, self._process_name(launcher)) if launcher else (pid, None)))
 
     def _process_name(self, pid):
         """Short name; for a Python interpreter, the script or module it runs (train.py, torch.distributed.run)."""
@@ -447,18 +455,65 @@ def start_time(pid):
 
 def process_owner(pid):
     """Account running `pid`; None for our own processes or where there is no /proc (Windows)."""
-    try:
-        import pwd
-        with open("/proc/{}/status".format(pid)) as f:
-            uid = next(int(line.split()[1]) for line in f if line.startswith("Uid:"))
-    except (ImportError, OSError, StopIteration):
+    uid = uid_of(pid)
+    if uid is None or uid == os.getuid():
         return None
-    if uid == os.getuid():
-        return None
+    import pwd
     try:
         return pwd.getpwuid(uid).pw_name
     except KeyError:  # no passwd entry, e.g. inside a container
         return str(uid)
+
+
+def uid_of(pid):
+    """The uid of the account running `pid`; None where unknown."""
+    try:
+        with open("/proc/{}/status".format(pid)) as f:
+            return next(int(line.split()[1]) for line in f if line.startswith("Uid:"))
+    except (OSError, StopIteration, ValueError):
+        return None
+
+
+def parent_of(pid):
+    """The PID of `pid`'s parent; None where unknown."""
+    try:
+        with open("/proc/{}/stat".format(pid)) as f:
+            return int(f.read().rsplit(")", 1)[1].split()[1])  # field 4, counted after "(name)"
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+# Parents that start each program on its own, rather than as the parts of one job.
+NOT_LAUNCHERS = {"bash", "sh", "dash", "zsh", "fish", "ksh", "tcsh", "csh", "tmux: server", "screen", "SCREEN",
+                 "sshd", "sudo", "su", "login", "systemd", "init", "script", "nohup"}
+
+
+def launcher_of(pid):
+    """The PID of what launched `pid` as part of a job, such as torchrun for its workers: its parent, unless
+    that is PID 1, a shell or the like, or someone else's process. None when `pid` stands alone."""
+    parent = parent_of(pid)
+    if not parent or parent <= 1 or uid_of(parent) != uid_of(pid):
+        return None
+    try:
+        with open("/proc/{}/comm".format(parent)) as f:
+            return None if f.read().strip() in NOT_LAUNCHERS else parent
+    except OSError:
+        return None
+
+
+def holds_gpu(pid):
+    """True when `pid` has an NVIDIA device open, as a GPU process in our PID namespace does."""
+    try:
+        fds = os.listdir("/proc/{}/fd".format(pid))
+    except OSError:
+        return False
+    for fd in fds:
+        try:
+            if os.readlink("/proc/{}/fd/{}".format(pid, fd)).startswith("/dev/nvidia"):
+                return True
+        except OSError:  # closed meanwhile
+            pass
+    return False
 
 
 def open_gpus(nv, wanted=None):
@@ -474,6 +529,82 @@ def open_gpus(nv, wanted=None):
         if nv.nvmlDeviceGetHandleByIndex_v2(index, byref(handle)) == NVML_SUCCESS:
             gpus.append(Gpu(nv, index, handle))
     return gpus
+
+
+# ── jobs ─────────────────────────────────────────────────────────────────────
+
+class Job(NamedTuple):
+    """GPU processes that run as one: a launcher's workers (torchrun, deepspeed...), or a single process."""
+    pid: int                      # where a stop goes: the launcher, else the process
+    name: str                     # what runs, e.g. train.py
+    launcher: Optional[str]       # e.g. torchrun
+    members: tuple                # (pid, start time) of its GPU processes
+    gpus: tuple                   # the GPUs it uses
+    mem: float                    # GiB, on all of them
+    started: Optional[float]
+    owner: Optional[str]
+    env: Optional[str]
+
+
+def jobs(gpus):
+    """The jobs on `gpus`: our own first, then by memory, biggest first."""
+    parts = {}
+    for gpu in gpus:
+        for p in gpu.now.processes:
+            parts.setdefault(p.job, []).append((gpu.index, p))
+    found = []
+    for pid, entries in parts.items():
+        procs = [p for _, p in entries]
+        main = max(procs, key=lambda p: p.mem or 0)
+        starts = [p.started for p in procs if p.started is not None]
+        found.append(Job(pid, main.name, main.launcher, tuple(sorted({(p.pid, p.started) for p in procs})),
+                         tuple(sorted({index for index, _ in entries})), sum(p.mem or 0 for p in procs),
+                         min(starts) if starts else None, main.owner, main.env))
+    return sorted(found, key=lambda job: (job.owner is not None, -job.mem))
+
+
+def ranges(numbers):
+    """(0, 2, 4, 5, 6, 7) -> "0,2,4-7", as -g takes them."""
+    spans = []
+    for n in numbers:
+        if spans and spans[-1][1] == n - 1:
+            spans[-1][1] = n
+        else:
+            spans.append([n, n])
+    return ",".join(str(a) if a == b else "{}-{}".format(a, b) for a, b in spans)
+
+
+def about(job):
+    """"kim/torch · torchrun job · GPUs 4-5 · 30.2G · 2h13m"."""
+    who = "/".join(part for part in (job.owner, job.env) if part)
+    parts = [who] if who else []
+    parts.append("{} job".format(job.launcher) if job.launcher else "PID {}".format(job.pid))
+    parts.append("GPU{} {}".format("s" if len(job.gpus) > 1 else "", ranges(job.gpus)))
+    parts.append("{:.1f}G".format(job.mem))
+    return " · ".join(parts + ([elapsed(job.started)] if job.started is not None else []))
+
+
+def stop(job, name):
+    """Send signal `name` ("SIGTERM" or "SIGKILL") to `job`, once /proc confirms its PIDs still are the
+    processes we saw: started when we saw them, holding a GPU open (inside a container, NVML can report
+    PIDs of the host), and ours. SIGTERM goes to the launcher, which then ends its workers; SIGKILL, which
+    it cannot pass on, goes to each worker as well. Returns a note on what happened."""
+    if os.name == "nt":
+        return [("stopping processes works on Linux", WARN)]
+    for pid, started in job.members:
+        if start_time(pid) != started or not holds_gpu(pid) or (job.launcher and parent_of(pid) != job.pid):
+            return [("{} has changed meanwhile: nothing sent".format(job.name), WARN)]
+    if uid_of(job.pid) != os.getuid():
+        return [("only your own processes can be stopped", WARN)]
+    targets = [job.pid] + ([pid for pid, _ in job.members] if name == "SIGKILL" and job.launcher else [])
+    try:
+        for pid in targets:
+            os.kill(pid, getattr(signal, name))
+    except ProcessLookupError:
+        return [("{} has already ended".format(job.name), "")]
+    except PermissionError:
+        return [("not allowed to signal PID {}".format(job.pid), WARN)]
+    return [("sent {} to {} (PID {})".format(name, job.launcher or job.name, job.pid), "")]
 
 
 # ── new releases ─────────────────────────────────────────────────────────────
@@ -526,24 +657,28 @@ def update_command():
 
 
 # ── rendering ────────────────────────────────────────────────────────────────
-# A line is a list of (text, style) segments; every character is one cell wide.
+# A line is a list of (text, style) segments; every character is one cell wide. A segment that can be
+# clicked carries a third item, what the click means: a job's PID, LIST, or ("key", name).
 
 # A horizontal rule across the stats column, joined to the borders.
 RULE = [(" ├" + "─" * (INFO_W + 2) + "┤", DIM)]
+SELECTED = "\x1b[7m" + PROC  # the selected job: reverse video, on the process names' blue
+FADED = "\x1b[2m"            # "faint": GPUs the selected job does not use
+LIST = "list"                # what "+N" means when clicked: the process list
 
 
 def width_of(line):
-    return sum(len(text) for text, _ in line)
+    return sum(len(seg[0]) for seg in line)
 
 
 def clip(line, width):
     """`line` cut to at most `width` cells."""
     out = []
-    for text, style in line:
+    for seg in line:
         if width <= 0:
             break
-        out.append((text[:width], style))
-        width -= len(text)
+        out.append((seg[0][:width],) + seg[1:])
+        width -= len(seg[0])
     return out
 
 
@@ -629,7 +764,8 @@ def degraded(gpu):
     return bool(s.pcie_width and gpu.pcie_max_width and s.pcie_width < gpu.pcie_max_width)
 
 
-def panel(gpu, width, height):
+def panel(gpu, width, height, selected=None):
+    """One GPU's box; faded when a job is `selected` and it does not run here."""
     graph_w = max(0, width - CHROME_W - INFO_W)
     s = gpu.now
     split = 2 + graph_w + 1  # column of the graph | stats divider
@@ -646,11 +782,14 @@ def panel(gpu, width, height):
     parts += [] if s.fan is None else [([("FAN {:>3}%".format(s.fan), "")], 1)]
     parts += [] if s.clock is None else [([("{:>4} MHz".format(s.clock), s.slowdown[1] if s.slowdown else "")], 4)]
     top = edge(width, label, parts)
-    bottom = bottom_edge(width, split, process_label(s.processes, split - 4))
+    bottom = bottom_edge(width, split, process_label(s.processes, split - 4, selected))
     body = [[("│ ", DIM)] + g + (RULE if i is None
                                   else [(" │ ", DIM)] + i + [(" │", DIM)])
             for g, i in zip(graph(gpu.history, graph_w, height), info(gpu, height))]
-    return [top] + body + [bottom]
+    lines = [top] + body + [bottom]
+    if selected is None or any(p.job == selected for p in s.processes):
+        return lines
+    return [[(seg[0], FADED + (seg[1] if seg[1] != BOLD else "")) + seg[2:] for seg in line] for line in lines]
 
 
 def edge(width, label, parts):
@@ -689,10 +828,11 @@ def elapsed(started):
     return "{}d{}h".format(s // 86400, s % 86400 // 3600)
 
 
-def process_label(processes, room):
+def process_label(processes, room, selected=None):
     """Processes grouped by owner and conda environment, groups and processes by memory, biggest
     first: "migi: train.py 2h13m 15.1G · eval.py 5m 0.5G   kim/torch: a.py 1d4h 9.0G" (our own
-    processes carry no owner). As many whole entries as fit in `room` cells, then "+N" for the rest."""
+    processes carry no owner). As many whole entries as fit in `room` cells, then "+N" for the rest.
+    Each entry, when clicked, means its job; the `selected` job's names are reversed."""
     def mem(process):
         return process.mem or 0
     groups = {}
@@ -705,14 +845,15 @@ def process_label(processes, room):
             gap = [] if not entries else [(" · ", DIM)] if j else [("   ", "")]
             details = [elapsed(process.started)] if process.started is not None else []
             details += [] if process.mem is None else ["{:.1f}G".format(process.mem)]
-            entries.append(gap + ([(tag + ": ", DIM)] if tag and not j else []) + [(process.name, PROC)]
-                           + ([(" " + " ".join(details), DIM)] if details else []))
+            name = (process.name, SELECTED if process.job == selected else PROC, process.job)
+            entries.append(gap + ([(tag + ": ", DIM)] if tag and not j else []) + [name]
+                           + ([(" " + " ".join(details), DIM, process.job)] if details else []))
     label = []
     for i, entry in enumerate(entries):
         rest = len(entries) - i - 1
         if width_of(label + entry) + (len("  +{}".format(rest)) if rest else 0) > room:
             # The first entry is always shown, cut if need be; later ones collapse into the count.
-            return clip(entry, room) if not label else label + [("  +{}".format(rest + 1), DIM)]
+            return clip(entry, room) if not label else label + [("  +{}".format(rest + 1), DIM, LIST)]
         label += entry
     return label
 
@@ -725,8 +866,8 @@ def bottom_edge(width, split, label):
             + [("─" * max(0, width - split - 1) + "╯", DIM)])
 
 
-def render(gpus, width, height):
-    """The whole screen: exactly `height` lines of exactly `width` cells."""
+def render(gpus, width, height, selected=None):
+    """The GPU boxes: exactly `height` lines of exactly `width` cells."""
     # Two columns only when one column cannot show every GPU at full height.
     two_fit = width // 2 >= CHROME_W + INFO_W + MIN_GRAPH_W
     cols = 2 if two_fit and len(gpus) * (MAX_INNER_H + 2) > height else 1
@@ -734,10 +875,32 @@ def render(gpus, width, height):
     inner = max(1, min(MAX_INNER_H, height // rows - 2))
     lines = []
     for r in range(rows):
-        panels = [panel(g, width // cols, inner) for g in gpus[r * cols:(r + 1) * cols]]
+        panels = [panel(g, width // cols, inner, selected) for g in gpus[r * cols:(r + 1) * cols]]
         lines += [[seg for part in parts for seg in part] for parts in zip(*panels)]
     lines = [pad(clip(line, width), width) for line in lines[:height]]
     return lines + [[(" " * width, "")]] * (height - len(lines))
+
+
+def process_list(jobs, width, rows, selected, top):
+    """The list p opens, `rows` lines: a heading, the jobs from index `top` on (clicking one means it; the
+    `selected` one reversed), and how many more there are."""
+    lines = [[(" PID      account/env    process                   GPUs       memory     time", DIM)]]
+    shown = jobs[top:top + rows - 2]
+    for job in shown:
+        name = job.name + ("  {} workers".format(len(job.members)) if len(job.members) > 1 else "")
+        who = "/".join(part for part in (job.owner, job.env) if part)
+        time_ = elapsed(job.started) if job.started is not None else "-"
+        text = " {:<8} {:<14} {:<25} {:<9} {:>7.1f}G {:>8}".format(job.pid, who[:14], name[:25],
+                                                                   ranges(job.gpus)[:9], job.mem, time_)
+        lines.append([(text, SELECTED if job.pid == selected else "", job.pid)])
+    if not jobs:
+        lines.append([(" no processes on these GPUs", DIM)])
+    above, below = top, len(jobs) - top - len(shown)
+    more = ", ".join(n for n in ("{} more above".format(above) if above else "",
+                                 "{} more below".format(below) if below else "") if n)
+    lines.append(spread(width, [], [(more + " · wheel or ↑↓ to scroll", DIM)]) if more else [])
+    lines = [pad(clip(line, width), width) for line in lines[:rows]]
+    return lines + [[(" " * width, "")]] * (rows - len(lines))
 
 
 def spread(width, left, right):
@@ -759,18 +922,161 @@ def header(width, interval, driver, waiting=0):
     return spread(width, left, right)
 
 
+KEY_NAMES = {"\r": "enter", "\n": "enter", "\t": "tab", "\x1b": "esc", "A": "up", "B": "down", "H": "home",
+             "F": "end", "Z": "backtab", "1~": "home", "4~": "end", "5~": "pgup", "6~": "pgdn",
+             "Esc": "esc", "Esc / q": "q"}
+
+
+def keys(*hints):
+    """Key hints for the bottom line, keys(("p", "processes"), ...); clicking one presses its key."""
+    out = []
+    for key, label in hints:
+        press = ("key", KEY_NAMES.get(key, key))
+        out += ([("   ", "")] if out else []) + [(key, "", press), (" " + label, DIM, press)]
+    return out
+
+
 def footer(width, newer=None):
-    """Bottom line: a newer release when there is one, with how to update | how to quit."""
-    right, left = [("Esc / q quit", DIM)], []
+    """Bottom line: a newer release when there is one, with how to update | the keys."""
+    right, left = keys(("p", "processes"), ("Esc / q", "quit")), []
     if newer:
         version, command = newer
         notice = [("update available: " + version, NEWS)]
         how = [(" ({})".format(command or "new nvmon.py: " + RELEASES), "")]
         link = [("   what's new: " + RELEASES, DIM)] if command else []  # a copied nvmon.py already links there
-        # As much as fits beside "Esc / q quit": the link goes first, then how to update.
+        # As much as fits beside the keys: the link goes first, then how to update.
         left = next((option for option in (notice + how + link, notice + how)
                      if width_of(option) + 2 + width_of(right) <= width), notice)
     return spread(width, left, right)
+
+
+MOVES = {"tab": 1, "down": 1, "up": -1, "backtab": -1, "pgdn": 10, "pgup": -10, "home": -10**6, "end": 10**6}
+
+
+class View:
+    """What the screen shows around the numbers, and what keys and clicks do to it: the selected job,
+    only its GPUs, the process list, a question before stopping, a note on how that went."""
+
+    def __init__(self):
+        self.job = None                   # the selected job's PID
+        self.only = False                 # show only the GPUs it uses
+        self.listing = False              # the process list is open
+        self.top, self.follow = 0, True   # the list's first job; keep the selected one in view
+        self.asking = None                # "SIGTERM" or "SIGKILL" awaiting y or n
+        self.note = None                  # (segments, until): what the last stop did
+        self.lines, self.jobs = [], []    # the last screen drawn, and the jobs on it
+        self.clicked = (0, None)          # (when, what): the last click, to tell a double click
+
+    def selected(self):
+        return next((job for job in self.jobs if job.pid == self.job), None)
+
+    def screen(self, gpus, width, height, top_line, newer):
+        """The whole screen: `top_line`, the GPU boxes (and the list, when open), the bottom line."""
+        self.jobs = jobs(gpus)
+        job = self.selected()
+        if job is None:  # nothing selected, or its job ended
+            self.job, self.only, self.asking = None, False, None
+        shown = [g for g in gpus if not self.only or g.index in job.gpus]
+        rows = min(len(self.jobs) + 2, max(4, (height - 2) // 3)) if self.listing else 0
+        body = render(shown, width, height - 2 - rows, self.job)
+        if rows:
+            body += process_list(self.jobs, width, rows, self.job, self.scrolled(rows - 2))
+        self.lines = [top_line] + body + [self.bottom_line(width, job, newer)]
+        return self.lines
+
+    def scrolled(self, room):
+        """The list's first job, kept in range and, after the selection moved, on the selected job."""
+        order = [job.pid for job in self.jobs]
+        if self.follow and self.job in order:
+            i = order.index(self.job)
+            self.top = min(max(self.top, i - room + 1), i)
+        self.top = max(0, min(self.top, len(order) - room))
+        return self.top
+
+    def bottom_line(self, width, job, newer):
+        if self.asking:
+            return spread(width, [(self.question(job), WARN)], keys(("y", "yes"), ("n", "no")))
+        note = self.note[0] if self.note and time.monotonic() < self.note[1] else None
+        if job:
+            hints = [("f", "all GPUs" if self.only else "only these GPUs")]
+            hints += [("t", "stop"), ("k", "kill")] if job.owner is None else []
+            left = [(job.name, PROC, job.pid), ("  " + about(job), DIM, job.pid)]
+            return spread(width, note or left, keys(*hints, ("Esc", "back")))
+        if self.listing:
+            return spread(width, note or [("click or ↑↓ to pick a job", DIM)], keys(("Esc", "close")))
+        return spread(width, note, keys(("p", "processes"), ("Esc / q", "quit"))) if note else footer(width, newer)
+
+    def question(self, job):
+        """"stop train.py: SIGTERM to its torchrun (PID 48213), which ends its 2 workers?" and the like."""
+        what = "stop" if self.asking == "SIGTERM" else "kill"
+        if not job.launcher:
+            return "{} {} (PID {}) with {}?".format(what, job.name, job.pid, self.asking)
+        passed = ", which ends its" if self.asking == "SIGTERM" else " and to its"
+        return "{} {}: {} to its {} (PID {}){} {} workers?".format(what, job.name, self.asking, job.launcher,
+                                                                  job.pid, passed, len(job.members))
+
+    def target(self, row, col):
+        """What a click at (row, col) of the last screen means; None for nothing."""
+        if 0 <= row < len(self.lines):
+            x = 0
+            for seg in self.lines[row]:
+                if x <= col < x + len(seg[0]):
+                    return seg[2] if len(seg) > 2 else None
+                x += len(seg[0])
+        return None
+
+    def handle(self, event):
+        """Act on one key or mouse event; False means quit."""
+        kind, value = event[0], event[1:]
+        if kind == "wheel":
+            if self.listing:
+                self.top, self.follow = self.top + 3 * value[0], False
+            return True
+        if kind == "click":
+            target = self.target(*value)
+            if isinstance(target, tuple):  # a key hint on the bottom line
+                return self.handle(target)
+            if target == LIST:
+                self.listing = True
+            elif target is None:
+                self.asking = None
+            else:
+                now = time.monotonic()
+                if self.clicked[1] == target and now - self.clicked[0] < 0.4:  # a double click
+                    self.only = not self.only
+                self.job, self.asking, self.follow, self.clicked = target, None, True, (now, target)
+            return True
+        key = value[0].lower() if len(value[0]) == 1 else value[0]
+        if self.asking:  # y stops; anything else, n and Esc among them, lets it be
+            if key == "y":
+                self.note = (stop(self.selected(), self.asking), time.monotonic() + 4)
+            self.asking = None
+            return key != "q"
+        if key == "q":
+            return False
+        if key == "esc":  # one step back; from the plain screen, quit
+            if self.only:
+                self.only = False
+            elif self.listing:
+                self.listing = False
+            elif self.job is not None:
+                self.job = None
+            else:
+                return False
+        elif key == "p":
+            self.listing = not self.listing
+        elif key in MOVES and self.jobs:
+            order = [job.pid for job in self.jobs]
+            i = order.index(self.job) if self.job in order else (-1 if MOVES[key] > 0 else len(order))
+            self.job, self.follow = order[min(max(i + MOVES[key], 0), len(order) - 1)], True
+        elif self.job is not None and key in ("f", "enter"):
+            self.only = not self.only
+        elif self.job is not None and key in ("t", "k"):
+            if self.selected().owner is None:
+                self.asking = "SIGTERM" if key == "t" else "SIGKILL"
+            else:
+                self.note = ([("only your own processes can be stopped", WARN)], time.monotonic() + 3)
+        return True
 
 
 def paint(lines):
@@ -779,7 +1085,7 @@ def paint(lines):
     for i, line in enumerate(lines):
         if i:
             out.append("\r\n")
-        for text, style in line:
+        for text, style, *_ in line:
             if style != current:
                 # One colour replaces another directly; anything else (bold, plain) needs a reset first.
                 colours = style.startswith("\x1b[38") and current.startswith("\x1b[38")
@@ -791,52 +1097,88 @@ def paint(lines):
 
 # ── terminal ─────────────────────────────────────────────────────────────────
 
+INPUT = re.compile(rb"\x1b\[<(?P<button>\d+);(?P<x>\d+);(?P<y>\d+)(?P<act>[Mm])"  # mouse, SGR encoding
+                   rb"|\x1b\[M(?P<old>...)"                                     # mouse, the old encoding
+                   rb"|\x1b[\[O](?P<args>[0-9;]*)(?P<end>[A-Za-z~])"             # arrows, Home, PgUp and such
+                   rb"|(?P<char>.)", re.DOTALL)                                 # any other key; a lone ESC is Esc
+
+
+def events(data):
+    """The input in `data`, the bytes a terminal sends: ("key", name) events, ("click", row, column) for
+    a left-button press, ("wheel", +1 down or -1 up)."""
+    out = []
+    for m in INPUT.finditer(data):
+        if m.group("button") or m.group("old"):
+            if m.group("button"):
+                button, x, y = (int(m.group(g)) for g in ("button", "x", "y"))
+                press = m.group("act") == b"M"
+            else:
+                button, x, y = (c - 32 for c in m.group("old"))
+                press = button & 3 != 3
+            if button & 64:
+                out.append(("wheel", 1 if button & 1 else -1))
+            elif press and button & 3 == 0 and not button & 32:  # left button down, not a drag
+                out.append(("click", y - 1, x - 1))
+        elif m.group("end"):
+            args, end = m.group("args").decode(), m.group("end").decode()
+            name = KEY_NAMES.get(args + end) or KEY_NAMES.get(end)
+            if name:
+                out.append(("key", name))
+        else:
+            char = m.group("char").decode("latin-1")
+            out.append(("key", KEY_NAMES.get(char, char)))
+    return out
+
+
+WINDOWS_KEYS = {"H": "up", "P": "down", "G": "home", "O": "end", "I": "pgup", "Q": "pgdn", "\x0f": "backtab"}
+
+
 class Screen:
-    """Alternate screen, hidden cursor, no auto-wrap, unbuffered keys; all restored on exit."""
+    """Alternate screen, hidden cursor, no auto-wrap, unbuffered keys, mouse clicks and wheel; all
+    restored on exit."""
 
     def __enter__(self):
         self._keys = sys.stdin.isatty()
+        self._mouse = self._keys and os.name != "nt"  # Windows reads keys with msvcrt, which sees no mouse
         self._restore = [enable_vt(), raw_keys() if self._keys else (lambda: None)]
-        self._write("\x1b[?1049h\x1b[?25l\x1b[?7l")
+        # 1000 + 1006: clicks and the wheel come in as SGR-encoded sequences (Shift+drag still selects text).
+        self._write("\x1b[?1049h\x1b[?25l\x1b[?7l" + ("\x1b[?1000h\x1b[?1006h" if self._mouse else ""))
         return self
 
     def __exit__(self, *exc):
-        self._write(RESET + "\x1b[?7h\x1b[?25h\x1b[?1049l")
+        self._write(RESET + ("\x1b[?1006l\x1b[?1000l" if self._mouse else "") + "\x1b[?7h\x1b[?25h\x1b[?1049l")
         for undo in self._restore:
             undo()
 
-    def wait(self, seconds):
-        """Sleep for `seconds`; returns True early if q or Esc is pressed."""
-        end = time.monotonic() + seconds
+    def read(self, seconds):
+        """Key and mouse events as soon as there are some; [] once `seconds` pass without any."""
         if not self._keys:
             time.sleep(max(0, seconds))
-            return False
+            return []
         if os.name == "nt":
             import msvcrt
+            end = time.monotonic() + seconds
             while True:
+                found = []
                 while msvcrt.kbhit():
-                    key = msvcrt.getwch()
-                    if key in ("\x00", "\xe0"):  # arrows and function keys come as two characters
-                        msvcrt.getwch()
-                    elif key in ("q", "Q", "\x1b"):
-                        return True
+                    char = msvcrt.getwch()
+                    if char in ("\x00", "\xe0"):  # arrows and the like come as two characters
+                        name = WINDOWS_KEYS.get(msvcrt.getwch())
+                    else:
+                        name = KEY_NAMES.get(char, char)
+                    found += [("key", name)] if name else []
                 left = end - time.monotonic()
-                if left <= 0:
-                    return False
-                time.sleep(min(left, 0.05))
+                if found or left <= 0:
+                    return found
+                time.sleep(min(left, 0.02))
         import select
         fd = sys.stdin.fileno()
-        while True:
-            left = end - time.monotonic()
-            if left <= 0 or not select.select([fd], [], [], left)[0]:
-                return False
-            keys = os.read(fd, 64)
-            # A lone ESC is the Esc key; arrows and the like arrive as ESC [ ... sequences.
-            if b"q" in keys or b"Q" in keys or keys == b"\x1b":
-                return True
-            if not keys:  # stdin closed: nothing more to read, just sleep
-                time.sleep(max(0, end - time.monotonic()))
-                return False
+        if not select.select([fd], [], [], max(0, seconds))[0]:
+            return []
+        data = os.read(fd, 1024)
+        if not data:  # stdin closed: nothing more will come
+            self._keys = False
+        return events(data)
 
     def draw(self, lines):
         # 2026 = synchronized output: terminals that know it swap the frame in at once.
@@ -933,25 +1275,31 @@ def main():
         signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(128 + signum))
         for g in gpus:
             g.poll()  # the first numbers, before the screen opens
-        poller = Poller(gpus)
+        poller, view = Poller(gpus), View()
         with Screen() as screen:
-            deadline = time.monotonic()
+            frame_at, poll_at, redraw = time.monotonic(), None, True
             while True:
-                for g in gpus:
-                    g.frame()
-                width, height = os.get_terminal_size()
-                screen.draw([header(width, args.interval, driver, poller.waiting())]
-                            + render(gpus, width, height - 2) + [footer(width, update.newer)])
-                # Fixed-rate ticks; a late tick restarts the schedule instead of bursting.
-                deadline = max(deadline + args.interval, time.monotonic())
-                # The next frame's polls start ahead of it: half a tick, at most 0.5 s (a busy driver was seen
-                # to take 0.4 s). Should the driver answer later still, the frame keeps the last numbers but
-                # comes on time.
-                if screen.wait(deadline - min(args.interval / 2, 0.5) - time.monotonic()):
+                now = time.monotonic()
+                if now >= frame_at:  # a new frame: the newest numbers, one more graph column each
+                    for g in gpus:
+                        g.frame()
+                    frame_at = max(frame_at + args.interval, now)  # a late frame restarts the schedule
+                    # The polls for the next frame start ahead of it: half a tick, at most 0.5 s (a busy
+                    # driver was seen to take 0.4 s). Should the driver answer later still, that frame keeps
+                    # the last numbers but comes on time.
+                    poll_at, redraw = frame_at - min(args.interval / 2, 0.5), True
+                if poll_at is not None and now >= poll_at:
+                    poller.refresh()
+                    poll_at = None
+                if redraw:
+                    width, height = os.get_terminal_size()
+                    screen.draw(view.screen(gpus, width, height,
+                                            header(width, args.interval, driver, poller.waiting()), update.newer))
+                # Keys and clicks redraw at once; the numbers move on at the next frame.
+                events = screen.read((poll_at or frame_at) - time.monotonic())
+                if not all(map(view.handle, events)):
                     break
-                poller.refresh()
-                if screen.wait(deadline - time.monotonic()):
-                    break
+                redraw = bool(events)
     except KeyboardInterrupt:
         pass
     except NvmlError as e:

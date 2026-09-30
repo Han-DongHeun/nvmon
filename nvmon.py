@@ -891,8 +891,9 @@ def graph_row(r, height, two_tone, scale):
     The color goes with the height, as a gradient behind the bars would. A cell holds one character in one
     color on one background, so two colors at most: a full cell is "▀" in its upper half's color on its
     lower half's, which makes twice as many bands as rows, each the color of its middle; no other split of a
-    cell comes closer to a smooth gradient. The ragged top is a block from the bottom in the color of what it
-    covers. Without `two_tone` (faded boxes, as faint leaves backgrounds bright) a full cell is one color.
+    cell comes closer to a smooth gradient. The ragged top is a block from the bottom in its lower half's
+    color, the band beside it, so that bands run on unbroken from bar to bar; a color of its own stood out
+    as a patch. Without `two_tone` (faded boxes, as faint leaves backgrounds bright) a cell is one color.
     """
     steps = height * 8
 
@@ -905,7 +906,7 @@ def graph_row(r, height, two_tone, scale):
         if fill == 8 and two_tone:
             cells.append(("▀", at(r * 8 + 6) + at(r * 8 + 2).replace("\x1b[38;", "\x1b[48;")))  # 48: background
         elif fill:
-            cells.append((BLOCKS[fill], at(r * 8 + fill / 2)))
+            cells.append((BLOCKS[fill], at(r * 8 + (2 if two_tone else 4))))
         else:
             cells.append((" ", ""))
     return cells

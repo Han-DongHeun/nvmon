@@ -1120,7 +1120,7 @@ def bottom_edge(width, split, label):
 MIN_INNER_H = 2  # the shortest a box gets; when even that leaves GPUs out, the boxes scroll
 
 
-CARD_W = 48  # the narrowest a box without graph gets: room for the name, power, temperature and clock
+CARD_W = INFO_W + 4  # a box without graph: the stats column as wide as beside a graph, and its borders
 
 
 def layout(count, width, height, graphs=True):
@@ -1128,8 +1128,9 @@ def layout(count, width, height, graphs=True):
     if graphs:  # two columns only when one column cannot show every GPU at full height
         two_fit = width // 2 >= CHROME_W + INFO_W + MIN_GRAPH_W
         cols = 2 if two_fit and count * (MAX_INNER_H + 2) > height else 1
-    else:  # cards: as many side by side as fit
-        cols = max(1, width // CARD_W)
+    else:  # cards: one under the other; side by side only as far as needed for all to show at full height
+        most = max(1, width // CARD_W)
+        cols = next((c for c in range(1, most + 1) if math.ceil(count / c) * (MAX_INNER_H + 2) <= height), most)
     rows = max(1, math.ceil(count / cols))
     return cols, max(MIN_INNER_H, min(MAX_INNER_H, height // rows - 2))
 
@@ -1141,7 +1142,8 @@ def render(gpus, width, height, selected=None, shape=None, graphs=True):
     rows = math.ceil(len(gpus) / cols)
     lines = []
     for r in range(rows):
-        panels = [panel(g, width // cols, inner, selected, graphs) for g in gpus[r * cols:(r + 1) * cols]]
+        box_w = width // cols if graphs else CARD_W
+        panels = [panel(g, box_w, inner, selected, graphs) for g in gpus[r * cols:(r + 1) * cols]]
         lines += [[seg for part in parts for seg in part] for parts in zip(*panels)]
     lines = [pad(clip(line, width), width) for line in lines[:height]]
     return lines + [[(" " * width, "")]] * (height - len(lines))

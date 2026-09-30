@@ -12,9 +12,10 @@ It fits the window. In a small one the boxes get shorter, and scroll once they n
 
 ![nvmon with the process list open and a torchrun job picked](https://raw.githubusercontent.com/Han-DongHeun/nvmon/main/docs/demo-list.gif)
 
-`g` turns the graphs off, for more GPUs in less room:
+`g` turns the graphs off: the numbers alone, the boxes one under the other, side by side only when
+they would not fit:
 
-![nvmon without graphs, the GPUs as cards three to a row](https://raw.githubusercontent.com/Han-DongHeun/nvmon/main/docs/demo-cards.gif)
+![nvmon without graphs, the GPUs as cards](https://raw.githubusercontent.com/Han-DongHeun/nvmon/main/docs/demo-cards.gif)
 
 ## Install
 

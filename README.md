@@ -47,7 +47,9 @@ and the keys; a newer release, when there is one, with the command that updates 
 `v` goes through four views, `V` back. What does not fit the window scrolls (wheel, PgUp/PgDn).
 
 **Graphs**, as above: one under the other, two side by side only when they would not all fit, and in a
-small window shorter.
+small window shorter. The same eight GPUs in a window 31 lines tall:
+
+![nvmon with eight graphs in two columns](https://raw.githubusercontent.com/Han-DongHeun/nvmon/main/docs/view-graphs.png)
 
 **Processes** in the graph's place, one a line: account, run time, memory, and the command line. The
 wheel over them scrolls them up and down; tilted, or with Shift, sideways, as do ← and →.
@@ -87,7 +89,8 @@ The same job with `f`, its GPUs only:
 
 `c` goes through the themes, `C` back: nvmon's own; palettes from works by Hiroshige, Hokusai, O'Keeffe,
 Van Gogh, Bénédictus and Cassatt (as [MetBrewer](https://github.com/BlakeRMills/MetBrewer) has them);
-the [Rosé Pine](https://rosepinetheme.com) theme's; and black on white.
+the [Rosé Pine](https://rosepinetheme.com) theme's; black and white, grays as light as the colors; and
+black on white, the boxes on white, the busiest bars the darkest.
 
 ![nvmon's themes, one box in each](https://raw.githubusercontent.com/Han-DongHeun/nvmon/main/docs/themes.png)
 

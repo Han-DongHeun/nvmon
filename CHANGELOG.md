@@ -3,6 +3,11 @@
 What changes for you in each release. The same notes appear on the
 [releases page](https://github.com/Han-DongHeun/nvmon/releases).
 
+## Unreleased
+
+- Black and white is back as it was in 0.3.0, grays as light as the colors; black on white is a theme of
+  its own, after it.
+
 ## 0.3.1
 
 - Numbers only, and GPU and MEM only, keep their boxes one under the other, never side by side; what

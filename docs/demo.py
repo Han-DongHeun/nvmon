@@ -39,7 +39,8 @@ def numbers(view):
 
 # (file, columns, rows, what is set on the view). The cards' windows are as narrow as the cards, as a window
 # kept beside another; the numbers' window too short for all eight, the brief ones' just tall enough.
-STILLS = [("view-processes.png", 160, 31, lambda view: setattr(view, "left", "processes")),
+STILLS = [("view-graphs.png", 160, 31, lambda view: None),  # too short for eight one under the other
+          ("view-processes.png", 160, 31, lambda view: setattr(view, "left", "processes")),
           ("view-numbers.png", nvmon.CARD_W, 31, numbers),
           ("view-brief.png", nvmon.CARD_W, 8 * (nvmon.MIN_INNER_H + 2) + 2,
            lambda view: setattr(view, "left", "brief")),

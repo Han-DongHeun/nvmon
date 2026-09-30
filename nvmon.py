@@ -83,8 +83,8 @@ def _nearest256(rgb):
 
 
 # Styles are written in 24-bit color and turned, as they are sent (restyle), into what the terminal shows:
-# 24-bit color or 256 colors, as color_mode finds; in gray, as the black and white theme has it: the GPU boxes
-# black on white (panel marks their styles with ON_PAPER), the rest gray on the terminal's own background.
+# 24-bit color or 256 colors, as color_mode finds; in gray, as the black and white themes have it, and for
+# black on white the GPU boxes on white (panel marks their styles with ON_PAPER).
 PAPER, INK = (242, 242, 242), (30, 30, 30)
 ON_PAPER = "\x1b[48;2;242;242;242m"
 COLOR_ARG = re.compile(r"\x1b\[([34])8;(?:2;(\d+);(\d+);(\d+)|5;(\d+))m")
@@ -183,10 +183,11 @@ class Theme(NamedTuple):
     temp: tuple       # style codes for 0 .. 100 °C
     accent: str
     selected: str     # the picked job: reverse video on the accent
-    gray: bool        # black on white: see restyle
+    gray: bool        # every color the gray of its lightness: see restyle
+    paper: bool       # and the GPU boxes black on white
 
 
-def theme(name, stops, accent, temp=None, gray=False):
+def theme(name, stops, accent, temp=None, gray=False, paper=False):
     """A Theme. `stops`, low to high, are (position, (r, g, b)) pairs, or "#rrggbb ..." colors, which are
     placed by how different they look (OKLab distance) so that equal steps in % look about equally big.
     Temperature takes the same colors over 30-88 °C, unless `temp` has stops of its own."""
@@ -199,7 +200,8 @@ def theme(name, stops, accent, temp=None, gray=False):
     heat_of_temp = _gradient(temp or [(30 + 0.58 * x, c) for x, c in stops])
     accent = accent if accent.startswith("\x1b") else _rgb(tuple(bytes.fromhex(accent[1:])))
     return Theme(name, tuple(map(_rgb, scale)), tuple(_rgb(_readable(c)) for c in scale),
-                 tuple(_rgb(_readable(c)) for c in heat_of_temp), accent, "\x1b[7m" + accent, gray)
+                 tuple(_rgb(_readable(c)) for c in heat_of_temp), accent, "\x1b[7m" + accent,
+                 gray or paper, paper)
 
 
 GREEN, YELLOW, ORANGE, RED = (95, 175, 95), (215, 215, 95), (215, 135, 95), (215, 95, 95)
@@ -222,8 +224,10 @@ THEMES = [
     theme("Cassatt", "#574571 #90719f #b695bc #dec5da", "#b695bc"),
     theme("Rose Pine", "#3e8fb0 #9ccfd8 #c4a7e7 #ea9a97 #eb6f92", "#c4a7e7"),
 ]
-# No hue, only lightness, black on white (see restyle): the lightest when idle, near black when busy.
-THEMES.append(theme("black and white", "#505050 #f0f0f0", "#d0d0d0", gray=True))
+# No hue, only lightness (see restyle): dark gray when idle to near white when busy; and the same black on
+# white, the lightest when idle to near black when busy.
+THEMES += [theme("black and white", "#505050 #f0f0f0", "#d0d0d0", gray=True),
+           theme("black on white", "#505050 #f0f0f0", "#d0d0d0", paper=True)]
 THEME = THEMES[0]  # the one in use, set by View.screen before it draws
 SHOWS = "truecolor"  # what the terminal shows (color_mode), set with it
 # Warnings on the top edge, the same in every theme: yellow = worth a look, orange = slowed, red = act.
@@ -1063,7 +1067,7 @@ def panel(gpu, width, height, selected=None, left="graph", scroll=(0, 0)):
     lines = [top] + body + [bottom_edge(width, split, label)]
     if faded:
         lines = [[(seg[0], FADED + (seg[1] if seg[1] != BOLD else "")) + seg[2:] for seg in line] for line in lines]
-    if THEME.gray:  # black on white, see restyle
+    if THEME.paper:  # black on white, see restyle
         lines = [[(seg[0], ON_PAPER + seg[1]) + seg[2:] for seg in line] for line in lines]
     return lines
 

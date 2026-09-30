@@ -11,8 +11,9 @@ What changes for you in each release. The same notes appear on the
   same. `p` lists every job with its utilization and command line, sorted by whichever heading you click;
   a click on an empty spot closes it. A picked job's utilization shows at once.
 - Hide GPUs you don't need: click their numbers at the bottom left, or press the number's key; again
-  to show them. `g` turns the graphs off, leaving cards of the numbers, as wide as beside a graph: one
-  under the other, side by side only when they would not fit.
+  to show them. `g` turns the graphs off, leaving cards of the numbers, as wide as beside a graph, and
+  where there is room, the GPU's processes beside them, one a line: one under the other, side by side
+  only when they would not fit.
 - Works in Xshell, PuTTY and the like without setting them up: nvmon asks the terminal how it draws.
   Where lines come out two cells wide (Korean, Chinese, Japanese settings), boxes and graphs are drawn
   in ASCII; where 24-bit color is not known to work, 256 colors are used. Windows Terminal gets its 24-bit

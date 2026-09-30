@@ -1006,8 +1006,9 @@ def degraded(gpu):
 
 
 def panel(gpu, width, height, selected=None, graphs=True):
-    """One GPU's box, the utilization graph beside the stats or, without `graphs`, a card of the stats
-    alone; faded when a job is `selected` and it does not run here."""
+    """One GPU's box, the utilization graph beside the stats or, without `graphs`, a card: the stats, and
+    where the box is wide enough, its processes beside them, one a line; faded when a job is `selected` and
+    it does not run here."""
     s = gpu.now
     faded = selected is not None and not any(p.job == selected for p in s.processes)
     # Both sides as (segments, rank); when space runs out the lowest rank goes first:
@@ -1029,11 +1030,20 @@ def panel(gpu, width, height, selected=None, graphs=True):
         rule = [(" ├" + "─" * (INFO_W + 2) + "┤", DIM)]  # across the stats, joined to the borders
         body = [[("│ ", DIM)] + g + (rule if i is None else [(" │ ", DIM)] + i + [(" │", DIM)])
                 for g, i in zip(graph(gpu.history, graph_w, height, not faded), info(gpu, height))]
+    elif width - CARD_W - 3 >= MIN_LIST_W:  # "│ " stats " │ " processes " │"
+        room, split = width - CARD_W - 3, width - 1
+        listed = process_lines(s.processes, room, height, selected, gpu.index)
+        body = [([("├" + "─" * (INFO_W + 2) + "┤ ", DIM)] if i is None else [("│ ", DIM)] + i + [(" │ ", DIM)])
+                + pad(clip(p, room), room) + [(" │", DIM)] for i, p in zip(info(gpu, height), listed)]
     else:
         split = width - 1  # the processes take the whole bottom edge
         rule = [("├" + "─" * (width - 2) + "┤", DIM)]
         body = [rule if i is None else [("│ ", DIM)] + i + [(" │", DIM)] for i in info(gpu, height, width - 4)]
-    bottom = bottom_edge(width, split, process_label(s.processes, split - 4, selected, gpu.index))
+    if graphs or width - CARD_W - 3 < MIN_LIST_W:
+        label = process_label(s.processes, split - 4, selected, gpu.index)
+    else:  # the processes are in the box: the edge keeps the way to the list
+        label = [("+", DIM, ("list", gpu.index))]
+    bottom = bottom_edge(width, split, label)
     lines = [top] + body + [bottom]
     if not faded:
         return lines
@@ -1076,12 +1086,10 @@ def elapsed(started):
     return "{}d{}h".format(s // 86400, s % 86400 // 3600)
 
 
-def process_label(processes, room, selected=None, index=None):
-    """Processes grouped by owner and conda environment, groups and processes by memory, biggest
-    first: "migi: train.py 2h13m 15.1G · eval.py 5m 0.5G   kim/torch: a.py 1d4h 9.0G" (our own
-    processes carry no owner). As many whole entries as fit in `room` cells, then "+N" for the rest, or
-    "+" when none is left out: clicked, it opens the process list at GPU `index`. Each entry, when
-    clicked, means its job; the `selected` job's names are reversed."""
+def process_entries(processes, selected=None):
+    """Processes grouped by owner and conda environment, groups and processes by memory, biggest first, as
+    (tag, segments): the tag "kim/torch", "" for our own processes; the segments the name, which when clicked
+    means its job (the `selected` job's reversed), then run time and memory."""
     def mem(process):
         return process.mem or 0
     groups = {}
@@ -1090,13 +1098,24 @@ def process_label(processes, room, selected=None, index=None):
     entries = []
     for (owner, env), group in sorted(groups.items(), key=lambda item: sum(map(mem, item[1])), reverse=True):
         tag = "/".join(part for part in (owner, env) if part)
-        for j, process in enumerate(group):
-            gap = [] if not entries else [(" · ", DIM)] if j else [("   ", "")]
+        for process in group:
             details = [elapsed(process.started)] if process.started is not None else []
             details += [] if process.mem is None else ["{:.1f}G".format(process.mem)]
             name = (process.name, THEME.selected if process.job == selected else THEME.accent, process.job)
-            entries.append(gap + ([(tag + ": ", DIM)] if tag and not j else []) + [name]
-                           + ([(" " + " ".join(details), DIM, process.job)] if details else []))
+            entries.append((tag, [name] + ([(" " + " ".join(details), DIM, process.job)] if details else [])))
+    return entries
+
+
+def process_label(processes, room, selected=None, index=None):
+    """The processes (process_entries) on one line: "migi: train.py 2h13m 15.1G · eval.py 5m 0.5G   kim/torch:
+    a.py 1d4h 9.0G". As many whole entries as fit in `room` cells, then "+N" for the rest, or "+" when none
+    is left out: clicked, it opens the process list at GPU `index`."""
+    entries, last = [], None
+    for tag, segments in process_entries(processes, selected):
+        gap = [] if not entries else [(" · ", DIM)] if tag == last else [("   ", "")]
+        entries.append(gap + ([(tag + ": ", DIM)] if tag and tag != last else []) + segments)
+        last = tag
+
     def more(n):
         return ("  +{}".format(n) if n else "  +", DIM, ("list", index))
     label = []
@@ -1107,6 +1126,16 @@ def process_label(processes, room, selected=None, index=None):
             return clip(entry, room - len(more(rest)[0])) + [more(rest)] if not label else label + [more(rest + 1)]
         label += entry
     return label + [more(0)] if label else []
+
+
+def process_lines(processes, room, height, selected=None, index=None):
+    """The processes (process_entries) one a line, `height` lines of at most `room` cells; when not all fit,
+    the last line says how many more, and clicked opens the process list at GPU `index`."""
+    lines = [([(tag + ": ", DIM)] if tag else []) + segments for tag, segments in process_entries(processes, selected)]
+    if len(lines) > height:
+        more = len(lines) - height + 1
+        lines = lines[:height - 1] + [[("+{} more".format(more), DIM, ("list", index))]]
+    return [clip(line, room) for line in lines] + [[]] * (height - len(lines))
 
 
 def bottom_edge(width, split, label):
@@ -1121,6 +1150,7 @@ MIN_INNER_H = 2  # the shortest a box gets; when even that leaves GPUs out, the 
 
 
 CARD_W = INFO_W + 4  # a box without graph: the stats column as wide as beside a graph, and its borders
+MIN_LIST_W = 20      # beside them, the narrowest room worth a list of processes
 
 
 def layout(count, width, height, graphs=True):
@@ -1142,7 +1172,7 @@ def render(gpus, width, height, selected=None, shape=None, graphs=True):
     rows = math.ceil(len(gpus) / cols)
     lines = []
     for r in range(rows):
-        box_w = width // cols if graphs else CARD_W
+        box_w = width // cols if graphs or width // cols - CARD_W - 3 >= MIN_LIST_W else CARD_W
         panels = [panel(g, box_w, inner, selected, graphs) for g in gpus[r * cols:(r + 1) * cols]]
         lines += [[seg for part in parts for seg in part] for parts in zip(*panels)]
     lines = [pad(clip(line, width), width) for line in lines[:height]]

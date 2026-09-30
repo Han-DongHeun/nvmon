@@ -81,8 +81,8 @@ The list, busiest first, one job picked; and that job with `f`:
 `c` goes through the themes, `C` back:
 
 - **nvmon**, the default
-- **Hiroshige, Hokusai, O'Keeffe, Van Gogh, Bénédictus, Cassatt**: their paintings' palettes, from
-  [MetBrewer](https://github.com/BlakeRMills/MetBrewer)
+- **Hiroshige, Hokusai, O'Keeffe, Van Gogh, Bénédictus, Cassatt, Greek, Tam, Homer, Demuth**: palettes
+  of works at the Met, from [MetBrewer](https://github.com/BlakeRMills/MetBrewer)
 - **Rosé Pine**, from the [editor theme](https://rosepinetheme.com)
 - **black and white**, and **black on white**
 

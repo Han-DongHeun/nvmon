@@ -29,7 +29,7 @@ from ctypes import byref, c_int, c_uint, c_ulonglong, c_void_p
 from functools import lru_cache
 from typing import NamedTuple, Optional
 
-__version__ = "0.3.1+dev"  # "+dev": work past this release; the release commit sets the next number
+__version__ = "0.3.2"  # "+dev": work past this release; the release commit sets the next number
 REPO = "https://github.com/Han-DongHeun/nvmon"
 RELEASES = REPO + "/releases"                 # release notes, and nvmon.py for those who copy the file
 PYPI_JSON = "https://pypi.org/pypi/nvmon/json"
@@ -211,8 +211,9 @@ GREEN, YELLOW, ORANGE, RED = (95, 175, 95), (215, 215, 95), (215, 135, 95), (215
 # made to look good, low to high, the darkest end dropped where it would vanish into the background: from
 # works at the Metropolitan Museum, as MetBrewer (Blake R. Mills) takes them, Hiroshige's "Sailing Boats
 # Returning to Yabase", Hokusai's "Yoro Waterfall", O'Keeffe's "Red and Yellow Cliffs", Van Gogh's "First
-# Steps", the pinks of Benedictus's "Relais" and the lilacs of Cassatt's "Lilacs in a Window"; and the Rose
-# Pine editor theme.
+# Steps", the pinks of Benedictus's "Relais", the lilacs of Cassatt's "Lilacs in a Window", a Greek
+# terracotta neck-amphora of about 550 B.C., Vivienne Tam's "Dragon Robe", Winslow Homer's "The Veteran in a
+# New Field" and Demuth's "I Saw the Figure 5 in Gold"; and the Rose Pine editor theme.
 THEMES = [
     theme("nvmon", [(0, GREEN), (30, (175, 215, 95)), (40, YELLOW), (60, (215, 175, 95)), (80, ORANGE), (100, RED)],
           _fg(110), [(30, (95, 135, 215)), (45, (95, 175, 175)), (60, GREEN), (72, YELLOW), (80, ORANGE), (88, RED)]),
@@ -222,6 +223,10 @@ THEMES = [
     theme("Van Gogh", "#1f5b25 #3c7c3d #669d62 #9cc184 #c2d6a4 #e7e5cc", "#c2d6a4"),
     theme("Benedictus", "#9a133d #b93961 #d8527c #f28aaa #f9b4c9 #f9e0e8", "#f28aaa"),
     theme("Cassatt", "#574571 #90719f #b695bc #dec5da", "#b695bc"),
+    theme("Greek", "#8d1c06 #e67424 #ed9b49 #f5c34d", "#ed9b49"),
+    theme("Tam", "#9f2d55 #bb292c #de4f33 #ef8737 #ffb242 #ffd353", "#ffb242"),
+    theme("Homer", "#a62f00 #df7700 #f5b642 #fff179 #c3f4f6 #6ad5e8 #32b2da", "#f5b642"),
+    theme("Demuth", "#41485f #5d6174 #8b8b99 #b9b9b8 #f7c267 #d39a2d #b64f32 #9b332b #591c19", "#f7c267"),
     theme("Rose Pine", "#3e8fb0 #9ccfd8 #c4a7e7 #ea9a97 #eb6f92", "#c4a7e7"),
 ]
 # No hue, only lightness (see restyle): dark gray when idle to near white when busy; and the same black on

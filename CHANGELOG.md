@@ -3,10 +3,12 @@
 What changes for you in each release. The same notes appear on the
 [releases page](https://github.com/Han-DongHeun/nvmon/releases).
 
-## Unreleased
+## 0.3.2
 
+- Four more themes from MetBrewer: Greek, Tam, Homer and Demuth.
 - Black and white is back as it was in 0.3.0, grays as light as the colors; black on white is a theme of
   its own, after it.
+- A shorter README, its GIF the four busiest GPUs one under the other.
 
 ## 0.3.1
 

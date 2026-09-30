@@ -1023,7 +1023,7 @@ def panel(gpu, width, height, selected=None, left="graph", scroll=(0, 0)):
     parts += [] if s.fan is None else [([("FAN {:>3}%".format(s.fan), "")], 1)]
     parts += [] if s.clock is None else [([("{:>4} MHz".format(s.clock), s.slowdown[1] if s.slowdown else "")], 4)]
     top = edge(width, label, parts)
-    if left == "none":  # the numbers only: of the processes, just the way to the list
+    if left in CARDS:  # the numbers only: of the processes, just the way to the list
         split = width - 1
         body = [[("├" + "─" * (width - 2) + "┤", DIM)] if i is None else [("│ ", DIM)] + i + [(" │", DIM)]
                 for i in info(gpu, height)]
@@ -1189,21 +1189,24 @@ def bottom_edge(width, split, label):
 MIN_INNER_H = 2  # the shortest a box gets; when even that leaves GPUs out, the boxes scroll
 
 
-# What g puts beside the stats: the graph, the processes, nothing (a box the stats and their borders wide).
-LEFTS = ("graph", "processes", "none")
+# What g goes through: the graph beside the stats, the processes there, the stats alone (a box the stats and
+# their borders wide), and of them GPU and MEM alone ("brief", two lines).
+LEFTS = ("graph", "processes", "numbers", "brief")
+CARDS = ("numbers", "brief")
 CARD_W = INFO_W + 4
 
 
 def layout(count, width, height, left="graph"):
     """(columns, inner height) for `count` GPU boxes in `width` x `height` cells: one column, side by side
     only as far as needed for all to show at full height, then shorter."""
-    if left == "none":
+    if left in CARDS:
         most = max(1, width // CARD_W)
     else:
         most = 2 if width // 2 >= CHROME_W + INFO_W + MIN_GRAPH_W else 1  # a narrower graph is not worth it
-    cols = next((c for c in range(1, most + 1) if math.ceil(count / c) * (MAX_INNER_H + 2) <= height), most)
+    tallest = MIN_INNER_H if left == "brief" else MAX_INNER_H
+    cols = next((c for c in range(1, most + 1) if math.ceil(count / c) * (tallest + 2) <= height), most)
     rows = max(1, math.ceil(count / cols))
-    return cols, max(MIN_INNER_H, min(MAX_INNER_H, height // rows - 2))
+    return cols, max(MIN_INNER_H, min(tallest, height // rows - 2))
 
 
 def render(gpus, width, height, selected=None, shape=None, left="graph", scroll=None):
@@ -1211,7 +1214,7 @@ def render(gpus, width, height, selected=None, shape=None, left="graph", scroll=
     lines of exactly `width` cells. `left`: see panel; the processes moved on as `scroll` has it for each
     GPU (its index: (lines, cells))."""
     cols, inner = shape or layout(len(gpus), width, height, left)
-    box_w = CARD_W if left == "none" else width // cols
+    box_w = CARD_W if left in CARDS else width // cols
     rows = math.ceil(len(gpus) / cols)
     lines = []
     for r in range(rows):
@@ -1592,9 +1595,10 @@ class View:
                 return False
         elif key == "p":
             self.listing = not self.listing
-        elif key == "g":  # the graph, the processes, the stats alone
+        elif key == "g":  # the graph, the processes, the stats alone, GPU and MEM alone
             self.left = LEFTS[(LEFTS.index(self.left) + 1) % len(LEFTS)]
-            name = {"graph": "graphs", "processes": "processes", "none": "numbers only"}[self.left]
+            name = {"graph": "graphs", "processes": "processes", "numbers": "numbers only",
+                    "brief": "GPU and MEM only"}[self.left]
             self.note = ([("view: " + name, "")], time.monotonic() + 2)
         elif key == "c":  # the next theme; C the one before
             self.theme = THEMES[(THEMES.index(self.theme) + (-1 if value[0] == "C" else 1)) % len(THEMES)]

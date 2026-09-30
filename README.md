@@ -13,7 +13,7 @@ It fits the window. In a small one the boxes get shorter, and scroll once they n
 ![nvmon with the process list open and a torchrun job picked](https://raw.githubusercontent.com/Han-DongHeun/nvmon/main/docs/demo-list.gif)
 
 `g` goes from graphs to each GPU's processes in their place, one a line with the command, to the
-numbers alone. The wheel scrolls the processes, sideways too (tilted, with Shift, or ← →):
+numbers alone, to GPU and MEM alone. The wheel scrolls the processes, sideways too (tilted, with Shift, or ← →):
 
 ![nvmon with the processes in place of the graphs](https://raw.githubusercontent.com/Han-DongHeun/nvmon/main/docs/demo-cards.gif)
 
@@ -42,7 +42,7 @@ Click a process, or press Tab, to pick its job: the GPUs it uses stand out, and 
 Click an empty spot to let the job go and close the list.
 
 The GPU numbers at the bottom left hide a GPU when clicked, and show it again; so does the number's
-key. `g` goes through graphs, processes and numbers only. `c` goes through the themes (`C` back): nvmon's own, then palettes
+key. `g` goes through graphs, processes, numbers only and GPU and MEM only. `c` goes through the themes (`C` back): nvmon's own, then palettes
 from works by Hiroshige, Hokusai, O'Keeffe, Van Gogh, Bénédictus and Cassatt (as [MetBrewer](https://github.com/BlakeRMills/MetBrewer)
 has them) and the [Rosé Pine](https://rosepinetheme.com) theme's, then black and white. The theme,
 graphs on or off, the list's order and the GPUs hidden stay for the next run, for each computer you

@@ -986,6 +986,31 @@ def graph(history, width, height, two_tone=True):
     return rows
 
 
+# The pointer over a graph (View.hover): a guide up the empty part of its column, and a chip with that moment.
+GUIDE = _rgb((150, 150, 150))
+CHIP = "\x1b[48;2;235;235;235m" + _rgb((24, 24, 27))
+COLOR_24 = re.compile(r"(\x1b\[[34]8;2;)(\d+);(\d+);(\d+)m")
+
+
+def lit(style):
+    """`style` lit up, for the graph column under the pointer: its colors halfway to white; on PAPER, where
+    restyle turns lightness around, halfway to black."""
+    paper = ON_PAPER if style.startswith(ON_PAPER) else ""
+    to = 0 if paper else 255
+    return paper + COLOR_24.sub(lambda m: m.group(1) + ";".join(
+        str((int(v) + to) // 2) for v in m.group(2, 3, 4)) + "m", style[len(paper):])
+
+
+def ago(seconds):
+    """How long ago, as short as a run time: now, 14.5s ago, 3m05s ago, 1h02m ago."""
+    if seconds < 0.05:
+        return "now"
+    if seconds < 60:
+        return "{:g}s ago".format(round(seconds, 1))
+    m, s = divmod(int(round(seconds)), 60)
+    return "{}m{:02d}s ago".format(m, s) if m < 60 else "{}h{:02d}m ago".format(m // 60, m % 60)
+
+
 def row(left, right=()):
     """One stats line: `left`, then the `right` segments flush right; exactly INFO_W cells."""
     room = INFO_W - width_of(right)
@@ -1418,6 +1443,9 @@ class View:
         self.clicked = (0, None)          # (when, what): the last click, to tell a double click
         self.scroll = {}                  # GPU index: (lines, cells) its processes are moved on
         self.areas = []                   # (rows, columns, GPU) where those processes are on screen
+        self.graphs = []                  # (rows, columns, GPU) where the graphs are on screen
+        self.pointer = None               # (row, column) of the mouse pointer, as the terminal last said
+        self.interval = DEFAULT_INTERVAL  # seconds from one graph column to the next
 
     def restore(self, saved, indices):
         """Take up what an earlier run kept (Settings.load); of the GPUs `indices`, one always stays shown."""
@@ -1455,7 +1483,7 @@ class View:
             room = max(0, width - COMMAND_AT - 1)
             self.shift = max(0, min(self.shift, len(job.command) + 1 - room)) if job else 0
             body += process_list(self.jobs, width, rows, self.job, self.scrolled(rows - 2), self.sort, self.shift)
-        self.lines = [top_line] + body + [self.bottom_line(width, job, newer, gpus)]
+        self.lines = self.hover([top_line] + body + [self.bottom_line(width, job, newer, gpus)])
         return self.lines
 
     def boxes(self, gpus, width, height):
@@ -1475,14 +1503,60 @@ class View:
         else:
             self.gpu_top, self.gpu_page = 0, rows
         box_w, room = width // cols, max(0, width // cols - CHROME_W - INFO_W)
-        self.areas = []
-        for k, g in enumerate(gpus if self.left == "processes" else []):  # their offsets in range, where they are
-            most = listing_extent(g.now.processes, room, inner)
+        self.areas, self.graphs = [], []
+        for k, g in enumerate(gpus if self.left in ("graph", "processes") else []):
+            y, x = 2 + k // cols * (inner + 2), k % cols * box_w + 2  # 2: the top line and the box's edge
+            if self.left == "graph":
+                self.graphs.append((range(y, y + inner), range(x, x + room), g))
+                continue
+            most = listing_extent(g.now.processes, room, inner)  # the processes' offsets in range
             top, shift = self.scroll.get(g.index, (0, 0))
             self.scroll[g.index] = min(max(top, 0), most[0]), min(max(shift, 0), most[1])
-            y, x = 2 + k // cols * (inner + 2), k % cols * box_w + 2  # 2: the top line and the box's edge
             self.areas.append((range(y, y + inner), range(x, x + room), g.index))
         return render(gpus, width, height, self.job, (cols, inner), self.left, self.scroll) + note
+
+    def hovered(self):
+        """(GPU, graph rows, graph columns, the column pointed at, its sample) when the pointer is over a graph
+        column that has one; else None."""
+        if self.pointer is None:
+            return None
+        row, col = self.pointer
+        for rows, cols, gpu in self.graphs:
+            if row in rows and col in cols:
+                back = cols.stop - 1 - col  # samples back from the newest, on the right
+                if back < len(gpu.history):
+                    return gpu, rows, cols, col, gpu.history[-1 - back]
+        return None
+
+    def pointed(self):
+        """(GPU index, column) of the graph column under the pointer, or None: what the chip is about."""
+        hovered = self.hovered()
+        return hovered and (hovered[0].index, hovered[3])
+
+    def hover(self, lines):
+        """`lines` with the column under the pointer lit up, and beside the pointer a chip with that moment:
+        the utilization, and how long ago."""
+        hovered = self.hovered()
+        if hovered is None:
+            return lines
+        gpu, rows, cols, col, value = hovered
+        back = (cols.stop - 1 - col) * self.interval
+        chip = " {}% · {} ".format(value, ago(back))
+        lines = list(lines)
+        for row in rows:
+            cells = [(ch,) + tuple(seg[1:]) for seg in lines[row] for ch in seg[0]]
+            ch, style = cells[col][:2]
+            paper = ON_PAPER if style.startswith(ON_PAPER) else ""
+            cells[col] = ("│", paper + GUIDE) if ch == " " else (ch, lit(style))
+            if row == self.pointer[0]:
+                start = col + 2 if col + 2 + len(chip) <= cols.stop else col - 1 - len(chip)
+                if start >= cols.start:
+                    bold = chip.index("%") + 1
+                    for k, c in enumerate(chip):
+                        cells[start + k] = (c, paper + CHIP + (BOLD if k < bold else ""))
+            lines[row] = [("".join(c[0] for c in run),) + key for key, run in
+                          itertools.groupby(cells, key=lambda c: c[1:])]
+        return lines
 
     def detail(self, gpus):
         """The GPUs whose processes' utilization is shown: all with the list open, else the selected
@@ -1559,6 +1633,9 @@ class View:
     def handle(self, event):
         """Act on one key or mouse event; False means quit."""
         kind, value = event[0], event[1:]
+        if kind == "move":
+            self.pointer = value
+            return True
         if kind in ("wheel", "hwheel"):  # over a GPU's processes, they scroll, either way;
             step, row, col = value     # over the list, the list, or the picked job's command sideways;
             area = next((index for rows, cols, index in self.areas  # anywhere else, the GPU boxes
@@ -1675,26 +1752,21 @@ ASCII = str.maketrans({"─": "-", "│": "|", "├": "+", "┤": "+", "╭": "+
                        "°": " ", "·": "-", "…": "~", "↑": "^", "↓": "v", "▲": "^", "▼": "v"})
 
 
-def paint(lines, mode="truecolor", ascii=False, gray=False):
-    """Join lines into one string in color `mode` (with `gray`, grays only; see restyle), and with `ascii` in
-    ASCII, sending a style code only where the style changes."""
+def paint(line, mode="truecolor", ascii=False, gray=False):
+    """One line as the terminal gets it, from plain to plain: in color `mode` (with `gray`, grays only; see
+    restyle), with `ascii` in ASCII, a style code only where the style changes."""
     out, current = [], ""
-    for i, line in enumerate(lines):
-        if i:
-            out.append("\r\n")
-        for text, style, *_ in line:
-            if ascii:
-                text = text.translate(ASCII)
-            if mode != "truecolor" or gray:
-                style = restyle(style, mode, gray)
-            if style != current:
-                # One color replaces another directly; anything else (bold, a background, plain) needs a
-                # reset first.
-                colors = (style.startswith("\x1b[38") and current.startswith("\x1b[38")
-                          and "\x1b[48" not in current)
-                out.append(style if colors else RESET + style)
-                current = style
-            out.append(text)
+    for text, style, *_ in line:
+        if ascii:
+            text = text.translate(ASCII)
+        if mode != "truecolor" or gray:
+            style = restyle(style, mode, gray)
+        if style != current:
+            # One color replaces another directly; anything else (bold, a background, plain) needs a reset first.
+            colors = style.startswith("\x1b[38") and current.startswith("\x1b[38") and "\x1b[48" not in current
+            out.append(style if colors else RESET + style)
+            current = style
+        out.append(text)
     return "".join(out) + RESET
 
 
@@ -1782,7 +1854,7 @@ INPUT = re.compile(rb"\x1b\[<(?P<button>\d+);(?P<x>\d+);(?P<y>\d+)(?P<act>[Mm])"
 def events(data):
     """The input in `data`, the bytes a terminal sends: ("key", name) events, ("click", row, column) for
     a left-button press, ("wheel", +1 down or -1 up, row, column), ("hwheel", +1 right or -1 left, row,
-    column)."""
+    column), ("move", row, column) where the pointer went."""
     out = []
     for m in INPUT.finditer(data):
         if m.group("button") or m.group("old"):
@@ -1795,7 +1867,9 @@ def events(data):
             if button & 64:  # the wheel: 64 up, 65 down, 66 left, 67 right; with Shift (+4) sideways too
                 sideways = button & 2 or button & 4
                 out.append(("hwheel" if sideways else "wheel", 1 if button & 1 else -1, y - 1, x - 1))
-            elif press and button & 3 == 0 and not button & 32:  # left button down, not a drag
+            elif button & 32:  # a move, a button held or not
+                out.append(("move", y - 1, x - 1))
+            elif press and button & 3 == 0:  # left button down
                 out.append(("click", y - 1, x - 1))
         elif m.group("report"):
             continue
@@ -1830,15 +1904,17 @@ TRUECOLOR_ANSWERS = re.compile(
 
 
 class Screen:
-    """Alternate screen, hidden cursor, no auto-wrap, unbuffered keys, mouse clicks and wheel; all
+    """Alternate screen, hidden cursor, no auto-wrap, unbuffered keys, mouse clicks, wheel and moves; all
     restored on exit."""
 
     def __enter__(self):
         self._keys = sys.stdin.isatty()
         self._mouse = self._keys and os.name != "nt"  # Windows reads keys with msvcrt, which sees no mouse
         self._restore = [enable_vt(), raw_keys() if self._keys else (lambda: None)]
-        # 1000 + 1006: clicks and the wheel come in as SGR-encoded sequences (Shift+drag still selects text).
-        self._write("\x1b[?1049h\x1b[?25l\x1b[?7l" + ("\x1b[?1000h\x1b[?1006h" if self._mouse else ""))
+        self._painted, self._size = [], None  # the lines last sent, and the window they were sent to
+        # 1000 + 1003 + 1006: clicks, the wheel and every move of the pointer come in as SGR-encoded sequences
+        # (Shift+drag still selects text). A terminal without 1003 sends clicks and the wheel all the same.
+        self._write("\x1b[?1049h\x1b[?25l\x1b[?7l" + ("\x1b[?1000h\x1b[?1003h\x1b[?1006h" if self._mouse else ""))
         # Windows Terminal and the console of Windows 10 on show 24-bit color and draw lines one cell wide.
         self.wide, self.truecolor = self.probe() if self._mouse else (False, os.name == "nt")
         return self
@@ -1873,7 +1949,8 @@ class Screen:
         return bool(cursor) and int(cursor.group(1)) > 2, bool(TRUECOLOR_ANSWERS.search(data))
 
     def __exit__(self, *exc):
-        self._write(RESET + ("\x1b[?1006l\x1b[?1000l" if self._mouse else "") + "\x1b[?7h\x1b[?25h\x1b[?1049l")
+        mouse = "\x1b[?1006l\x1b[?1003l\x1b[?1000l" if self._mouse else ""
+        self._write(RESET + mouse + "\x1b[?7h\x1b[?25h\x1b[?1049l")
         for undo in self._restore:
             undo()
 
@@ -1907,9 +1984,16 @@ class Screen:
             self._keys = False
         return events(data)
 
-    def draw(self, lines, mode, gray):
+    def draw(self, lines, mode, gray, size):
+        """The screen `lines`, in a window of `size`: only the lines that changed since the last time, so that
+        a frame, or the pointer moving over a graph, sends a few hundred bytes rather than the whole screen."""
+        painted = [paint(line, mode, self.wide, gray) for line in lines]
+        last = self._painted if self._size == size else []  # a new size: all anew
+        changed = "".join("\x1b[{};1H{}".format(row + 1, text) for row, text in enumerate(painted)
+                          if row >= len(last) or last[row] != text)
+        self._painted, self._size = painted, size
         # 2026 = synchronized output: terminals that know it swap the frame in at once.
-        self._write("\x1b[?2026h\x1b[H" + paint(lines, mode, self.wide, gray) + "\x1b[?2026l")
+        self._write("\x1b[?2026h" + changed + "\x1b[?2026l")
 
     @staticmethod
     def _write(text):
@@ -2009,6 +2093,7 @@ def main():
         host, settings, indices = socket.gethostname(), Settings(), [g.index for g in gpus]
         poller, view = Poller(gpus), View()
         view.restore(settings.load(host), indices)
+        view.interval = args.interval
         kept = view.kept()
         with Screen() as screen:
             view.shows = color_mode(screen.truecolor)
@@ -2042,16 +2127,19 @@ def main():
                     width, height = os.get_terminal_size()
                     screen.draw(view.screen(gpus, width, height,
                                             header(width, args.interval, driver, poller.waiting()), update.newer),
-                                view.shows, view.theme.gray)
-                # Keys and clicks redraw at once; the numbers move on at the next frame.
+                                view.shows, view.theme.gray, (width, height))
+                # Keys and clicks redraw at once, the pointer when it goes to another graph column; the
+                # numbers move on at the next frame.
                 events = screen.read(0.01 if peek is not None else (poll_at or frame_at) - time.monotonic())
+                pointed = view.pointed()
                 going = all(map(view.handle, events))
                 if view.kept() != kept:  # a setting changed: keep it for next time
                     kept = view.kept()
                     settings.save(kept, indices, host)
                 if not going:
                     break
-                redraw, detail = bool(events), view.detail(gpus)
+                redraw = any(e[0] != "move" for e in events) or view.pointed() != pointed
+                detail = view.detail(gpus)
                 if detail - poller.detail:  # at the latest the next round, or the one after the round running
                     busy = not poller.done.is_set()
                     peek = (detail - poller.detail | (peek[0] if peek else set()), poller.rounds + 1 + busy)

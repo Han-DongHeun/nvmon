@@ -3,6 +3,12 @@
 What changes for you in each release. The same notes appear on the
 [releases page](https://github.com/Han-DongHeun/nvmon/releases).
 
+## Unreleased
+
+- Point at a graph: its column lights up, and a chip beside the pointer says the utilization then and how
+  long ago.
+- Only what changed on the screen is sent to the terminal, a few hundred bytes for most redraws.
+
 ## 0.3.2
 
 - Four more themes from MetBrewer: Greek, Tam, Homer and Demuth.

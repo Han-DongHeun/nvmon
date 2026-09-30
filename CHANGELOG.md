@@ -18,8 +18,8 @@ What changes for you in each release. The same notes appear on the
 - The graph shades smoothly: each cell shows two colors, so there are twice as many steps from green
   to red, and in 256 colors no more dull olive among the greens.
 - Themes: `c` goes through them, `C` back. nvmon's own colors stay the default; the others take the
-  color scales GitHub, IBM (Carbon), Grafana, Tableau and Radix publish, and black and white: grays as
-  light as the colors were.
+  palettes of paintings by Hiroshige, Hokusai, O'Keeffe and Van Gogh, and of the Rosé Pine theme; black
+  and white keeps each color's lightness.
 - The theme, graphs on or off, the process list's order and the GPUs hidden stay for the next run, for
   each computer you connect from.
 - A capital A, B, C, D, F, H or Z typed is that letter, no longer an arrow key, Home or End.

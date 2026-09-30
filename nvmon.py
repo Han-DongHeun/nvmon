@@ -182,23 +182,19 @@ def theme(name, stops, accent, temp=None, gray=False):
 GREEN, YELLOW, ORANGE, RED = (95, 175, 95), (215, 215, 95), (215, 135, 95), (215, 95, 95)
 # The themes c goes through. First nvmon's own: utilization and shares green -> yellow -> orange -> red, the
 # yellow-green at 30 %, not 20, as from green to it is a long way to the eye; temperature in °C, blue at 30 to
-# red at 88, as idle GPUs sit at 30-45, busy ones at 60-80, and most throttle from about 85-90. Then scales that
-# design companies publish, as they give them for dark backgrounds or turned to run dark to light, the largest
-# value the lightest, as IBM's Carbon has it for dark themes: GitHub's contribution graph (primer/primitives),
-# Carbon's teal and purple, Grafana's green-yellow-red, the gold of Vega's dark schemes (made at Tableau),
-# Tableau's blue-teal, Radix's indigo.
+# red at 88, as idle GPUs sit at 30-45, busy ones at 60-80, and most throttle from about 85-90. Then palettes
+# made to look good, low to high, the darkest end dropped where it would vanish into the background: four
+# from paintings at the Metropolitan Museum, as MetBrewer (Blake R. Mills) takes them, Hiroshige's "Sailing
+# Boats Returning to Yabase", Hokusai's "Yoro Waterfall", O'Keeffe's "Red and Yellow Cliffs", Van Gogh's
+# "First Steps"; and the Rose Pine editor theme.
 THEMES = [
     theme("nvmon", [(0, GREEN), (30, (175, 215, 95)), (40, YELLOW), (60, (215, 175, 95)), (80, ORANGE), (100, RED)],
           _fg(110), [(30, (95, 135, 215)), (45, (95, 175, 175)), (60, GREEN), (72, YELLOW), (80, ORANGE), (88, RED)]),
-    theme("GitHub", "#033a16 #196c2e #2ea043 #56d364", "#56d364"),
-    theme("GitHub winter", "#0c2d6b #1158c7 #58a6ff #cae8ff", "#58a6ff"),
-    theme("Carbon teal", "#005d5d #007d79 #009d9a #08bdba #3ddbd9 #9ef0f0", "#3ddbd9"),
-    theme("Carbon purple", "#6929c4 #8a3ffc #a56eff #be95ff #d4bbff #e8daff", "#be95ff"),
-    theme("Grafana", "#73bf69 #fade2a #f2495c", "#5794f2"),
-    theme("Tableau gold", "#584b37 #725e34 #8c7631 #ae8b2b #cfa424 #ecc31e #f9de30 #fff184", "#fff184"),
-    theme("Tableau blue-teal", "#2c5985 #2f6790 #32779b #3586a7 #3b96b2 #4ba5ba #66b2c2 #7ec1ca #95cecf #aedcd5 "
-          "#bce4d8", "#bce4d8"),
-    theme("Radix indigo", "#3a4f97 #435db1 #5472e4 #9eb1ff #d6e1ff", "#9eb1ff"),
+    theme("Hiroshige", "#376795 #528fad #72bcd5 #aadce0 #ffe6b7 #ffd06f #f7aa58 #ef8a47 #e76254", "#aadce0"),
+    theme("Hokusai", "#295384 #5a97c1 #74c8c3 #95c36e #d8d97a", "#74c8c3"),
+    theme("O'Keeffe", "#92351e #b9563f #d37750 #e69c6b #ecb27d #f2c88f #fbe3c2", "#f2c88f"),
+    theme("Van Gogh", "#1f5b25 #3c7c3d #669d62 #9cc184 #c2d6a4 #e7e5cc", "#c2d6a4"),
+    theme("Rose Pine", "#3e8fb0 #9ccfd8 #c4a7e7 #ea9a97 #eb6f92", "#c4a7e7"),
 ]
 # No hue, only lightness: dark gray when idle to near white when busy.
 THEMES.append(theme("black and white", "#505050 #f0f0f0", "#d0d0d0", gray=True))

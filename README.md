@@ -41,8 +41,9 @@ Click a process, or press Tab, to pick its job: the GPUs it uses stand out, and 
 Click an empty spot to let the job go and close the list.
 
 The GPU numbers at the bottom left hide a GPU when clicked, and show it again; so does the number's
-key. `g` turns the graphs on and off. `c` goes through the themes (`C` back): nvmon's own, then color
-scales that GitHub, IBM (Carbon), Grafana, Tableau and Radix publish, then black and white. The theme,
+key. `g` turns the graphs on and off. `c` goes through the themes (`C` back): nvmon's own, then palettes
+from paintings by Hiroshige, Hokusai, O'Keeffe and Van Gogh (as [MetBrewer](https://github.com/BlakeRMills/MetBrewer)
+has them) and the [Rosé Pine](https://rosepinetheme.com) theme's, then black and white. The theme,
 graphs on or off, the list's order and the GPUs hidden stay for the next run, for each computer you
 connect from (in `~/.config/nvmon/settings.json`). Hold Shift to select text with the mouse.
 

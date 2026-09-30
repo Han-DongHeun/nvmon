@@ -17,8 +17,11 @@ What changes for you in each release. The same notes appear on the
   in ASCII; where 24-bit colour is not known to work, 256 colours are used.
 - The graph shades smoothly: each cell shows two colours, so there are twice as many steps from green
   to red, and in 256 colours no more dull olive among the greens.
-- `c` switches to black and white and back. Graphs on or off, black and white, the process list's order
-  and the GPUs hidden stay for the next run, for each computer you connect from.
+- Themes: `c` goes through them, `C` back. nvmon's own colours stay the default; the others take the
+  colour scales GitHub, IBM (Carbon), Grafana, Tableau and Radix publish, and one is black and white.
+- The theme, graphs on or off, the process list's order and the GPUs hidden stay for the next run, for
+  each computer you connect from.
+- A capital A, B, C, D, F, H or Z typed is that letter, no longer an arrow key, Home or End.
 - When the GPUs do not fit the window, their boxes scroll (wheel, PgUp/PgDn). The boxes are a line
   shorter: the "PCIe transfer" title is gone, as CPU -> GPU and GPU -> CPU say it already.
 - No more stutter when another program uses the GPU driver at the same time, such as someone

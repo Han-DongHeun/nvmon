@@ -1,10 +1,12 @@
-"""Record nvmon on this machine's GPUs and write the README's GIFs, one per window size:
+"""Record nvmon on this machine's GPUs and write the README's GIFs, one per window size, and a picture of
+its themes:
 
     uv run --with pillow docs/demo.py [SECONDS]
 
 Process names, conda environments, accounts, commands and the host name are swapped for made-up ones,
 so nothing of the machine or its users shows. Needs an NVIDIA GPU, and DejaVu Sans Mono for the text.
 """
+import math
 import os
 import re
 import sys
@@ -48,8 +50,8 @@ def anonymize():
 
 
 def record(seconds, warm_up=70):
-    """Screens, as nvmon's segment lines, every half second: {file: [frame, ...]}. The first `warm_up`
-    seconds are not kept: they fill the graphs."""
+    """Screens, as nvmon's segment lines, every half second: {file: [frame, ...]}, and the GPUs as they are
+    at the end. The first `warm_up` seconds are not kept: they fill the graphs."""
     nv = nvmon.load_nvml()
     gpus, driver = nvmon.open_gpus(nv), nvmon.versions(nv)
     views = {name: nvmon.View() for name, *_ in SIZES}
@@ -71,7 +73,7 @@ def record(seconds, warm_up=70):
             view.graphs = mode != "cards"
             frames[name].append(view.screen(gpus, cols, rows, nvmon.header(cols, 0.5, driver), None))
         time.sleep(max(0, 0.5 - (time.monotonic() - start)))
-    return frames
+    return frames, gpus
 
 
 def palette256(n):
@@ -150,10 +152,27 @@ def picture(lines, cols, rows, fonts):
     return image
 
 
+def gallery(gpu, fonts, width=80):
+    """`gpu`'s box once in each theme, its name above, two to a row."""
+    boxes = []
+    for theme in nvmon.THEMES:
+        nvmon.THEME = theme
+        lines = nvmon.panel(gpu, width, 5, None, True, not theme.mono)
+        if theme.mono:
+            lines = [[(seg[0], nvmon.restyle(seg[1], "mono")) + tuple(seg[2:]) for seg in line] for line in lines]
+        boxes.append(picture([[(theme.name, nvmon.BOLD)]] + lines, width, 8, fonts))
+    nvmon.THEME = nvmon.THEMES[0]
+    w, h = boxes[0].size
+    image = Image.new("RGB", (2 * w, math.ceil(len(boxes) / 2) * h), BG)
+    for k, box in enumerate(boxes):
+        image.paste(box, (k % 2 * w, k // 2 * h))
+    return image
+
+
 def main():
     seconds = float(sys.argv[1]) if len(sys.argv) > 1 else 20
     anonymize()
-    frames = record(seconds)
+    frames, gpus = record(seconds)
     fonts = {False: ImageFont.truetype(FONT.format(""), SIZE), True: ImageFont.truetype(FONT.format("-Bold"), SIZE)}
     here = os.path.dirname(os.path.abspath(__file__))
     for name, cols, rows, _ in SIZES:
@@ -162,6 +181,9 @@ def main():
         pictures[0].save(os.path.join(here, name), save_all=True, append_images=pictures[1:], duration=500,
                          loop=0, optimize=True)
         print(name, os.path.getsize(os.path.join(here, name)) // 1024, "KB")
+    busiest = max(gpus, key=lambda gpu: sum(gpu.history))
+    gallery(busiest, fonts).save(os.path.join(here, "themes.png"), optimize=True)
+    print("themes.png", os.path.getsize(os.path.join(here, "themes.png")) // 1024, "KB")
 
 
 if __name__ == "__main__":

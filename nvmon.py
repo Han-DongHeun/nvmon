@@ -108,32 +108,102 @@ def colour_mode(truecolor):
 
 
 def _gradient(stops):
-    """Truecolor codes for 0..100, interpolated through (position, (r, g, b)) `stops`."""
+    """Colours (r, g, b) for 0..100, interpolated through (position, (r, g, b)) `stops`."""
     colours = []
     for i in range(101):
         x = min(max(i, stops[0][0]), stops[-1][0])
         (x0, c0), (x1, c1) = next(pair for pair in zip(stops, stops[1:]) if x <= pair[1][0])
-        colours.append(_rgb([round(a + (b - a) * (x - x0) / (x1 - x0)) for a, b in zip(c0, c1)]))
+        colours.append(tuple(round(a + (b - a) * (x - x0) / (x1 - x0)) for a, b in zip(c0, c1)))
     return colours
 
 
+def _from_oklab(lab):
+    """The colour (r, g, b) at OKLab `lab`: _oklab the other way."""
+    L, a, b = lab
+    l, m, s = ((L + x * a + y * b) ** 3 for x, y in ((0.3963377774, 0.2158037573), (-0.1055613458, -0.0638541728),
+                                                    (-0.0894841775, -1.2914855480)))
+
+    def gamma(c):  # sRGB's gamma again
+        c = 12.92 * c if c <= 0.0031308 else 1.055 * max(c, 0) ** (1 / 2.4) - 0.055
+        return min(255, max(0, round(c * 255)))
+    return (gamma(4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s),
+            gamma(-1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s),
+            gamma(-0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s))
+
+
+def _readable(rgb, floor=0.62):
+    """`rgb` as text on a dark background: when darker than `floor` (OKLab lightness), just that light, and
+    a little greyer where a colour that light would be beyond what a screen shows."""
+    L, a, b = _oklab(rgb)
+    if L >= floor:
+        return tuple(rgb)
+    for k in (1, 0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1):
+        lifted = _from_oklab((floor, a * k, b * k))
+        if _oklab(lifted)[0] >= floor - 0.005:  # not cut short by the screen's limits
+            return lifted
+    return _from_oklab((floor, 0, 0))
+
+
+class Theme(NamedTuple):
+    """A look: the colours utilization and shares take on in the graph (graph) and as numbers (text: the
+    same, but never too dark to read), those of temperature, and the colour of process names (accent)."""
+    name: str
+    graph: tuple      # style codes for 0 .. 100 %
+    text: tuple
+    temp: tuple       # style codes for 0 .. 100 °C
+    accent: str
+    selected: str     # the picked job: reverse video on the accent
+    mono: bool        # black and white: paint leaves colours out
+
+
+def theme(name, stops, accent, temp=None, mono=False):
+    """A Theme. `stops`, low to high, are (position, (r, g, b)) pairs, or "#rrggbb ..." colours, which are
+    placed by how different they look (OKLab distance) so that equal steps in % look about equally big.
+    Temperature takes the same colours over 30-88 °C, unless `temp` has stops of its own."""
+    if isinstance(stops, str):
+        colours = [tuple(bytes.fromhex(code[1:])) for code in stops.split()]
+        labs = [_oklab(c) for c in colours]
+        gaps = [math.sqrt(sum((a - b) ** 2 for a, b in zip(p, q))) for p, q in zip(labs, labs[1:])]
+        stops = [(100 * sum(gaps[:i]) / sum(gaps), c) for i, c in enumerate(colours)]
+    scale = _gradient(stops)
+    heat_of_temp = _gradient(temp or [(30 + 0.58 * x, c) for x, c in stops])
+    accent = accent if accent.startswith("\x1b") else _rgb(tuple(bytes.fromhex(accent[1:])))
+    return Theme(name, tuple(map(_rgb, scale)), tuple(_rgb(_readable(c)) for c in scale),
+                 tuple(_rgb(_readable(c)) for c in heat_of_temp), accent, "\x1b[7m" + accent, mono)
+
+
 GREEN, YELLOW, ORANGE, RED = (95, 175, 95), (215, 215, 95), (215, 135, 95), (215, 95, 95)
-# Utilization and shares: green -> yellow -> orange -> red over 0-100 %. The yellow-green sits at 30 %, not 20:
-# from green to it is a long way to the eye, and so equal steps in % look about equally big.
-HEAT = _gradient([(0, GREEN), (30, (175, 215, 95)), (40, YELLOW), (60, (215, 175, 95)), (80, ORANGE), (100, RED)])
-# Temperature in °C: idle GPUs sit at 30-45, busy ones at 60-80, most throttle from about 85-90.
-TEMP = _gradient([(30, (95, 135, 215)), (45, (95, 175, 175)), (60, GREEN), (72, YELLOW), (80, ORANGE), (88, RED)])
-# Warnings on the top edge: yellow = worth a look, orange = slowed, red = act.
+# The themes c goes through. First nvmon's own: utilization and shares green -> yellow -> orange -> red, the
+# yellow-green at 30 %, not 20, as from green to it is a long way to the eye; temperature in °C, blue at 30 to
+# red at 88, as idle GPUs sit at 30-45, busy ones at 60-80, and most throttle from about 85-90. Then scales that
+# design companies publish, as they give them for dark backgrounds or turned to run dark to light, the largest
+# value the lightest, as IBM's Carbon has it for dark themes: GitHub's contribution graph (primer/primitives),
+# Carbon's teal and purple, Grafana's green-yellow-red, the gold of Vega's dark schemes (made at Tableau),
+# Tableau's blue-teal, Radix's indigo.
+THEMES = [
+    theme("nvmon", [(0, GREEN), (30, (175, 215, 95)), (40, YELLOW), (60, (215, 175, 95)), (80, ORANGE), (100, RED)],
+          _fg(110), [(30, (95, 135, 215)), (45, (95, 175, 175)), (60, GREEN), (72, YELLOW), (80, ORANGE), (88, RED)]),
+    theme("GitHub", "#033a16 #196c2e #2ea043 #56d364", "#56d364"),
+    theme("GitHub winter", "#0c2d6b #1158c7 #58a6ff #cae8ff", "#58a6ff"),
+    theme("Carbon teal", "#005d5d #007d79 #009d9a #08bdba #3ddbd9 #9ef0f0", "#3ddbd9"),
+    theme("Carbon purple", "#6929c4 #8a3ffc #a56eff #be95ff #d4bbff #e8daff", "#be95ff"),
+    theme("Grafana", "#73bf69 #fade2a #f2495c", "#5794f2"),
+    theme("Tableau gold", "#584b37 #725e34 #8c7631 #ae8b2b #cfa424 #ecc31e #f9de30 #fff184", "#fff184"),
+    theme("Tableau blue-teal", "#2c5985 #2f6790 #32779b #3586a7 #3b96b2 #4ba5ba #66b2c2 #7ec1ca #95cecf #aedcd5 "
+          "#bce4d8", "#bce4d8"),
+    theme("Radix indigo", "#3a4f97 #435db1 #5472e4 #9eb1ff #d6e1ff", "#9eb1ff"),
+]
+THEMES.append(THEMES[0]._replace(name="black and white", mono=True))
+THEME = THEMES[0]  # the one in use, set by View.screen before it draws
+# Warnings on the top edge, the same in every theme: yellow = worth a look, orange = slowed, red = act.
 WARN, SLOW, ALERT = _rgb(YELLOW), _rgb(ORANGE), _rgb(RED)
-# Everything else sticks to the 256-colour palette.
-DIM, FAINT, PROC = _fg(240), _fg(238), _fg(110)
-NEWS = PROC  # a newer release is news, not trouble: the process names' calm blue, not warning yellow
+DIM, FAINT = _fg(240), _fg(238)
 BOLD, RESET = "\x1b[1m", "\x1b[0m"
 
 
 def heat(t):
-    """Colour for a position t in [0, 1] of the 0-100 % scale."""
-    return HEAT[round(min(max(t, 0), 1) * 100)]
+    """The theme's colour for a number at t in [0, 1] of the 0-100 % scale."""
+    return THEME.text[round(min(max(t, 0), 1) * 100)]
 
 
 # ── NVML (libnvidia-ml / nvml.dll, part of the NVIDIA driver) ───────────────
@@ -782,7 +852,6 @@ def update_command():
 # A line is a list of (text, style) segments; every character is one cell wide. A segment that can be
 # clicked carries a third item, what the click means: a job's PID, or ("key", name) and the like.
 
-SELECTED = "\x1b[7m" + PROC  # the selected job: reverse video, on the process names' blue
 FADED = "\x1b[2m"            # "faint": GPUs the selected job does not use
 
 
@@ -807,9 +876,9 @@ def pad(line, width):
 
 
 @lru_cache(maxsize=None)
-def graph_row(r, height, two_tone=True):
+def graph_row(r, height, two_tone, scale):
     """The (block, style) cell that row `r` (0 = bottom) of a `height`-row graph shows for each level
-    0 .. 8 * height.
+    0 .. 8 * height, in the colours `scale` (a theme's graph).
 
     The colour goes with the height, as a gradient behind the bars would. A cell holds one character in one
     colour on one background, so two colours at most: a full cell is "▀" in its upper half's colour on its
@@ -821,7 +890,7 @@ def graph_row(r, height, two_tone=True):
     steps = height * 8
 
     def at(level):  # the colour at `level`, in eighths of a cell from the bottom
-        return heat(level / steps)
+        return scale[round(level * 100 / steps)]
 
     cells = []
     for level in range(steps + 1):
@@ -844,7 +913,7 @@ def graph(history, width, height, two_tone=True):
     text_of, style_of = operator.itemgetter(0), operator.itemgetter(1)
     rows = []
     for r in reversed(range(height)):
-        cells = map(graph_row(r, height, two_tone).__getitem__, levels)
+        cells = map(graph_row(r, height, two_tone, THEME.graph).__getitem__, levels)
         rows.append([("".join(map(text_of, run)), style) for style, run in itertools.groupby(cells, key=style_of)])
     return rows
 
@@ -912,7 +981,7 @@ def panel(gpu, width, height, selected=None, graphs=True, two_tone=True):
     parts = [] if s.slowdown is None else [([s.slowdown], 9)]
     if degraded(gpu):
         parts += [([("PCIe DEGRADED: x{} -> x{}".format(gpu.pcie_max_width, s.pcie_width), WARN)], 8)]
-    parts += [] if s.temp is None else [([("{:>3}°C".format(s.temp), TEMP[min(max(s.temp, 0), 100)])], 5)]
+    parts += [] if s.temp is None else [([("{:>3}°C".format(s.temp), THEME.temp[min(max(s.temp, 0), 100)])], 5)]
     parts += [] if s.fan is None else [([("FAN {:>3}%".format(s.fan), "")], 1)]
     parts += [] if s.clock is None else [([("{:>4} MHz".format(s.clock), s.slowdown[1] if s.slowdown else "")], 4)]
     top = edge(width, label, parts)
@@ -987,7 +1056,7 @@ def process_label(processes, room, selected=None, index=None):
             gap = [] if not entries else [(" · ", DIM)] if j else [("   ", "")]
             details = [elapsed(process.started)] if process.started is not None else []
             details += [] if process.mem is None else ["{:.1f}G".format(process.mem)]
-            name = (process.name, SELECTED if process.job == selected else PROC, process.job)
+            name = (process.name, THEME.selected if process.job == selected else THEME.accent, process.job)
             entries.append(gap + ([(tag + ": ", DIM)] if tag and not j else []) + [name]
                            + ([(" " + " ".join(details), DIM, process.job)] if details else []))
     def more(n):
@@ -1046,7 +1115,7 @@ COLUMNS = [
     ("PID", 8, lambda j: (str(j.pid), ""), lambda j: j.pid),
     ("account/env", 14, lambda j: (account(j), ""), account),
     ("process", 22, lambda j: (j.name + ("  {} workers".format(len(j.members)) if len(j.members) > 1 else ""),
-                               PROC), lambda j: j.name.lower()),
+                               THEME.accent), lambda j: j.name.lower()),
     ("GPUs", 8, lambda j: (ranges(j.gpus), ""), lambda j: j.gpus),
     (">util", 5, lambda j: share(j.util, 100)[0] if j.util is not None else ("-", ""),
      lambda j: -1 if j.util is None else j.util),
@@ -1089,8 +1158,8 @@ def process_list(jobs, width, rows, selected, top, sort, shift=0):
         values = [cell(job) for _, _, cell, _ in COLUMNS]
         command = "…" + job.command[shift:] if chosen and shift else job.command
         values[-1] = (command if len(command) <= room else command[:max(0, room - 1)] + "…", DIM)
-        lines.append(cells([(text, SELECTED if chosen else colour, job.pid) for text, colour in values], width,
-                           (SELECTED if chosen else "", job.pid)))
+        lines.append(cells([(text, THEME.selected if chosen else colour, job.pid) for text, colour in values],
+                           width, (THEME.selected if chosen else "", job.pid)))
     if not jobs:
         lines.append([(" no processes on these GPUs", DIM)])
     above, below = top, len(jobs) - top - len(shown)
@@ -1120,16 +1189,19 @@ def header(width, interval, driver, waiting=0):
     return spread(width, left, right)
 
 
-KEY_NAMES = {"\r": "enter", "\n": "enter", "\t": "tab", "\x1b": "esc", "A": "up", "B": "down", "C": "right", "D": "left", "H": "home",
-             "F": "end", "Z": "backtab", "1~": "home", "4~": "end", "5~": "pgup", "6~": "pgdn",
-             "Esc": "esc", "Esc / q": "q"}
+# Keys by what the terminal sends: a control character, or how an escape sequence ends ("ESC [ A" is up).
+# Apart, so that a typed "C" is a C, not the right arrow.
+CONTROL_KEYS = {"\r": "enter", "\n": "enter", "\t": "tab", "\x1b": "esc"}
+SEQUENCE_KEYS = {"A": "up", "B": "down", "C": "right", "D": "left", "H": "home", "F": "end", "Z": "backtab",
+                 "1~": "home", "4~": "end", "5~": "pgup", "6~": "pgdn"}
+HINT_KEYS = {"Esc": "esc", "Esc / q": "q"}  # what clicking a key hint presses
 
 
 def keys(*hints):
     """Key hints for the bottom line, keys(("p", "processes"), ...); clicking one presses its key."""
     out = []
     for key, label in hints:
-        press = ("key", KEY_NAMES.get(key, key))
+        press = ("key", HINT_KEYS.get(key, key))
         out += ([("   ", "")] if out else []) + [(key, "", press), (" " + label, DIM, press)]
     return out
 
@@ -1139,12 +1211,13 @@ def footer(width, newer=None, picker=()):
     picker, notice, how, link = list(picker), [], [], []
     if newer:
         version, command = newer
-        notice = ([("   ", "")] if picker else []) + [("update available: " + version, NEWS)]
+        # A newer release is news, not trouble: the theme's accent, not warning yellow.
+        notice = ([("   ", "")] if picker else []) + [("update available: " + version, THEME.accent)]
         how = [(" ({})".format(command or "new nvmon.py: " + RELEASES), "")]
         link = [("   what's new: " + RELEASES, DIM)] if command else []  # a copied nvmon.py already links there
-    every = keys(("g", "graphs"), ("c", "colours"), ("p", "processes"), ("Esc / q", "quit"))
+    every = keys(("g", "graphs"), ("c", "theme"), ("p", "processes"), ("Esc / q", "quit"))
     few = keys(("p", "processes"), ("Esc / q", "quit"))
-    # As much as fits: the link goes first, then how to update, the keys for graphs and colours, the picker.
+    # As much as fits: the link goes first, then how to update, the keys for graphs and theme, the picker.
     options = [(picker + notice + how + link, every), (picker + notice + how, every), (picker + notice + how, few),
                (picker + notice, few), (notice[1:] if picker else notice, few)]
     left, right = next((option for option in options if width_of(option[0]) + 2 + width_of(option[1]) <= width),
@@ -1161,7 +1234,7 @@ class View:
 
     def __init__(self):
         self.shows = "truecolor"          # the colours the terminal shows, see colour_mode
-        self.mono = False                 # black and white instead (c)
+        self.theme = THEMES[0]            # the look, see THEMES (c)
         self.graphs = True                # the boxes show the utilization graph, else they are cards
         self.hidden, self.indices = set(), []  # the GPUs left out, and all there are
         self.job = None                   # the selected job's PID
@@ -1181,24 +1254,27 @@ class View:
     @property
     def colours(self):
         """What paint draws in: the terminal's colours, or "mono"."""
-        return "mono" if self.mono else self.shows
+        return "mono" if self.theme.mono else self.shows
 
     def restore(self, saved, indices):
         """Take up what an earlier run kept (Settings.load); of the GPUs `indices`, one always stays shown."""
-        self.graphs, self.mono = saved.get("graphs", self.graphs), saved.get("mono", self.mono)
+        self.graphs = saved.get("graphs", self.graphs)
+        self.theme = next((kept for kept in THEMES if kept.name == saved.get("theme")), self.theme)
         self.sort = saved.get("sort", self.sort)
         hidden = saved.get("hidden", set()) & set(indices)
         self.hidden = hidden if len(hidden) < len(indices) else set()
 
     def kept(self):
         """What is kept for the next run: see Settings."""
-        return {"graphs": self.graphs, "mono": self.mono, "sort": self.sort, "hidden": set(self.hidden)}
+        return {"graphs": self.graphs, "theme": self.theme.name, "sort": self.sort, "hidden": set(self.hidden)}
 
     def selected(self):
         return next((job for job in self.jobs if job.pid == self.job), None)
 
     def screen(self, gpus, width, height, top_line, newer):
         """The whole screen: `top_line`, the GPU boxes (and the list, when open), the bottom line."""
+        global THEME
+        THEME = self.theme
         column, descending = self.sort
         self.jobs = sorted(jobs(gpus), key=lambda job: (SORTS[column](job), job.pid), reverse=descending)
         job = self.selected()
@@ -1225,13 +1301,13 @@ class View:
         rows = math.ceil(len(gpus) / cols)
         if rows * (inner + 2) <= height:
             self.gpu_top, self.gpu_page = 0, rows
-            return render(gpus, width, height, self.job, (cols, inner), self.graphs, not self.mono)
+            return render(gpus, width, height, self.job, (cols, inner), self.graphs, not self.theme.mono)
         self.gpu_page = max(1, (height - 1) // (inner + 2))
         self.gpu_top = max(0, min(self.gpu_top, rows - self.gpu_page))
         part = gpus[self.gpu_top * cols:(self.gpu_top + self.gpu_page) * cols]
         note = "GPUs {} of {} shown · wheel or PgUp/PgDn for the rest".format(
             ranges([g.index for g in part]), len(gpus))
-        return (render(part, width, height - 1, self.job, (cols, inner), self.graphs, not self.mono)
+        return (render(part, width, height - 1, self.job, (cols, inner), self.graphs, not self.theme.mono)
                 + [spread(width, [], [(note, DIM)])])
 
     def detail(self, gpus):
@@ -1278,7 +1354,7 @@ class View:
         if job:
             hints = [("f", "all GPUs" if self.only else "only these GPUs")]
             hints += [("t", "stop"), ("k", "kill")] if job.owner is None and os.name != "nt" else []
-            left = [(job.name, PROC, job.pid), ("  ", DIM)] + about(job)
+            left = [(job.name, THEME.accent, job.pid), ("  ", DIM)] + about(job)
             return spread(width, note or left, keys(*hints, ("Esc", "back")))
         if self.listing:
             return spread(width, note or [("click a job or a heading", DIM)],
@@ -1372,10 +1448,10 @@ class View:
             self.listing = not self.listing
         elif key == "g":
             self.graphs = not self.graphs
-        elif key == "c":  # black and white, or the terminal's colours again
-            self.mono = not self.mono
-            shows = "24-bit" if self.shows == "truecolor" else "256, all this terminal shows"
-            self.note = ([("black and white" if self.mono else "colours: " + shows, "")], time.monotonic() + 3)
+        elif key == "c":  # the next theme; C the one before
+            self.theme = THEMES[(THEMES.index(self.theme) + (-1 if value[0] == "C" else 1)) % len(THEMES)]
+            shows = "" if self.theme.mono or self.shows == "truecolor" else ", in 256 colours: all this terminal shows"
+            self.note = ([("theme: " + self.theme.name + shows, "")], time.monotonic() + 3)
         elif key.isdigit() and int(key) in self.indices:
             self.handle(("gpu", int(key)))
         elif self.listing and key in ("s", "r"):  # the next column, or the other way round
@@ -1447,8 +1523,8 @@ def client():
 
 
 class Settings:
-    """What stays from one run to the next, for each client (see client): graphs on or off, black and white,
-    the list's order, and the GPUs hidden, those for each machine, as several often share a home directory.
+    """What stays from one run to the next, for each client (see client): graphs on or off, the theme, the
+    list's order, and the GPUs hidden, those for each machine, as several often share a home directory.
     Kept in ~/.config/nvmon/settings.json (%APPDATA%\\nvmon on Windows); a file that cannot be read or written
     only means that nothing is kept."""
 
@@ -1469,7 +1545,9 @@ class Settings:
         """This client's settings as View.restore takes them, the GPUs hidden those on `host`."""
         mine = self._read().get(self.client)
         mine = mine if isinstance(mine, dict) else {}
-        out = {name: mine[name] for name in ("graphs", "mono") if isinstance(mine.get(name), bool)}
+        out = {"graphs": mine["graphs"]} if isinstance(mine.get("graphs"), bool) else {}
+        if isinstance(mine.get("theme"), str):
+            out["theme"] = mine["theme"]
         sort = mine.get("sort")
         if isinstance(sort, list) and len(sort) == 2 and sort[0] in SORTS and isinstance(sort[1], bool):
             out["sort"] = tuple(sort)
@@ -1486,7 +1564,8 @@ class Settings:
         hidden = mine.get("hidden") if isinstance(mine.get("hidden"), dict) else {}
         earlier = hidden.get(host) if isinstance(hidden.get(host), list) else []
         hidden[host] = sorted({i for i in earlier if isinstance(i, int) and i not in indices} | kept["hidden"])
-        mine.update(graphs=kept["graphs"], mono=kept["mono"], sort=list(kept["sort"]),
+        mine.pop("mono", None)  # black and white is a theme now
+        mine.update(graphs=kept["graphs"], theme=kept["theme"], sort=list(kept["sort"]),
                     hidden={name: gpus for name, gpus in hidden.items() if gpus})
         data[self.client] = mine
         temp = "{}.{}".format(self.path, os.getpid())
@@ -1531,12 +1610,12 @@ def events(data):
             continue
         elif m.group("end"):
             args, end = m.group("args").decode(), m.group("end").decode()
-            name = KEY_NAMES.get(args + end) or KEY_NAMES.get(end)
+            name = SEQUENCE_KEYS.get(args + end) or SEQUENCE_KEYS.get(end)
             if name:
                 out.append(("key", name))
         else:
             char = m.group("char").decode("latin-1")
-            out.append(("key", KEY_NAMES.get(char, char)))
+            out.append(("key", CONTROL_KEYS.get(char, char)))
     return out
 
 
@@ -1599,7 +1678,7 @@ class Screen:
                     if char in ("\x00", "\xe0"):  # arrows and the like come as two characters
                         name = WINDOWS_KEYS.get(msvcrt.getwch())
                     else:
-                        name = KEY_NAMES.get(char, char)
+                        name = CONTROL_KEYS.get(char, char)
                     found += [("key", name)] if name else []
                 left = end - time.monotonic()
                 if found or left <= 0:
@@ -1684,8 +1763,8 @@ def main():
     parser = argparse.ArgumentParser(
         prog="nvmon", description="A fancy NVIDIA GPU monitor for the terminal.",
         epilog="At start nvmon asks PyPI whether a newer release is out; NVMON_NO_UPDATE_CHECK=1 turns that "
-               "off. Colours are 24-bit where the terminal says it shows them, else 256. Graphs on or off, black and "
-               "white, the list's order and hidden GPUs are kept for each computer you connect from, in "
+               "off. Colours are 24-bit where the terminal says it shows them, else 256. Graphs on or off, the theme, "
+               "the list's order and hidden GPUs are kept for each computer you connect from, in "
                "~/.config/nvmon/settings.json. " + REPO)
     parser.add_argument("-i", "--interval", type=interval, default=DEFAULT_INTERVAL, metavar="SEC",
                         help="seconds between updates, at least 0.1 (default: 0.5)")

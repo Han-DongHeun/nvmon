@@ -18,7 +18,8 @@ What changes for you in each release. The same notes appear on the
 - The graph shades smoothly: each cell shows two colors, so there are twice as many steps from green
   to red, and in 256 colors no more dull olive among the greens.
 - Themes: `c` goes through them, `C` back. nvmon's own colors stay the default; the others take the
-  palettes of paintings by Hiroshige, Hokusai, O'Keeffe and Van Gogh, and of the Rosé Pine theme; black
+  palettes of works by Hiroshige, Hokusai, O'Keeffe, Van Gogh, Bénédictus and Cassatt, and of the
+  Rosé Pine theme; black
   and white keeps each color's lightness.
 - The theme, graphs on or off, the process list's order and the GPUs hidden stay for the next run, for
   each computer you connect from.

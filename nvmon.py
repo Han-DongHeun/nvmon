@@ -183,10 +183,11 @@ GREEN, YELLOW, ORANGE, RED = (95, 175, 95), (215, 215, 95), (215, 135, 95), (215
 # The themes c goes through. First nvmon's own: utilization and shares green -> yellow -> orange -> red, the
 # yellow-green at 30 %, not 20, as from green to it is a long way to the eye; temperature in °C, blue at 30 to
 # red at 88, as idle GPUs sit at 30-45, busy ones at 60-80, and most throttle from about 85-90. Then palettes
-# made to look good, low to high, the darkest end dropped where it would vanish into the background: four
-# from paintings at the Metropolitan Museum, as MetBrewer (Blake R. Mills) takes them, Hiroshige's "Sailing
-# Boats Returning to Yabase", Hokusai's "Yoro Waterfall", O'Keeffe's "Red and Yellow Cliffs", Van Gogh's
-# "First Steps"; and the Rose Pine editor theme.
+# made to look good, low to high, the darkest end dropped where it would vanish into the background: from
+# works at the Metropolitan Museum, as MetBrewer (Blake R. Mills) takes them, Hiroshige's "Sailing Boats
+# Returning to Yabase", Hokusai's "Yoro Waterfall", O'Keeffe's "Red and Yellow Cliffs", Van Gogh's "First
+# Steps", the pinks of Benedictus's "Relais" and the lilacs of Cassatt's "Lilacs in a Window"; and the Rose
+# Pine editor theme.
 THEMES = [
     theme("nvmon", [(0, GREEN), (30, (175, 215, 95)), (40, YELLOW), (60, (215, 175, 95)), (80, ORANGE), (100, RED)],
           _fg(110), [(30, (95, 135, 215)), (45, (95, 175, 175)), (60, GREEN), (72, YELLOW), (80, ORANGE), (88, RED)]),
@@ -194,6 +195,8 @@ THEMES = [
     theme("Hokusai", "#295384 #5a97c1 #74c8c3 #95c36e #d8d97a", "#74c8c3"),
     theme("O'Keeffe", "#92351e #b9563f #d37750 #e69c6b #ecb27d #f2c88f #fbe3c2", "#f2c88f"),
     theme("Van Gogh", "#1f5b25 #3c7c3d #669d62 #9cc184 #c2d6a4 #e7e5cc", "#c2d6a4"),
+    theme("Benedictus", "#9a133d #b93961 #d8527c #f28aaa #f9b4c9 #f9e0e8", "#f28aaa"),
+    theme("Cassatt", "#574571 #90719f #b695bc #dec5da", "#b695bc"),
     theme("Rose Pine", "#3e8fb0 #9ccfd8 #c4a7e7 #ea9a97 #eb6f92", "#c4a7e7"),
 ]
 # No hue, only lightness: dark gray when idle to near white when busy.
@@ -888,8 +891,10 @@ def graph_row(r, height, two_tone, scale):
     color on one background, so two colors at most: a full cell is "▀" in its upper half's color on its
     lower half's, which makes twice as many bands as rows, each the color of its middle; no other split of a
     cell comes closer to a smooth gradient. The ragged top is a block from the bottom in its lower half's
-    color, the band beside it, so that bands run on unbroken from bar to bar; a color of its own stood out
-    as a patch. Without `two_tone` (faded boxes, as faint leaves backgrounds bright) a cell is one color.
+    color, the band beside it, so that every height has the one color from bar to bar. A top in the upper
+    half would need three (the two bands, and the empty rest), so there it goes by halves: 5/8 shows as 4/8,
+    6/8 and 7/8 as a full cell; the number beside the graph has the exact value. Without `two_tone` (faded
+    boxes, as faint leaves backgrounds bright) a cell is one color, and the top keeps its eighths.
     """
     steps = height * 8
 
@@ -899,6 +904,8 @@ def graph_row(r, height, two_tone, scale):
     cells = []
     for level in range(steps + 1):
         fill = min(8, max(0, level - r * 8))
+        if two_tone and fill > 4:
+            fill = 4 if fill == 5 else 8
         if fill == 8 and two_tone:
             cells.append(("▀", at(r * 8 + 6) + at(r * 8 + 2).replace("\x1b[38;", "\x1b[48;")))  # 48: background
         elif fill:

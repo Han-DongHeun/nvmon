@@ -11,6 +11,7 @@ What changes for you in each release. The same notes appear on the
 - Click a GPU's box to pick all its jobs; `t` and `k` then stop or kill all of them that are yours, after
   one `y`. Picking a job, or a GPU's, opens the process list, and letting go closes it again (not when
   it was open before).
+- The question before a stop or kill names the GPUs it reaches: "stop train.py on GPUs 4-5: …?"
 - `+` under a box only counts the processes that did not fit; the process list opens from a click on the
   box instead.
 

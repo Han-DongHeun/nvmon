@@ -795,6 +795,12 @@ def ranges(numbers):
     return ",".join(str(a) if a == b else "{}-{}".format(a, b) for a, b in spans)
 
 
+def gpu_numbers(indices):
+    """"GPU 3", "GPUs 4-5,7"."""
+    indices = sorted(set(indices))
+    return "GPU{} {}".format("s" if len(indices) > 1 else "", ranges(indices))
+
+
 def account(job):
     """"kim/torch": whose it is, and the conda environment; our own go without an account."""
     return "/".join(part for part in (job.owner, job.env) if part)
@@ -804,7 +810,7 @@ def about(job):
     """"kim/torch · GPUs 4-5 · util 86% · 30.2G · 2h13m · torchrun job" as segments, util in its color;
     the launcher, often a long name, comes last, where a narrow line cuts first."""
     parts = [(account(job), DIM)] if account(job) else []
-    parts.append(("GPU{} {}".format("s" if len(job.gpus) > 1 else "", ranges(job.gpus)), DIM))
+    parts.append((gpu_numbers(job.gpus), DIM))
     if job.util is not None:
         parts.append(("util ", DIM, "{:.0f}%".format(job.util), heat(job.util / 100)))
     parts.append(("{:.1f}G".format(job.mem), DIM))
@@ -819,8 +825,7 @@ def about(job):
 
 def about_all(jobs):
     """"GPUs 4-7 · 61.2G · 2 yours" for several jobs picked together, as segments."""
-    used = sorted({index for job in jobs for index in job.gpus})
-    parts = ["GPU{} {}".format("s" if len(used) > 1 else "", ranges(used)), "{:.1f}G".format(sum(j.mem for j in jobs))]
+    parts = [gpu_numbers(index for job in jobs for index in job.gpus), "{:.1f}G".format(sum(j.mem for j in jobs))]
     ours = sum(job.owner is None for job in jobs)
     parts += ["{} yours".format(ours)] if 0 < ours < len(jobs) else []
     return [(" · ".join(parts), DIM)]
@@ -1647,20 +1652,23 @@ class View:
         return footer(width, newer, self.picker(gpus))
 
     def question(self, picked):
-        """"stop train.py: SIGTERM to its torchrun (PID 48213), which ends its 2 workers?" and the like; for
-        several jobs "stop your 2 of 3 jobs, SIGTERM to each: train.py, eval.py?"."""
+        """"stop train.py on GPUs 4-5: SIGTERM to its torchrun (PID 48213), which ends its 2 workers?" and the
+        like; for several jobs "stop your 2 of 3 jobs on GPUs 4-5,7, SIGTERM to each: train.py, eval.py?". The
+        GPUs are those the signal reaches, whichever was clicked."""
         what = "stop" if self.asking == "SIGTERM" else "kill"
         ours = [job for job in picked if job.owner is None]
+        where = "on " + gpu_numbers(index for job in ours for index in job.gpus)
         if len(picked) > 1:
             which = "{} jobs".format(len(ours)) if len(ours) == len(picked) else "your {} of {} jobs".format(
                 len(ours), len(picked))
-            return "{} {}, {} to each: {}?".format(what, which, self.asking, ", ".join(job.name for job in ours))
+            return "{} {} {}, {} to each: {}?".format(what, which, where, self.asking,
+                                                     ", ".join(job.name for job in ours))
         job = ours[0]
         if not job.launcher:
-            return "{} {} (PID {}) with {}?".format(what, job.name, job.pid, self.asking)
+            return "{} {} {} (PID {}) with {}?".format(what, job.name, where, job.pid, self.asking)
         passed = ", which ends its" if self.asking == "SIGTERM" else " and to its"
-        return "{} {}: {} to its {} (PID {}){} {} workers?".format(what, job.name, self.asking, job.launcher,
-                                                                  job.pid, passed, len(job.members))
+        return "{} {} {}: {} to its {} (PID {}){} {} workers?".format(what, job.name, where, self.asking,
+                                                                     job.launcher, job.pid, passed, len(job.members))
 
     def target(self, row, col):
         """What a click at (row, col) of the last screen means; None for nothing."""

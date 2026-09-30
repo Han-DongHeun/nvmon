@@ -39,6 +39,10 @@ ssh -t HOST nvmon  # over ssh: -t gives it a terminal
 The bottom line has the GPU numbers (click one, or press its key, to hide or show it), the keys, and a
 newer release when there is one.
 
+Pointing at a graph, 12 seconds back:
+
+<img src="https://raw.githubusercontent.com/Han-DongHeun/nvmon/main/docs/hover.png" alt="the pointer over a graph, a chip beside it saying 70% · 12s ago" width="530">
+
 ## Views: `v`
 
 `v` goes through four views, `V` back. What does not fit scrolls (wheel, PgUp/PgDn).
@@ -98,6 +102,7 @@ The list, busiest first, one job picked; and that job with `f`:
 | `v` / `V` | next / previous view |
 | `c` / `C` | next / previous theme |
 | `p` | process list, open or close |
+| point at a graph | its value then |
 | click, Tab, ↑ ↓ | pick a job |
 | click a GPU | pick its jobs |
 | `f`, double click | only the picked jobs' GPUs, or all |

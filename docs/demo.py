@@ -36,13 +36,25 @@ def focus(view):
     view.only = True
 
 
+HOVER_W = 100
+
+
+def hover(view):
+    """A GPU of the biggest job alone, the pointer over its graph, some 12 s back."""
+    shown = next(job for job in view.jobs if job.pid == biggest_job(view)).gpus[0]
+    view.hidden = {index for index in view.indices if index != shown}
+    room = HOVER_W - nvmon.CHROME_W - nvmon.INFO_W  # its graph, once alone: columns 2 on, rows 2 on
+    view.pointer = (3, 2 + room - 25)
+
+
 def numbers(view):
     view.left, view.gpu_top = "numbers", 10  # scrolled down to the last GPUs, the busy ones
 
 
 # (file, columns, rows, what is set on the view). The cards' windows are as narrow as the cards, as a window
 # kept beside another; the numbers' window too short for all eight, the brief ones' just tall enough.
-STILLS = [("view-graphs.png", 160, 31, lambda view: None),  # too short for eight one under the other
+STILLS = [("hover.png", HOVER_W, nvmon.MAX_INNER_H + 4, hover),
+          ("view-graphs.png", 160, 31, lambda view: None),  # too short for eight one under the other
           ("view-processes.png", 160, 31, lambda view: setattr(view, "left", "processes")),
           ("view-numbers.png", nvmon.CARD_W, 31, numbers),
           ("view-brief.png", nvmon.CARD_W, 8 * (nvmon.MIN_INNER_H + 2) + 2,

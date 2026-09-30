@@ -79,26 +79,29 @@ def anonymize():
     nvmon.__version__ = nvmon.__version__.split("+")[0]  # as released, not "+dev"
 
 
-STEPS = 4  # frames a half second while the pointer moves, as nvmon redraws on each move
+STEPS = 6  # frames a half second while the pointer is in, as nvmon redraws on each move
 
 
-def pointer_path(view):
-    """Where the pointer goes in the GIF, as (seconds, (row, column)) keyframes: in over the second box's
-    numbers, left along its graph, a rest there, then down and out of the window."""
-    rows, cols, _ = view.graphs[min(1, len(view.graphs) - 1)]
-    mid, right = rows.start + len(rows) // 2, cols.stop
-    return [(4.0, (mid + 1, right + 20)), (5.0, (mid, right - 4)), (8.5, (mid, right - 40)),
-            (10.0, (mid, right - 40)), (11.5, (rows.stop + 6, right - 20)), (12.5, (rows.stop + 14, right - 10))]
+def pointer_path(view, cols):
+    """Where the pointer goes in the GIF, as (seconds, (row, column), bow) keyframes: in from the right, onto
+    the second box's graph, left along it, a rest, a little further, then out to the right again. Each way
+    there bends by `bow` rows, as a hand's does."""
+    rows, graph, _ = view.graphs[min(1, len(view.graphs) - 1)]
+    mid, right = rows.start + len(rows) // 2, graph.stop
+    return [(1.5, (mid + 3.5, cols + 2), 0), (2.7, (mid + 0.4, right - 5), -1.5), (4.8, (mid - 0.3, right - 33), 0.6),
+            (5.6, (mid - 0.3, right - 33), 0), (6.3, (mid + 0.5, right - 41), 0.4), (8.0, (mid - 2, cols + 3), -2)]
 
 
 def along(path, t):
-    """The pointer's (row, column) at `t` seconds on `path`, or None when it is not in the window."""
+    """The pointer's (row, column) at `t` seconds on `path`, or None before and after: each way eased in and
+    out, as a hand starts and stops, and bent by its bow."""
     if not path or not path[0][0] <= t <= path[-1][0]:
         return None
-    for (t0, a), (t1, b) in zip(path, path[1:]):
+    for (t0, a, _), (t1, b, bow) in zip(path, path[1:]):
         if t0 <= t <= t1:
-            share = (t - t0) / (t1 - t0) if t1 > t0 else 0
-            return tuple(x + (y - x) * share for x, y in zip(a, b))
+            u = (t - t0) / (t1 - t0) if t1 > t0 else 1
+            eased = u * u * (3 - 2 * u)
+            return (a[0] + (b[0] - a[0]) * eased + bow * math.sin(math.pi * eased), a[1] + (b[1] - a[1]) * eased)
     return None
 
 
@@ -125,12 +128,13 @@ def record(seconds, warm_up=70):
                 busiest = sorted(gpus, key=lambda gpu: -sum(gpu.history))[:SHOWN]
                 view.hidden = {gpu.index for gpu in gpus if gpu not in busiest}
                 view.screen(gpus, cols, rows, [], None)  # where the graphs are, for the pointer's path
-                paths[name] = pointer_path(view)
+                paths[name] = pointer_path(view, cols)
             moving = any(along(paths[name], tick / 2 + s / 2 / STEPS) for s in range(STEPS))
             steps = STEPS if moving else 1
             for s in range(steps):
                 at = along(paths[name], tick / 2 + s / 2 / steps)
-                view.pointer = (round(at[0]), round(at[1])) if at else None
+                cell = at and (round(at[0]), round(at[1]))  # outside the window the terminal says nothing
+                view.pointer = cell if cell and 0 <= cell[0] < rows and 0 <= cell[1] < cols else None
                 lines = view.screen(gpus, cols, rows, nvmon.header(cols, 0.5, driver), None)
                 frames[name].append((lines, at, 500 // steps))
         time.sleep(max(0, 0.5 - (time.monotonic() - start)))
@@ -252,7 +256,7 @@ def stills(gpus, driver, fonts, here):
 
 
 def main():
-    seconds = float(sys.argv[1]) if len(sys.argv) > 1 else 20
+    seconds = float(sys.argv[1]) if len(sys.argv) > 1 else 10
     anonymize()
     frames, gpus, driver = record(seconds)
     fonts = {False: ImageFont.truetype(FONT.format(""), SIZE), True: ImageFont.truetype(FONT.format("-Bold"), SIZE)}

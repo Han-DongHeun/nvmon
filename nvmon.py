@@ -1440,6 +1440,7 @@ class View:
         self.job = None                   # of them the one in focus: the arrows go on from it, ← → move its command
         self.only = False                 # show only the GPUs they use
         self.listing = False              # the process list is open
+        self.opened = False               # by a pick, and so to close when the picks are let go
         self.top, self.follow = 0, True   # the list's first job; keep the one in focus in view
         self.sort = ("GPUs", False)       # the list's order, and the order Tab and the arrows go in
         self.asking = None                # "SIGTERM" or "SIGKILL" awaiting y or n
@@ -1470,11 +1471,14 @@ class View:
         return {"left": self.left, "theme": self.theme.name, "sort": self.sort, "hidden": set(self.hidden)}
 
     def pick(self, pids):
-        """Pick the jobs `pids`, in the list's order, the first in focus; none lets all go."""
+        """Pick the jobs `pids`, in the list's order, the first in focus; none lets all go, and closes the
+        list if a pick opened it."""
         self.picked = set(pids)
         self.job = next((job.pid for job in self.jobs if job.pid in self.picked), None)
         if not self.picked:
             self.only = False
+            self.listing = self.listing and not self.opened
+            self.opened = False
 
     def selected(self):
         """The picked jobs, in the list's order."""
@@ -1731,6 +1735,7 @@ class View:
                 self.pick(())
             else:
                 self.pick(pids)
+                self.opened = self.opened or not self.listing
                 self.listing = True
             return True
         key = value[0].lower() if len(value[0]) == 1 else value[0]
@@ -1750,8 +1755,8 @@ class View:
                 self.pick(())
             else:
                 return False
-        elif key == "p":
-            self.listing = not self.listing
+        elif key == "p":  # opened or closed by hand, the list stays so when the picks go
+            self.listing, self.opened = not self.listing, False
         elif key == "v":  # the graph, the processes, the stats alone, GPU and MEM alone; V the one before
             self.left = LEFTS[(LEFTS.index(self.left) + (-1 if value[0] == "V" else 1)) % len(LEFTS)]
             name = {"graph": "graphs", "processes": "processes", "numbers": "numbers only",

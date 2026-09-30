@@ -65,7 +65,8 @@ A **job** is a process, or a launcher (torchrun, deepspeed…) with its workers.
 
 - **Pick** one: click a process, or press Tab (Tab and the arrows move on). Its GPUs stand out, the
   list opens with it picked, and the bottom line sums it up.
-- **Pick a GPU's jobs**: click anywhere else in its box. The same again lets go.
+- **Pick a GPU's jobs**: click anywhere else in its box. The same again lets go, and closes the list it
+  opened.
 - `f`, or a double click: only the picked jobs' GPUs; again for all.
 - `p`: every job in a list. Click a heading to sort, again to reverse (or `s`, `r`). ← → scroll the
   picked job's command. Esc, or a click on an empty spot, lets go.

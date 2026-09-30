@@ -109,9 +109,11 @@ def restyle(style, mode, gray=False):
 
 def color_mode(truecolor):
     """"truecolor" where the terminal is known to show 24-bit color (it said so, see Screen.probe, or
-    COLORTERM does), else "256": every terminal of today shows those, and they look nearly the same, while
-    24-bit color where it is not understood comes out in odd colors."""
-    return "truecolor" if truecolor or os.environ.get("COLORTERM") in ("truecolor", "24bit") else "256"
+    COLORTERM does, or LC_TERMINAL, which iTerm2 sets and ssh passes on), else "256": every terminal of today
+    shows those, and they look nearly the same, while 24-bit color where it is not understood comes out in
+    odd colors."""
+    known = os.environ.get("COLORTERM") in ("truecolor", "24bit") or os.environ.get("LC_TERMINAL") == "iTerm2"
+    return "truecolor" if truecolor or known else "256"
 
 
 def _gradient(stops):
@@ -1674,6 +1676,20 @@ def events(data):
 WINDOWS_KEYS = {"H": "up", "P": "down", "K": "left", "M": "right", "G": "home", "O": "end", "I": "pgup", "Q": "pgdn", "\x0f": "backtab"}
 
 
+# What a terminal that shows 24-bit color answers to Screen.probe; one is enough. Anything else, no answer
+# included, means 256 colors, as for NetSarang Xshell (24-bit color is off there unless turned on), PuTTY
+# before 0.71, Tera Term, macOS Terminal before macOS 26.
+TRUECOLOR_ANSWERS = re.compile(
+    # DECRQSS: the color set kept as it was, in any of the forms seen: 38;2;1;2;3, 38:2::1:2:3 (Windows
+    # Terminal, VTE, Ghostty), 38:2:1:2:3 (kitty), 38:2:1:1:2:3 (iTerm2)
+    rb"\x1bP1\$r[0-9;:]*38[;:]2[;:](?:\d*[;:])?1[;:]2[;:]3m"
+    rb"|\x1bP1\+r(?:524742|5463)"  # XTGETTCAP: RGB or Tc in its terminfo
+    rb"|\x1bP>\|(?:xterm\.js|kitty|WezTerm|iTerm2|VTE|Konsole|ghostty|foot|contour|Rio|mintty|tmux)"  # XTVERSION
+    # DA2: xterm.js (Tabby, VS Code; it answers DECRQSS with 0m whatever is set), Windows Terminal and
+    # Alacritty, Konsole, VTE, kitty, WezTerm, iTerm2, tmux
+    rb"|\x1b\[>(?:0;276;0|0;\d+;1|[01];115;0|6[15];\d+;1|1;4\d{3};\d+|1;277;0|64;2500;0|84;0;0)c")
+
+
 class Screen:
     """Alternate screen, hidden cursor, no auto-wrap, unbuffered keys, mouse clicks and wheel; all
     restored on exit."""
@@ -1690,14 +1706,15 @@ class Screen:
 
     def probe(self):
         """(wide, truecolor), as the terminal answers: whether it draws a line character two cells wide, and
-        whether it keeps a 24-bit color. Every terminal answers the last question, DA1, so that answer ends
-        the wait, a round trip even over ssh; but for the answer on the color, which may come after it: the
-        ConPTY between Windows's ssh and Windows Terminal answers DA1 itself at once and passes DECRQSS on.
-        xterm.js (Tabby, VS Code) shows 24-bit color but answers DECRQSS with "0m" whatever is set; it is
-        told by that together with its own DA2 answer, ">0;276;0". No answer within a second means neither."""
+        whether it shows 24-bit color (TRUECOLOR_ANSWERS). Every terminal answers the last question, DA1, so
+        that answer ends the wait, a round trip even over ssh; the answer on the color was seen to come after
+        it (Windows Terminal over Windows's ssh), so for that a quarter second more. No answer within a second
+        means neither."""
         self._write("\x1b[H─\x1b[6n"                  # where the cursor is after one line character
+                    "\x1b[>c\x1b[>0q"                 # DA2 and XTVERSION: which terminal this is
+                    "\x1bP+q524742;5463\x1b\\"        # XTGETTCAP: whether its terminfo has RGB or Tc
                     "\x1b[38;2;1;2;3m\x1bP$qm\x1b\\"  # DECRQSS: the color set now, as the terminal kept it
-                    + RESET + "\x1b[>c\x1b[c")          # DA2: which terminal; DA1: what kind, answered last
+                    + RESET + "\x1b[c")                 # DA1, answered last
         import select
         fd, data, end = sys.stdin.fileno(), b"", time.monotonic() + 1
         answered = False  # DA1 is in
@@ -1714,10 +1731,7 @@ class Screen:
                 break
             data += more
         cursor = re.search(rb"\x1b\[\d+;(\d+)R", data)
-        color = re.search(rb"\x1bP1\$r([0-9;:]*)m", data)
-        kept = bool(color) and bool(re.search(rb"38[;:]2[;:]+1[;:]2[;:]3", color.group(1)))
-        xterm_js = b"\x1b[>0;276;0c" in data and bool(color) and color.group(1) == b"0"
-        return bool(cursor) and int(cursor.group(1)) > 2, kept or xterm_js
+        return bool(cursor) and int(cursor.group(1)) > 2, bool(TRUECOLOR_ANSWERS.search(data))
 
     def __exit__(self, *exc):
         self._write(RESET + ("\x1b[?1006l\x1b[?1000l" if self._mouse else "") + "\x1b[?7h\x1b[?25h\x1b[?1049l")

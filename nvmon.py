@@ -1136,21 +1136,24 @@ def process_lines(processes, room, height, selected=None, index=None, top=0, shi
     line `top` on and `shift` cells in (see listing_extent), and the label for the box's bottom edge: which
     lines show of how many, when not all do, and "+", which clicked opens the process list at GPU `index`."""
     lines = process_listing(processes, selected)
-    # Sideways the command moves; run time and memory, the first segment, stay.
+    # Sideways the command moves; account, run time and memory, the first segment, stay.
     shown = [pad(clip(line[:1] + skip(line[1:], shift), room), room) for line in lines[top:top + height]]
     label = [("{}-{} of {}  ".format(top + 1, top + len(shown), len(lines)), DIM)] if len(lines) > height else []
     return shown + [[(" " * room, "")]] * (height - len(shown)), label + [("+", DIM, ("list", index))]
 
 
 def process_listing(processes, selected=None):
-    """process_lines's lines, whole: run time and memory in columns of their own (one segment), then the
-    command line, "  2d5h  26.1G  kim/torch: train.py --config a.yaml"."""
+    """process_lines's lines, whole: account and environment, run time and memory in columns (one segment),
+    then the command line, the name in the process names' color: "kim/torch:  2d5h  26.1G  train.py --lr 3"."""
+    entries = process_entries(processes)
+    tag_w = max([0] + [len(tag) + 1 for tag, _ in entries])  # the longest "kim/torch:", when any has one
     lines = []
-    for tag, process in process_entries(processes):
+    for tag, process in entries:
         command = process.command
         rest = command[len(process.name):] if command.startswith(process.name) else " " + command
-        lines.append([("{:>6} {:>6}  ".format(run_time(process), memory(process)), DIM, process.job)]
-                     + ([(tag + ": ", DIM)] if tag else []) + [process_name(process, selected), (rest, "", process.job)])
+        columns = ("{:<{}}  ".format(tag + ":" if tag else "", tag_w) if tag_w else "") + "{:>6} {:>6}  ".format(
+            run_time(process), memory(process))
+        lines.append([(columns, DIM, process.job), process_name(process, selected), (rest, "", process.job)])
     return lines
 
 

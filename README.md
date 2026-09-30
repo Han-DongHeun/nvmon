@@ -1,18 +1,16 @@
 # nvmon
 
-A fancy NVIDIA GPU monitor for the terminal. Single Python file, no dependencies.
+A fancy NVIDIA GPU monitor for the terminal. One Python file, no dependencies.
 
 ![nvmon showing four busy H100 GPUs one under the other, the other four hidden](https://raw.githubusercontent.com/Han-DongHeun/nvmon/main/docs/demo-wide.gif)
 
 ## Install
 
 ```bash
-uv tool install nvmon    # or: pipx install nvmon
+uv tool install nvmon    # or: pipx install nvmon, pip install nvmon
 ```
 
-No uv? [Install it](https://docs.astral.sh/uv/getting-started/installation/), or use `pip install nvmon`
-inside whichever environment you use. On a server without internet, copy `nvmon.py` over and run it with
-any Python 3.6+.
+Server without internet: copy `nvmon.py` over and run it with Python 3.6+.
 
 ## Start
 
@@ -25,72 +23,65 @@ ssh -t HOST nvmon  # over ssh: -t gives it a terminal
 
 ## Reading a box
 
-Each GPU gets a box:
+- **Top edge**: number and name, power against its limit, temperature, fan (if any), clock. Warnings
+  only when something is off: `SLOWED: power cap | too hot | hw brake`, `PCIe DEGRADED: x16 -> x8`.
+- **Graph**: utilization over time, newest on the right.
+- **GPU**: how much of the time a kernel ran. **cores / tensor** (H100 and newer): how busy that kept
+  the chip, and how much was Tensor Core math. One small kernel running nonstop reads GPU 100 % with
+  cores at 30 %.
+- **MEM**: memory in use. **CPU -> GPU**, **GPU -> CPU**: PCIe traffic against the link's top speed.
+- **Bottom edge**: the processes, with run time and memory, by account and conda environment (yours
+  unlabelled). `+` opens the process list.
 
-- **Top edge**: the GPU's number and name, power drawn against its limit, temperature, fan and clock.
-  Warnings show here only when something is off: `SLOWED: power cap | too hot | hw brake` when the clock
-  is held back, `PCIe DEGRADED: x16 -> x8` when the card runs on fewer lanes than it supports.
-- **Graph**: utilization over time, the newest on the right, 0 % at the bottom and 100 % at the top.
-- **GPU**: how much of the time something ran on it. **cores / tensor** (H100 and newer): how much of
-  the chip that work kept busy, and how much of it was matrix math on the Tensor Cores. A GPU reads
-  100 % as soon as one small kernel runs all the time, while its cores may sit at 30 %.
-- **MEM**: memory in use. **CPU -> GPU** and **GPU -> CPU**: data sent over PCIe, against the link's
-  top speed.
-- **Bottom edge**: the processes on the GPU with run time and memory, grouped by account and conda
-  environment (your own account unlabelled). `+` opens the process list at this GPU.
-
-The bottom line has the GPU numbers (click one, or press its key, to hide that GPU or show it again)
-and the keys; a newer release, when there is one, with the command that updates your install.
+The bottom line has the GPU numbers (click one, or press its key, to hide or show it), the keys, and a
+newer release when there is one.
 
 ## Views: `v`
 
-`v` goes through four views, `V` back. What does not fit the window scrolls (wheel, PgUp/PgDn).
+`v` goes through four views, `V` back. What does not fit scrolls (wheel, PgUp/PgDn).
 
-**Graphs**, as above: one under the other, two side by side only when they would not all fit, and in a
-small window shorter. The same eight GPUs in a window 31 lines tall:
+**Graphs**: one under the other; two columns only when they would not fit, as here with eight GPUs in
+31 lines.
 
 ![nvmon with eight graphs in two columns](https://raw.githubusercontent.com/Han-DongHeun/nvmon/main/docs/view-graphs.png)
 
-**Processes** in the graph's place, one a line: account, run time, memory, and the command line. The
-wheel over them scrolls them up and down; tilted, or with Shift, sideways, as do ← and →.
+**Processes** in the graph's place: account, run time, memory, command. The wheel scrolls them;
+Shift+wheel or ← → sideways.
 
 ![nvmon with each GPU's processes in place of its graph](https://raw.githubusercontent.com/Han-DongHeun/nvmon/main/docs/view-processes.png)
 
-**Numbers only**, and **GPU and MEM only**: narrow boxes, always one under the other, for a window kept
-beside another. Here the numbers scrolled down to the last four GPUs, and GPU and MEM for all eight:
+**Numbers only** and **GPU and MEM only**: narrow, always one column, for a window beside another.
 
 ![nvmon with the numbers alone](https://raw.githubusercontent.com/Han-DongHeun/nvmon/main/docs/view-numbers.png)
 ![nvmon with GPU and MEM alone](https://raw.githubusercontent.com/Han-DongHeun/nvmon/main/docs/view-brief.png)
 
 ## Processes and jobs: `p`
 
-A **job** is what runs as one: a launcher's workers (torchrun, deepspeed…) count as one job, a process on
-its own is one too.
+A **job** is a process, or a launcher (torchrun, deepspeed…) with its workers.
 
-- **Pick** a job: click one of its processes, or press Tab (Tab and the arrows go on to the next). The
-  GPUs it uses stand out, the others fade, and the bottom line tells about it: account, GPUs,
-  utilization, memory, run time, launcher.
-- `f` shows only the GPUs the picked job uses, `f` again all of them; a double click does the same.
-- `p` lists every job: PID, account, GPUs, utilization, memory, run time, command line. Click a heading
-  to sort by it, again the other way round (or `s` for the next heading, `r` to reverse). ← and →
-  scroll the picked job's command. Click an empty spot, or press Esc, to let go.
-- `t` asks a job of yours to stop (SIGTERM: it may save and exit), `k` ends it at once (SIGKILL); both
-  ask for a `y` first, and nvmon checks the job is still the one you picked.
+- **Pick** one: click a process, or press Tab (Tab and the arrows move on). Its GPUs stand out, and the
+  bottom line sums it up.
+- `f`, or a double click: only its GPUs; again for all.
+- `p`: every job in a list. Click a heading to sort, again to reverse (or `s`, `r`). ← → scroll the
+  picked job's command. Esc, or a click on an empty spot, lets go.
+- `t` stops a job of yours (SIGTERM), `k` kills it (SIGKILL): each after a `y`, and only if it is still
+  the job you picked.
 
-The list, with the busiest job first and one picked:
+The list, busiest first, one job picked; and that job with `f`:
 
 ![nvmon with the process list open and a torchrun job picked](https://raw.githubusercontent.com/Han-DongHeun/nvmon/main/docs/list.png)
-
-The same job with `f`, its GPUs only:
 
 ![nvmon showing only the two GPUs of the picked job](https://raw.githubusercontent.com/Han-DongHeun/nvmon/main/docs/focus.png)
 
 ## Themes: `c`
 
-`c` goes through the themes, `C` back: nvmon's own; palettes from works by Hiroshige, Hokusai, O'Keeffe,
-Van Gogh, Bénédictus and Cassatt (as [MetBrewer](https://github.com/BlakeRMills/MetBrewer) has them);
-the [Rosé Pine](https://rosepinetheme.com) theme's; black and white, grays as light as the colors; and
-black on white, the boxes on white, the busiest bars the darkest.
+`c` goes through the themes, `C` back:
+
+- **nvmon**, the default
+- **Hiroshige, Hokusai, O'Keeffe, Van Gogh, Bénédictus, Cassatt**: their paintings' palettes, from
+  [MetBrewer](https://github.com/BlakeRMills/MetBrewer)
+- **Rosé Pine**, from the [editor theme](https://rosepinetheme.com)
+- **black and white**, and **black on white**
 
 ![nvmon's themes, one box in each](https://raw.githubusercontent.com/Han-DongHeun/nvmon/main/docs/themes.png)
 
@@ -98,38 +89,34 @@ black on white, the boxes on white, the busiest bars the darkest.
 
 | Key | Does |
 |---|---|
-| `v` / `V` | next / previous view: graphs, processes, numbers only, GPU and MEM only |
+| `v` / `V` | next / previous view |
 | `c` / `C` | next / previous theme |
-| `p` | the process list, open or closed |
+| `p` | process list, open or close |
 | click, Tab, ↑ ↓ | pick a job |
-| `f`, double click | only the picked job's GPUs, or all again |
+| `f`, double click | only the picked job's GPUs, or all |
 | `t`, `k`, then `y` | stop (SIGTERM) or kill (SIGKILL) the picked job |
-| click a heading, `s`, `r` | sort the list by it, by the next heading, the other way round |
-| wheel, ← → | scroll the processes, the list, the GPUs; sideways the commands |
+| click a heading, `s`, `r` | sort the list, by the next heading, the other way |
+| wheel, ← → | scroll; sideways the commands |
 | PgUp, PgDn | scroll the GPUs |
-| `0`-`9`, click a number | hide a GPU, or show it again |
-| Esc | a step back: all GPUs, the list closed, no job picked, then quit |
+| `0`-`9`, click a number | hide or show a GPU |
+| Esc | a step back, then quit |
 | `q`, Ctrl+C | quit |
 
-The keys work with a Korean keyboard in Hangul mode too (ㅂ quits). Hold Shift to select text with the
-mouse.
+Korean Hangul mode works too (ㅂ quits). Hold Shift to select text.
 
 ## It remembers
 
-The view, the theme, the list's order and the GPUs hidden stay for the next run, for each computer you
-connect from (the address ssh comes from), in `~/.config/nvmon/settings.json`. Delete the file to start
-afresh.
+The view, theme, list order and hidden GPUs, for each computer you connect from, in
+`~/.config/nvmon/settings.json` (`%APPDATA%\nvmon` on Windows). Delete it to start afresh.
 
 ## Terminals
 
-- nvmon asks the terminal how it draws. One that puts line and block characters two cells wide (Xshell,
-  PuTTY and the like, set up for Korean, Chinese or Japanese) gets boxes and graphs drawn in ASCII. One
-  that does not say it shows 24-bit color gets 256 colors, which look nearly the same.
-- Boxes still broken: the terminal moves on one cell, but its font draws the characters two wide. Pick a
-  font whose line characters are one cell wide (D2Coding, Cascadia Mono, JetBrains Mono, DejaVu Sans
-  Mono), and make sure the encoding is UTF-8.
-- On Windows, run it in Windows Terminal; Git Bash's default window is not a terminal to Python.
-- nvmon asks PyPI once at start whether a newer release is out; `NVMON_NO_UPDATE_CHECK=1` turns that off.
+- Line characters drawn two cells wide (Xshell, PuTTY and the like, set up for Korean, Chinese or
+  Japanese): nvmon notices and draws in ASCII. No 24-bit color reported: 256 colors.
+- Boxes still broken: use a font with one-cell line characters (D2Coding, Cascadia Mono, JetBrains Mono,
+  DejaVu Sans Mono) and UTF-8.
+- Windows: use Windows Terminal. There is no mouse, and no `t` / `k`.
+- nvmon asks PyPI once at start for a newer release; `NVMON_NO_UPDATE_CHECK=1` turns that off.
 
 ## License
 

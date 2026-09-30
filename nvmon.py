@@ -1189,7 +1189,7 @@ def bottom_edge(width, split, label):
 MIN_INNER_H = 2  # the shortest a box gets; when even that leaves GPUs out, the boxes scroll
 
 
-# What g goes through: the graph beside the stats, the processes there, the stats alone (a box the stats and
+# What v goes through (V back): the graph beside the stats, the processes there, the stats alone (a box the stats and
 # their borders wide), and of them GPU and MEM alone ("brief", two lines).
 LEFTS = ("graph", "processes", "numbers", "brief")
 CARDS = ("numbers", "brief")
@@ -1350,7 +1350,7 @@ def footer(width, newer=None, picker=()):
         notice = ([("   ", "")] if picker else []) + [("update available: " + version, THEME.accent)]
         how = [(" ({})".format(command or "new nvmon.py: " + RELEASES), "")]
         link = [("   what's new: " + RELEASES, DIM)] if command else []  # a copied nvmon.py already links there
-    every = keys(("g", "view"), ("c", "theme"), ("p", "processes"), ("Esc / q", "quit"))
+    every = keys(("v", "view"), ("c", "colors"), ("p", "processes"), ("Esc / q", "quit"))
     few = keys(("p", "processes"), ("Esc / q", "quit"))
     # As much as fits: the link goes first, then how to update, the keys for view and theme, the picker.
     options = [(picker + notice + how + link, every), (picker + notice + how, every), (picker + notice + how, few),
@@ -1370,7 +1370,7 @@ class View:
     def __init__(self):
         self.shows = "truecolor"          # the colors the terminal shows, see color_mode
         self.theme = THEMES[0]            # the look, see THEMES (c)
-        self.left = "graph"               # what the boxes have beside the stats, see LEFTS (g)
+        self.left = "graph"               # what the boxes have beside the stats, see LEFTS (v)
         self.hidden, self.indices = set(), []  # the GPUs left out, and all there are
         self.job = None                   # the selected job's PID
         self.only = False                 # show only the GPUs it uses
@@ -1595,8 +1595,8 @@ class View:
                 return False
         elif key == "p":
             self.listing = not self.listing
-        elif key == "g":  # the graph, the processes, the stats alone, GPU and MEM alone
-            self.left = LEFTS[(LEFTS.index(self.left) + 1) % len(LEFTS)]
+        elif key == "v":  # the graph, the processes, the stats alone, GPU and MEM alone; V the one before
+            self.left = LEFTS[(LEFTS.index(self.left) + (-1 if value[0] == "V" else 1)) % len(LEFTS)]
             name = {"graph": "graphs", "processes": "processes", "numbers": "numbers only",
                     "brief": "GPU and MEM only"}[self.left]
             self.note = ([("view: " + name, "")], time.monotonic() + 2)

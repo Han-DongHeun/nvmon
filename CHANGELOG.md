@@ -11,7 +11,7 @@ What changes for you in each release. The same notes appear on the
   same. `p` lists every job with its utilization and command line, sorted by whichever heading you click;
   a click on an empty spot closes it. A picked job's utilization shows at once.
 - Hide GPUs you don't need: click their numbers at the bottom left, or press the number's key; again
-  to show them. `g` goes from the graphs to each GPU's processes in their place (run time, memory, the command line;
+  to show them. `v` (`V` back) goes from the graphs to each GPU's processes in their place (run time, memory, the command line;
   the wheel scrolls them up and down or sideways, as do ← →) to the numbers alone, and to GPU and MEM
   alone, the boxes one under the other then, side by side only when they would not fit.
 - Works in Xshell, PuTTY and the like without setting them up: nvmon asks the terminal how it draws.

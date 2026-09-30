@@ -70,7 +70,7 @@ def record(seconds, warm_up=70):
                 view.screen(gpus, cols, rows, [], None)
                 view.listing = True
                 view.job = max(view.jobs, key=lambda job: (job.launcher is not None, job.mem)).pid
-            view.graphs = mode != "cards"
+            view.left = "processes" if mode == "cards" else "graph"
             frames[name].append(view.screen(gpus, cols, rows, nvmon.header(cols, 0.5, driver), None))
         time.sleep(max(0, 0.5 - (time.monotonic() - start)))
     return frames, gpus

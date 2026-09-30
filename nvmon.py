@@ -1004,10 +1004,10 @@ def degraded(gpu):
     return bool(s.pcie_width and gpu.pcie_max_width and s.pcie_width < gpu.pcie_max_width)
 
 
-def panel(gpu, width, height, selected=None, graphs=True, scroll=(0, 0)):
-    """One GPU's box: the utilization graph or, without `graphs`, the GPU's processes one a line, moved
-    `scroll` = (lines, cells) on (see process_lines), beside the stats; faded when a job is `selected` and it
-    does not run here."""
+def panel(gpu, width, height, selected=None, left="graph", scroll=(0, 0)):
+    """One GPU's box: beside the stats, as `left` says (see LEFTS), the utilization graph, or the GPU's
+    processes one a line, moved `scroll` = (lines, cells) on (see process_lines); or the stats alone. Faded
+    when a job is `selected` and it does not run here."""
     s = gpu.now
     faded = selected is not None and not any(p.job == selected for p in s.processes)
     # Both sides as (segments, rank); when space runs out the lowest rank goes first:
@@ -1023,16 +1023,22 @@ def panel(gpu, width, height, selected=None, graphs=True, scroll=(0, 0)):
     parts += [] if s.fan is None else [([("FAN {:>3}%".format(s.fan), "")], 1)]
     parts += [] if s.clock is None else [([("{:>4} MHz".format(s.clock), s.slowdown[1] if s.slowdown else "")], 4)]
     top = edge(width, label, parts)
-    graph_w = max(0, width - CHROME_W - INFO_W)
-    split = 2 + graph_w + 1  # column of the graph | stats divider
-    rule = [(" ├" + "─" * (INFO_W + 2) + "┤", DIM)]  # across the stats, joined to the borders
-    if graphs:
-        left = graph(gpu.history, graph_w, height, not faded)
+    if left == "none":
+        split = width - 1  # the processes take the whole bottom edge
+        body = [[("├" + "─" * (width - 2) + "┤", DIM)] if i is None else [("│ ", DIM)] + i + [(" │", DIM)]
+                for i in info(gpu, height)]
         label = process_label(s.processes, split - 4, selected, gpu.index)
     else:
-        left, label = process_lines(s.processes, graph_w, height, selected, gpu.index, *scroll)
-    body = [[("│ ", DIM)] + g + (rule if i is None else [(" │ ", DIM)] + i + [(" │", DIM)])
-            for g, i in zip(left, info(gpu, height))]
+        graph_w = max(0, width - CHROME_W - INFO_W)
+        split = 2 + graph_w + 1  # column of the graph | stats divider
+        rule = [(" ├" + "─" * (INFO_W + 2) + "┤", DIM)]  # across the stats, joined to the borders
+        if left == "graph":
+            beside = graph(gpu.history, graph_w, height, not faded)
+            label = process_label(s.processes, split - 4, selected, gpu.index)
+        else:
+            beside, label = process_lines(s.processes, graph_w, height, selected, gpu.index, *scroll)
+        body = [[("│ ", DIM)] + g + (rule if i is None else [(" │ ", DIM)] + i + [(" │", DIM)])
+                for g, i in zip(beside, info(gpu, height))]
     lines = [top] + body + [bottom_edge(width, split, label)]
     if not faded:
         return lines
@@ -1075,26 +1081,30 @@ def elapsed(started):
     return "{}d{}h".format(s // 86400, s % 86400 // 3600)
 
 
-def process_entries(processes, selected=None):
+def process_entries(processes):
     """Processes grouped by owner and conda environment, groups and processes by memory, biggest first, as
-    (tag, segments, arguments): the tag "kim/torch", "" for our own processes; the segments the name, which
-    when clicked means its job (the `selected` job's reversed), then run time and memory; the arguments its
-    command line has after the name."""
+    (tag, process): the tag "kim/torch", "" for our own processes."""
     def mem(process):
         return process.mem or 0
     groups = {}
     for process in sorted(processes, key=mem, reverse=True):
         groups.setdefault((process.owner, process.env), []).append(process)
-    entries = []
-    for (owner, env), group in sorted(groups.items(), key=lambda item: sum(map(mem, item[1])), reverse=True):
-        tag = "/".join(part for part in (owner, env) if part)
-        for process in group:
-            details = [elapsed(process.started)] if process.started is not None else []
-            details += [] if process.mem is None else ["{:.1f}G".format(process.mem)]
-            name = (process.name, THEME.selected if process.job == selected else THEME.accent, process.job)
-            entries.append((tag, [name] + ([(" " + " ".join(details), DIM, process.job)] if details else []),
-                            process.command[len(process.name):].strip()))
-    return entries
+    return [("/".join(part for part in (owner, env) if part), process)
+            for (owner, env), group in sorted(groups.items(), key=lambda item: sum(map(mem, item[1])), reverse=True)
+            for process in group]
+
+
+def process_name(process, selected=None):
+    """The segment of `process`'s name: clicked, it means its job; the `selected` job's is reversed."""
+    return process.name, THEME.selected if process.job == selected else THEME.accent, process.job
+
+
+def run_time(process):
+    return elapsed(process.started) if process.started is not None else "-"
+
+
+def memory(process):
+    return "-" if process.mem is None else "{:.1f}G".format(process.mem)
 
 
 def process_label(processes, room, selected=None, index=None):
@@ -1102,9 +1112,11 @@ def process_label(processes, room, selected=None, index=None):
     a.py 1d4h 9.0G". As many whole entries as fit in `room` cells, then "+N" for the rest, or "+" when none
     is left out: clicked, it opens the process list at GPU `index`."""
     entries, last = [], None
-    for tag, segments, _ in process_entries(processes, selected):
+    for tag, process in process_entries(processes):
         gap = [] if not entries else [(" · ", DIM)] if tag == last else [("   ", "")]
-        entries.append(gap + ([(tag + ": ", DIM)] if tag and tag != last else []) + segments)
+        details = " ".join(part for part in (run_time(process), memory(process)) if part != "-")
+        entries.append(gap + ([(tag + ": ", DIM)] if tag and tag != last else []) + [process_name(process, selected)]
+                       + ([(" " + details, DIM, process.job)] if details else []))
         last = tag
 
     def more(n):
@@ -1120,19 +1132,26 @@ def process_label(processes, room, selected=None, index=None):
 
 
 def process_lines(processes, room, height, selected=None, index=None, top=0, shift=0):
-    """The processes (process_entries) one a line with their arguments, `height` lines of `room` cells, from
+    """The processes (process_listing) one a line, `height` lines of `room` cells, from
     line `top` on and `shift` cells in (see listing_extent), and the label for the box's bottom edge: which
     lines show of how many, when not all do, and "+", which clicked opens the process list at GPU `index`."""
     lines = process_listing(processes, selected)
-    shown = [pad(clip(skip(line, shift), room), room) for line in lines[top:top + height]]
+    # Sideways the command moves; run time and memory, the first segment, stay.
+    shown = [pad(clip(line[:1] + skip(line[1:], shift), room), room) for line in lines[top:top + height]]
     label = [("{}-{} of {}  ".format(top + 1, top + len(shown), len(lines)), DIM)] if len(lines) > height else []
     return shown + [[(" " * room, "")]] * (height - len(shown)), label + [("+", DIM, ("list", index))]
 
 
 def process_listing(processes, selected=None):
-    """process_lines's lines, whole: "kim/torch: train.py 2h13m 15.1G  --config a.yaml"."""
-    return [([(tag + ": ", DIM)] if tag else []) + segments + ([("  " + arguments, DIM)] if arguments else [])
-            for tag, segments, arguments in process_entries(processes, selected)]
+    """process_lines's lines, whole: run time and memory in columns of their own (one segment), then the
+    command line, "  2d5h  26.1G  kim/torch: train.py --config a.yaml"."""
+    lines = []
+    for tag, process in process_entries(processes):
+        command = process.command
+        rest = command[len(process.name):] if command.startswith(process.name) else " " + command
+        lines.append([("{:>6} {:>6}  ".format(run_time(process), memory(process)), DIM, process.job)]
+                     + ([(tag + ": ", DIM)] if tag else []) + [process_name(process, selected), (rest, "", process.job)])
+    return lines
 
 
 def listing_extent(processes, room, height):
@@ -1164,24 +1183,33 @@ def bottom_edge(width, split, label):
 MIN_INNER_H = 2  # the shortest a box gets; when even that leaves GPUs out, the boxes scroll
 
 
-def layout(count, width, height):
-    """(columns, inner height) for `count` GPU boxes in `width` x `height` cells."""
-    # Two columns only when one column cannot show every GPU at full height.
-    two_fit = width // 2 >= CHROME_W + INFO_W + MIN_GRAPH_W
-    cols = 2 if two_fit and count * (MAX_INNER_H + 2) > height else 1
+# What g puts beside the stats: the graph, the processes, nothing (a box the stats and their borders wide).
+LEFTS = ("graph", "processes", "none")
+CARD_W = INFO_W + 4
+
+
+def layout(count, width, height, left="graph"):
+    """(columns, inner height) for `count` GPU boxes in `width` x `height` cells: one column, side by side
+    only as far as needed for all to show at full height, then shorter."""
+    if left == "none":
+        most = max(1, width // CARD_W)
+    else:
+        most = 2 if width // 2 >= CHROME_W + INFO_W + MIN_GRAPH_W else 1  # a narrower graph is not worth it
+    cols = next((c for c in range(1, most + 1) if math.ceil(count / c) * (MAX_INNER_H + 2) <= height), most)
     rows = max(1, math.ceil(count / cols))
     return cols, max(MIN_INNER_H, min(MAX_INNER_H, height // rows - 2))
 
 
-def render(gpus, width, height, selected=None, shape=None, graphs=True, scroll=None):
+def render(gpus, width, height, selected=None, shape=None, left="graph", scroll=None):
     """The GPU boxes, in `shape` = (columns, inner height) or else the layout that fits: exactly `height`
-    lines of exactly `width` cells. Without `graphs`, the processes, moved on as `scroll` has it for each
+    lines of exactly `width` cells. `left`: see panel; the processes moved on as `scroll` has it for each
     GPU (its index: (lines, cells))."""
-    cols, inner = shape or layout(len(gpus), width, height)
+    cols, inner = shape or layout(len(gpus), width, height, left)
+    box_w = CARD_W if left == "none" else width // cols
     rows = math.ceil(len(gpus) / cols)
     lines = []
     for r in range(rows):
-        panels = [panel(g, width // cols, inner, selected, graphs, (scroll or {}).get(g.index, (0, 0)))
+        panels = [panel(g, box_w, inner, selected, left, (scroll or {}).get(g.index, (0, 0)))
                   for g in gpus[r * cols:(r + 1) * cols]]
         lines += [[seg for part in parts for seg in part] for parts in zip(*panels)]
     lines = [pad(clip(line, width), width) for line in lines[:height]]
@@ -1313,9 +1341,9 @@ def footer(width, newer=None, picker=()):
         notice = ([("   ", "")] if picker else []) + [("update available: " + version, THEME.accent)]
         how = [(" ({})".format(command or "new nvmon.py: " + RELEASES), "")]
         link = [("   what's new: " + RELEASES, DIM)] if command else []  # a copied nvmon.py already links there
-    every = keys(("g", "graphs"), ("c", "theme"), ("p", "processes"), ("Esc / q", "quit"))
+    every = keys(("g", "view"), ("c", "theme"), ("p", "processes"), ("Esc / q", "quit"))
     few = keys(("p", "processes"), ("Esc / q", "quit"))
-    # As much as fits: the link goes first, then how to update, the keys for graphs and theme, the picker.
+    # As much as fits: the link goes first, then how to update, the keys for view and theme, the picker.
     options = [(picker + notice + how + link, every), (picker + notice + how, every), (picker + notice + how, few),
                (picker + notice, few), (notice[1:] if picker else notice, few)]
     left, right = next((option for option in options if width_of(option[0]) + 2 + width_of(option[1]) <= width),
@@ -1333,7 +1361,7 @@ class View:
     def __init__(self):
         self.shows = "truecolor"          # the colors the terminal shows, see color_mode
         self.theme = THEMES[0]            # the look, see THEMES (c)
-        self.graphs = True                # the boxes show the utilization graph, else they are cards
+        self.left = "graph"               # what the boxes have beside the stats, see LEFTS (g)
         self.hidden, self.indices = set(), []  # the GPUs left out, and all there are
         self.job = None                   # the selected job's PID
         self.only = False                 # show only the GPUs it uses
@@ -1348,12 +1376,12 @@ class View:
         self.list_rows = range(0)         # the screen rows the list takes, when it is open
         self.shift, self.shifted = 0, None  # how far the selected job's command is scrolled, and whose
         self.clicked = (0, None)          # (when, what): the last click, to tell a double click
-        self.scroll = {}                  # GPU index: (lines, cells) its processes are moved on, no graphs
+        self.scroll = {}                  # GPU index: (lines, cells) its processes are moved on
         self.areas = []                   # (rows, columns, GPU) where those processes are on screen
 
     def restore(self, saved, indices):
         """Take up what an earlier run kept (Settings.load); of the GPUs `indices`, one always stays shown."""
-        self.graphs = saved.get("graphs", self.graphs)
+        self.left = saved.get("left", self.left)
         self.theme = next((kept for kept in THEMES if kept.name == saved.get("theme")), self.theme)
         self.sort = saved.get("sort", self.sort)
         hidden = saved.get("hidden", set()) & set(indices)
@@ -1361,7 +1389,7 @@ class View:
 
     def kept(self):
         """What is kept for the next run: see Settings."""
-        return {"graphs": self.graphs, "theme": self.theme.name, "sort": self.sort, "hidden": set(self.hidden)}
+        return {"left": self.left, "theme": self.theme.name, "sort": self.sort, "hidden": set(self.hidden)}
 
     def selected(self):
         return next((job for job in self.jobs if job.pid == self.job), None)
@@ -1392,7 +1420,7 @@ class View:
 
     def boxes(self, gpus, width, height):
         """The GPU boxes in `height` lines; when not all fit, the rows from gpu_top on and a line on that."""
-        cols, inner = layout(len(gpus), width, height)
+        cols, inner = layout(len(gpus), width, height, self.left)
         rows = math.ceil(len(gpus) / cols)
         note, count = [], len(gpus)
         if rows * (inner + 2) > height:
@@ -1406,13 +1434,13 @@ class View:
             self.gpu_top, self.gpu_page = 0, rows
         box_w, room = width // cols, max(0, width // cols - CHROME_W - INFO_W)
         self.areas = []
-        for k, g in enumerate(gpus):  # the processes' offsets kept in range, and where they show
+        for k, g in enumerate(gpus if self.left == "processes" else []):  # their offsets in range, where they are
             most = listing_extent(g.now.processes, room, inner)
             top, shift = self.scroll.get(g.index, (0, 0))
             self.scroll[g.index] = min(max(top, 0), most[0]), min(max(shift, 0), most[1])
             y, x = 2 + k // cols * (inner + 2), k % cols * box_w + 2  # 2: the top line and the box's edge
             self.areas.append((range(y, y + inner), range(x, x + room), g.index))
-        return render(gpus, width, height, self.job, (cols, inner), self.graphs, self.scroll) + note
+        return render(gpus, width, height, self.job, (cols, inner), self.left, self.scroll) + note
 
     def detail(self, gpus):
         """The GPUs whose processes' utilization is shown: all with the list open, else the selected
@@ -1489,10 +1517,10 @@ class View:
     def handle(self, event):
         """Act on one key or mouse event; False means quit."""
         kind, value = event[0], event[1:]
-        if kind in ("wheel", "hwheel"):  # over a GPU's processes (no graphs), they scroll, either way;
+        if kind in ("wheel", "hwheel"):  # over a GPU's processes, they scroll, either way;
             step, row, col = value     # over the list, the list, or the picked job's command sideways;
             area = next((index for rows, cols, index in self.areas  # anywhere else, the GPU boxes
-                         if not self.graphs and row in rows and col in cols), None)
+                         if row in rows and col in cols), None)
             if area is not None:
                 top, shift = self.scroll.get(area, (0, 0))
                 self.scroll[area] = (top + step, shift) if kind == "wheel" else (top, shift + 8 * step)
@@ -1558,8 +1586,10 @@ class View:
                 return False
         elif key == "p":
             self.listing = not self.listing
-        elif key == "g":
-            self.graphs = not self.graphs
+        elif key == "g":  # the graph, the processes, the stats alone
+            self.left = LEFTS[(LEFTS.index(self.left) + 1) % len(LEFTS)]
+            name = {"graph": "graphs", "processes": "processes", "none": "numbers only"}[self.left]
+            self.note = ([("view: " + name, "")], time.monotonic() + 2)
         elif key == "c":  # the next theme; C the one before
             self.theme = THEMES[(THEMES.index(self.theme) + (-1 if value[0] == "C" else 1)) % len(THEMES)]
             shows = "" if self.shows == "truecolor" else ", in 256 colors: all this terminal shows"
@@ -1577,6 +1607,9 @@ class View:
             self.gpu_top += self.gpu_page * (1 if key == "pgdn" else -1)
         elif key in ("left", "right") and self.listing:  # the selected job's command, sideways
             self.shift = max(0, self.shift + (8 if key == "right" else -8))
+        elif key in ("left", "right") and self.left == "processes":  # every GPU's processes, sideways
+            step = 8 if key == "right" else -8
+            self.scroll = {index: (top, shift + step) for index, (top, shift) in self.scroll.items()}
         elif key in MOVES and self.jobs:
             order = [job.pid for job in self.jobs]
             i = order.index(self.job) if self.job in order else (-1 if MOVES[key] > 0 else len(order))
@@ -1635,7 +1668,7 @@ def client():
 
 
 class Settings:
-    """What stays from one run to the next, for each client (see client): graphs on or off, the theme, the
+    """What stays from one run to the next, for each client (see client): what is beside the stats, the theme, the
     list's order, and the GPUs hidden, those for each machine, as several often share a home directory.
     Kept in ~/.config/nvmon/settings.json (%APPDATA%\\nvmon on Windows); a file that cannot be read or written
     only means that nothing is kept."""
@@ -1657,7 +1690,7 @@ class Settings:
         """This client's settings as View.restore takes them, the GPUs hidden those on `host`."""
         mine = self._read().get(self.client)
         mine = mine if isinstance(mine, dict) else {}
-        out = {"graphs": mine["graphs"]} if isinstance(mine.get("graphs"), bool) else {}
+        out = {"left": mine["left"]} if mine.get("left") in LEFTS else {}
         if isinstance(mine.get("theme"), str):
             out["theme"] = mine["theme"]
         sort = mine.get("sort")
@@ -1676,7 +1709,8 @@ class Settings:
         hidden = mine.get("hidden") if isinstance(mine.get("hidden"), dict) else {}
         earlier = hidden.get(host) if isinstance(hidden.get(host), list) else []
         hidden[host] = sorted({i for i in earlier if isinstance(i, int) and i not in indices} | kept["hidden"])
-        mine.update(graphs=kept["graphs"], theme=kept["theme"], sort=list(kept["sort"]),
+        mine.pop("graphs", None)  # what "left" says now
+        mine.update(left=kept["left"], theme=kept["theme"], sort=list(kept["sort"]),
                     hidden={name: gpus for name, gpus in hidden.items() if gpus})
         data[self.client] = mine
         temp = "{}.{}".format(self.path, os.getpid())

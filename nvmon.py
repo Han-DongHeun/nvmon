@@ -1634,7 +1634,7 @@ class Settings:
 
 INPUT = re.compile(rb"\x1b\[<(?P<button>\d+);(?P<x>\d+);(?P<y>\d+)(?P<act>[Mm])"  # mouse, SGR encoding
                    rb"|\x1b\[M(?P<old>...)"                                     # mouse, the old encoding
-                   rb"|\x1b[\[O](?P<args>[?0-9;]*)(?P<end>[A-Za-z~])"            # arrows, Home, PgUp and such
+                   rb"|\x1b[\[O](?P<args>[?>0-9;]*)(?P<end>[A-Za-z~])"           # arrows, Home, PgUp and such
                    rb"|(?P<report>\x1bP[^\x1b]*\x1b\\)"                           # a late answer to Screen.probe
                    rb"|(?P<text>[\xc2-\xf4][\x80-\xbf]+)"                          # a letter beyond ASCII, as UTF-8
                    rb"|(?P<char>.)", re.DOTALL)                                 # any other key; a lone ESC is Esc
@@ -1693,10 +1693,11 @@ class Screen:
         whether it keeps a 24-bit color. Every terminal answers the last question, DA1, so that answer ends
         the wait, a round trip even over ssh; but for the answer on the color, which may come after it: the
         ConPTY between Windows's ssh and Windows Terminal answers DA1 itself at once and passes DECRQSS on.
-        No answer within a second means neither."""
+        xterm.js (Tabby, VS Code) shows 24-bit color but answers DECRQSS with "0m" whatever is set; it is
+        told by that together with its own DA2 answer, ">0;276;0". No answer within a second means neither."""
         self._write("\x1b[H─\x1b[6n"                  # where the cursor is after one line character
                     "\x1b[38;2;1;2;3m\x1bP$qm\x1b\\"  # DECRQSS: the color set now, as the terminal kept it
-                    + RESET + "\x1b[c")                 # DA1: what the terminal is
+                    + RESET + "\x1b[>c\x1b[c")          # DA2: which terminal; DA1: what kind, answered last
         import select
         fd, data, end = sys.stdin.fileno(), b"", time.monotonic() + 1
         answered = False  # DA1 is in
@@ -1714,8 +1715,9 @@ class Screen:
             data += more
         cursor = re.search(rb"\x1b\[\d+;(\d+)R", data)
         color = re.search(rb"\x1bP1\$r([0-9;:]*)m", data)
-        return (bool(cursor) and int(cursor.group(1)) > 2,
-                bool(color) and bool(re.search(rb"38[;:]2[;:]+1[;:]2[;:]3", color.group(1))))
+        kept = bool(color) and bool(re.search(rb"38[;:]2[;:]+1[;:]2[;:]3", color.group(1)))
+        xterm_js = b"\x1b[>0;276;0c" in data and bool(color) and color.group(1) == b"0"
+        return bool(cursor) and int(cursor.group(1)) > 2, kept or xterm_js
 
     def __exit__(self, *exc):
         self._write(RESET + ("\x1b[?1006l\x1b[?1000l" if self._mouse else "") + "\x1b[?7h\x1b[?25h\x1b[?1049l")

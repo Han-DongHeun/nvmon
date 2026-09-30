@@ -15,7 +15,7 @@ What changes for you in each release. The same notes appear on the
 - Works in Xshell, PuTTY and the like without setting them up: nvmon asks the terminal how it draws.
   Where lines come out two cells wide (Korean, Chinese, Japanese settings), boxes and graphs are drawn
   in ASCII; where 24-bit color is not known to work, 256 colors are used. Windows Terminal gets its 24-bit
-  color over Windows's own ssh too.
+  color over Windows's own ssh too, and so do Tabby and VS Code's terminal.
 - The graph shades smoothly: each cell shows two colors, so there are twice as many steps from green
   to red, and in 256 colors no more dull olive among the greens.
 - Themes: `c` goes through them, `C` back. nvmon's own colors stay the default; the others take the

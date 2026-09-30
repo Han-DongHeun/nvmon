@@ -202,6 +202,7 @@ THEMES = [
 # No hue, only lightness: dark gray when idle to near white when busy.
 THEMES.append(theme("black and white", "#505050 #f0f0f0", "#d0d0d0", gray=True))
 THEME = THEMES[0]  # the one in use, set by View.screen before it draws
+SHOWS = "truecolor"  # what the terminal shows (color_mode), set with it
 # Warnings on the top edge, the same in every theme: yellow = worth a look, orange = slowed, red = act.
 WARN, SLOW, ALERT = _rgb(YELLOW), _rgb(ORANGE), _rgb(RED)
 DIM, FAINT = _fg(240), _fg(238)
@@ -883,35 +884,59 @@ def pad(line, width):
 
 
 @lru_cache(maxsize=None)
-def graph_row(r, height, two_tone, scale):
+def bands(height, scale, shows):
+    """The colors of a `height`-row graph's bands, bottom up, in the colors `scale` (a theme's graph), and how
+    many bands a cell holds: two (see graph_row), each its middle's color. In 256 colors (`shows`) two bands
+    side by side may come out as the same palette color, and the bands were one cell high here and half a
+    cell there; then a band is a cell high, and one that would come out as the band below takes the nearest
+    color that does not."""
+    def rgb(code):
+        return tuple(int(v) for v in COLOR_ARG.match(code).group(2, 3, 4))
+    halves = [scale[round((4 * k + 2) * 100 / (height * 8))] for k in range(2 * height)]
+    if shows == "truecolor":
+        return tuple(halves), 2
+    codes = [_nearest256(rgb(c)) for c in halves]
+    if all(a != b for a, b in zip(codes, codes[1:])):
+        return tuple(map(_fg, codes)), 2
+    picked = []
+    for k in range(height):
+        lab = _oklab(rgb(scale[round((8 * k + 4) * 100 / (height * 8))]))
+        ranked = sorted(PALETTE, key=lambda entry: sum((a - b) ** 2 for a, b in zip(entry[1], lab)))
+        picked.append(next(code for code, _ in ranked if not picked or code != picked[-1]))
+    return tuple(map(_fg, picked)), 1
+
+
+@lru_cache(maxsize=None)
+def graph_row(r, height, two_tone, scale, shows="truecolor"):
     """The (block, style) cell that row `r` (0 = bottom) of a `height`-row graph shows for each level
-    0 .. 8 * height, in the colors `scale` (a theme's graph).
+    0 .. 8 * height, in the colors `scale` (a theme's graph), as a terminal that `shows` 24-bit or 256 colors.
 
     The color goes with the height, as a gradient behind the bars would. A cell holds one character in one
     color on one background, so two colors at most: a full cell is "▀" in its upper half's color on its
-    lower half's, which makes twice as many bands as rows, each the color of its middle; no other split of a
-    cell comes closer to a smooth gradient. The ragged top is a block from the bottom in its lower half's
-    color, the band beside it, so that every height has the one color from bar to bar. A top in the upper
-    half would need three (the two bands, and the empty rest), so there it goes by halves: 5/8 shows as 4/8,
-    6/8 and 7/8 as a full cell; the number beside the graph has the exact value. Without `two_tone` (faded
-    boxes, as faint leaves backgrounds bright) a cell is one color, and the top keeps its eighths.
+    lower half's, which makes twice as many bands as rows (see bands); no other split of a cell comes closer
+    to a smooth gradient. The ragged top is a block from the bottom in its lower half's color, the band
+    beside it, so that every height has the one color from bar to bar. A top in the upper half would need
+    three (the two bands, and the empty rest), so there it goes by halves: 5/8 shows as 4/8, 6/8 and 7/8 as
+    a full cell; the number beside the graph has the exact value. With a band to a cell (bands), and
+    without `two_tone` (faded boxes, as faint leaves backgrounds bright), a cell is one color and the top
+    keeps its eighths.
     """
+    colors, per_cell = bands(height, scale, shows)
+    halves = two_tone and per_cell == 2
     steps = height * 8
-
-    def at(level):  # the color at `level`, in eighths of a cell from the bottom
-        return scale[round(level * 100 / steps)]
-
     cells = []
     for level in range(steps + 1):
         fill = min(8, max(0, level - r * 8))
-        if two_tone and fill > 4:
+        if halves and fill > 4:
             fill = 4 if fill == 5 else 8
-        if fill == 8 and two_tone:
-            cells.append(("▀", at(r * 8 + 6) + at(r * 8 + 2).replace("\x1b[38;", "\x1b[48;")))  # 48: background
-        elif fill:
-            cells.append((BLOCKS[fill], at(r * 8 + (2 if two_tone else 4))))
-        else:
+        if not fill:
             cells.append((" ", ""))
+        elif halves and fill == 8:
+            cells.append(("▀", colors[2 * r + 1] + colors[2 * r].replace("\x1b[38;", "\x1b[48;")))  # 48: background
+        elif halves:
+            cells.append((BLOCKS[fill], colors[2 * r]))
+        else:
+            cells.append((BLOCKS[fill], colors[r] if per_cell == 1 else scale[round((8 * r + 4) * 100 / steps)]))
     return cells
 
 
@@ -924,7 +949,7 @@ def graph(history, width, height, two_tone=True):
     text_of, style_of = operator.itemgetter(0), operator.itemgetter(1)
     rows = []
     for r in reversed(range(height)):
-        cells = map(graph_row(r, height, two_tone, THEME.graph).__getitem__, levels)
+        cells = map(graph_row(r, height, two_tone, THEME.graph, SHOWS).__getitem__, levels)
         rows.append([("".join(map(text_of, run)), style) for style, run in itertools.groupby(cells, key=style_of)])
     return rows
 
@@ -1279,8 +1304,8 @@ class View:
 
     def screen(self, gpus, width, height, top_line, newer):
         """The whole screen: `top_line`, the GPU boxes (and the list, when open), the bottom line."""
-        global THEME
-        THEME = self.theme
+        global THEME, SHOWS
+        THEME, SHOWS = self.theme, self.shows
         column, descending = self.sort
         self.jobs = sorted(jobs(gpus), key=lambda job: (SORTS[column](job), job.pid), reverse=descending)
         job = self.selected()

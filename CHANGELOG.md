@@ -5,8 +5,8 @@ What changes for you in each release. The same notes appear on the
 
 ## Unreleased
 
-- The black and white theme is black on white: the whole screen on white, every color the gray as dark
-  as it was light, the busiest bars the darkest.
+- The black and white theme draws the GPU boxes black on white, every color the gray as dark as it was
+  light, the busiest bars the darkest; the rest of the screen stays on the terminal's own background.
 - The README shows each view and the process list, and lists every key.
 
 ## 0.3.0

@@ -110,7 +110,7 @@ def colors(style):
     if faint:
         fg = tuple((a + b) // 2 for a, b in zip(fg, BG))
     if "\x1b[7m" in style:
-        fg, bg = BG, fg
+        fg, bg = bg, fg
     return fg, bg, "\x1b[1m" in style
 
 

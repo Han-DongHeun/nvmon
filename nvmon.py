@@ -83,19 +83,25 @@ def _nearest256(rgb):
 
 
 # Styles are written in 24-bit color and turned, as they are sent (restyle), into what the terminal shows:
-# 24-bit color or 256 colors, as color_mode finds; in gray, as the black and white theme has it: black on
-# white, every cell on PAPER in INK, every color the gray of its lightness turned around.
+# 24-bit color or 256 colors, as color_mode finds; in gray, as the black and white theme has it: the GPU boxes
+# black on white (panel marks their styles with ON_PAPER), the rest gray on the terminal's own background.
 PAPER, INK = (242, 242, 242), (30, 30, 30)
+ON_PAPER = "\x1b[48;2;242;242;242m"
 COLOR_ARG = re.compile(r"\x1b\[([34])8;(?:2;(\d+);(\d+);(\d+)|5;(\d+))m")
 
 
 @lru_cache(maxsize=None)
 def restyle(style, mode, gray=False):
-    """`style` in color `mode`: "256" turns 24-bit colors into the palette's nearest. With `gray`, on PAPER
-    in INK, and every color first the gray as dark as it was light (OKLab lightness turned around): light
-    text on the dark screen becomes dark on the white one, and the busiest bars the darkest."""
+    """`style` in color `mode`: "256" turns 24-bit colors into the palette's nearest. With `gray`, every
+    color first the gray as light as it is; or, for a style marked ON_PAPER, on PAPER in INK, as dark as it
+    was light (OKLab lightness turned around): light text on the dark screen becomes dark on the white one,
+    and the busiest bars the darkest. FADED on PAPER is drawn as text halfway to the paper, since many
+    terminals draw faint text darker, which on white stands out rather than fades."""
     if mode == "truecolor" and not gray:
         return style
+    paper = gray and style.startswith(ON_PAPER)
+    faint = paper and style.startswith(FADED, len(ON_PAPER))
+    style = style[len(ON_PAPER) + len(FADED) * faint:] if paper else style
 
     def swap(m):
         layer, code = m.group(1), m.group(5)  # layer 3: the foreground, 4: the background
@@ -103,15 +109,23 @@ def restyle(style, mode, gray=False):
             return m.group(0)
         rgb = _palette_rgb(int(code)) if code else tuple(int(v) for v in m.group(2, 3, 4))
         if gray:
-            rgb = _from_oklab((1 - _oklab(rgb)[0], 0, 0))
+            lightness = _oklab(rgb)[0]
+            rgb = ink(layer, 1 - lightness) if paper else _from_oklab((lightness, 0, 0))
         return color(layer, rgb)
+
+    def ink(layer, lightness):
+        if faint and layer == "3":
+            lightness = (lightness + _oklab(PAPER)[0]) / 2
+        return _from_oklab((lightness, 0, 0))
 
     def color(layer, rgb):
         if mode == "256":
             return "\x1b[{}8;5;{}m".format(layer, _nearest256(rgb))
         return "\x1b[{}8;2;{};{};{}m".format(layer, *rgb)
     style = COLOR_ARG.sub(swap, style)
-    return color("4", PAPER) + color("3", INK) + style if gray else style
+    if not paper:
+        return style
+    return color("4", PAPER) + color("3", ink("3", _oklab(INK)[0])) + style
 
 
 def color_mode(truecolor):
@@ -1047,9 +1061,11 @@ def panel(gpu, width, height, selected=None, left="graph", scroll=(0, 0)):
         body = [[("│ ", DIM)] + g + (rule if i is None else [(" │ ", DIM)] + i + [(" │", DIM)])
                 for g, i in zip(beside, info(gpu, height))]
     lines = [top] + body + [bottom_edge(width, split, label)]
-    if not faded:
-        return lines
-    return [[(seg[0], FADED + (seg[1] if seg[1] != BOLD else "")) + seg[2:] for seg in line] for line in lines]
+    if faded:
+        lines = [[(seg[0], FADED + (seg[1] if seg[1] != BOLD else "")) + seg[2:] for seg in line] for line in lines]
+    if THEME.gray:  # black on white, see restyle
+        lines = [[(seg[0], ON_PAPER + seg[1]) + seg[2:] for seg in line] for line in lines]
+    return lines
 
 
 def edge(width, label, parts):

@@ -105,7 +105,7 @@ The list, busiest first, one job picked; and that job with `f`:
 | Esc | a step back, then quit |
 | `q`, Ctrl+C | quit |
 
-Korean Hangul mode works too (ㅂ quits). Hold Shift to select text.
+Hold Shift to select text.
 
 ## It remembers
 

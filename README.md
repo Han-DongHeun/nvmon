@@ -55,8 +55,9 @@ Shift+wheel or ← → sideways.
 
 **Numbers only** and **GPU and MEM only**: narrow, always one column, for a window beside another.
 
-![nvmon with the numbers alone](https://raw.githubusercontent.com/Han-DongHeun/nvmon/main/docs/view-numbers.png)
-![nvmon with GPU and MEM alone](https://raw.githubusercontent.com/Han-DongHeun/nvmon/main/docs/view-brief.png)
+| Numbers only, scrolled down | GPU and MEM only |
+|---|---|
+| ![nvmon with the numbers alone](https://raw.githubusercontent.com/Han-DongHeun/nvmon/main/docs/view-numbers.png) | ![nvmon with GPU and MEM alone](https://raw.githubusercontent.com/Han-DongHeun/nvmon/main/docs/view-brief.png) |
 
 ## Processes and jobs: `p`
 

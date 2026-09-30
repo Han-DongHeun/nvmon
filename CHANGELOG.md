@@ -3,7 +3,7 @@
 What changes for you in each release. The same notes appear on the
 [releases page](https://github.com/Han-DongHeun/nvmon/releases).
 
-## Unreleased
+## 0.3.1
 
 - The black and white theme draws the GPU boxes black on white, every color the gray as dark as it was
   light, the busiest bars the darkest; the rest of the screen stays on the terminal's own background.

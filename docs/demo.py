@@ -17,7 +17,7 @@ from PIL import Image, ImageDraw, ImageFont
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 import nvmon  # noqa: E402
 
-SIZES = [("demo-wide.gif", 160, 31)]  # (file, columns, rows)
+SIZES = [("demo-wide.gif", 120, 58)]  # (file, columns, rows): tall enough for eight graphs one under the other
 
 
 def biggest_job(view):

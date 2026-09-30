@@ -2,7 +2,7 @@
 
 A fancy NVIDIA GPU monitor for the terminal. Single Python file, no dependencies.
 
-![nvmon showing eight H100 GPUs in two columns](https://raw.githubusercontent.com/Han-DongHeun/nvmon/main/docs/demo-wide.gif)
+![nvmon showing eight H100 GPUs one under the other](https://raw.githubusercontent.com/Han-DongHeun/nvmon/main/docs/demo-wide.gif)
 
 ## Install
 

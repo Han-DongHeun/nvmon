@@ -3,13 +3,10 @@
 What changes for you in each release. The same notes appear on the
 [releases page](https://github.com/Han-DongHeun/nvmon/releases).
 
-## Unreleased
+## 0.3.1
 
 - Numbers only, and GPU and MEM only, keep their boxes one under the other, never side by side; what
   does not fit scrolls. In a narrow window, the line on the GPUs left out is shorter, not cut off.
-
-## 0.3.1
-
 - The black and white theme draws the GPU boxes black on white, every color the gray as dark as it was
   light, the busiest bars the darkest; the rest of the screen stays on the terminal's own background.
 - The README shows each view and the process list, and lists every key.

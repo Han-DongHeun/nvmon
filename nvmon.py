@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""nvmon: a fancy NVIDIA GPU monitor for the terminal. Single Python file, no dependencies.
+"""nvmon: a fancy NVIDIA GPU monitor for the terminal. One Python file, no dependencies.
 
 One box per GPU: utilization history on the left (0 % at the bottom, 100 % at
 the top); utilization, memory and PCIe traffic on the right; name, power,

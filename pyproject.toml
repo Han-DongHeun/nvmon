@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "nvmon"
 dynamic = ["version"]
-description = "A fancy NVIDIA GPU monitor for the terminal. Single Python file, no dependencies."
+description = "A fancy NVIDIA GPU monitor for the terminal. One Python file, no dependencies."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]

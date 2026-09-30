@@ -17,7 +17,8 @@ from PIL import Image, ImageDraw, ImageFont
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 import nvmon  # noqa: E402
 
-SIZES = [("demo-wide.gif", 120, 58)]  # (file, columns, rows): tall enough for eight graphs one under the other
+SHOWN = 4  # GPUs in the GIF, the busiest: the others hidden, as a click on their numbers does
+SIZES = [("demo-wide.gif", 120, SHOWN * (nvmon.MAX_INNER_H + 2) + 2)]  # (file, columns, rows): one under the other
 
 
 def biggest_job(view):
@@ -91,6 +92,10 @@ def record(seconds, warm_up=70):
         if tick < 0:
             time.sleep(max(0, 0.5 - (time.monotonic() - start)))
             continue
+        if tick == 0:
+            busiest = sorted(gpus, key=lambda gpu: -sum(gpu.history))[:SHOWN]
+            for view in views.values():
+                view.hidden = {gpu.index for gpu in gpus if gpu not in busiest}
         for name, cols, rows in SIZES:
             frames[name].append(views[name].screen(gpus, cols, rows, nvmon.header(cols, 0.5, driver), None))
         time.sleep(max(0, 0.5 - (time.monotonic() - start)))

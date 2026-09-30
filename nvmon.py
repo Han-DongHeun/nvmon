@@ -1690,14 +1690,21 @@ class Screen:
 
     def probe(self):
         """(wide, truecolor), as the terminal answers: whether it draws a line character two cells wide, and
-        whether it keeps a 24-bit color. Terminals answer in turn and all of them the last question, DA1,
-        so that answer ends the wait: a round trip, even over ssh. No answer within a second means neither."""
+        whether it keeps a 24-bit color. Every terminal answers the last question, DA1, so that answer ends
+        the wait, a round trip even over ssh; but for the answer on the color, which may come after it: the
+        ConPTY between Windows's ssh and Windows Terminal answers DA1 itself at once and passes DECRQSS on.
+        No answer within a second means neither."""
         self._write("\x1b[H─\x1b[6n"                  # where the cursor is after one line character
                     "\x1b[38;2;1;2;3m\x1bP$qm\x1b\\"  # DECRQSS: the color set now, as the terminal kept it
                     + RESET + "\x1b[c")                 # DA1: what the terminal is
         import select
         fd, data, end = sys.stdin.fileno(), b"", time.monotonic() + 1
-        while not re.search(rb"\x1b\[\?[0-9;]*c", data):
+        answered = False  # DA1 is in
+        while True:
+            if not answered and re.search(rb"\x1b\[\?[0-9;]*c", data):
+                answered, end = True, min(end, time.monotonic() + 0.25)  # a quarter second more for DECRQSS
+            if answered and re.search(rb"\x1bP[01]\$r[^\x1b]*\x1b\\", data):
+                break
             left = end - time.monotonic()
             if left <= 0 or not select.select([fd], [], [], left)[0]:
                 break

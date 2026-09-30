@@ -19,7 +19,7 @@ import nvmon  # noqa: E402
 
 # (file, columns, rows, what is on: "list" = the process list with a job picked, "cards" = the processes in place of the graphs)
 SIZES = [("demo-wide.gif", 160, 31, None), ("demo-small.gif", 100, 30, None), ("demo-list.gif", 160, 56, "list"),
-         ("demo-cards.gif", 160, 23, "cards")]
+         ("demo-cards.gif", 160, 31, "cards")]
 FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono{}.ttf"
 CELL_W, CELL_H, PAD, SIZE = 9, 18, 14, 15
 BG, FG = (24, 24, 27), (215, 215, 215)

@@ -29,7 +29,7 @@ from ctypes import byref, c_int, c_uint, c_ulonglong, c_void_p
 from functools import lru_cache
 from typing import NamedTuple, Optional
 
-__version__ = "0.2.1+dev"  # "+dev": work past this release; the release commit sets the next number
+__version__ = "0.3.0"  # "+dev": work past this release; the release commit sets the next number
 REPO = "https://github.com/Han-DongHeun/nvmon"
 RELEASES = REPO + "/releases"                 # release notes, and nvmon.py for those who copy the file
 PYPI_JSON = "https://pypi.org/pypi/nvmon/json"
@@ -1944,8 +1944,8 @@ def main():
     parser = argparse.ArgumentParser(
         prog="nvmon", description="A fancy NVIDIA GPU monitor for the terminal.",
         epilog="At start nvmon asks PyPI whether a newer release is out; NVMON_NO_UPDATE_CHECK=1 turns that "
-               "off. Colors are 24-bit where the terminal says it shows them, else 256. Graphs on or off, the theme, "
-               "the list's order and hidden GPUs are kept for each computer you connect from, in "
+               "off. Colors are 24-bit where the terminal says it shows them, else 256. The view, the theme, the "
+               "list's order and hidden GPUs are kept for each computer you connect from, in "
                "~/.config/nvmon/settings.json. " + REPO)
     parser.add_argument("-i", "--interval", type=interval, default=DEFAULT_INTERVAL, metavar="SEC",
                         help="seconds between updates, at least 0.1 (default: 0.5)")

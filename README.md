@@ -2,7 +2,7 @@
 
 A fancy NVIDIA GPU monitor for the terminal. One Python file, no dependencies.
 
-![nvmon showing four busy H100 GPUs one under the other, the other four hidden](https://raw.githubusercontent.com/Han-DongHeun/nvmon/main/docs/demo-wide.gif)
+![nvmon showing four busy H100 GPUs one under the other, the other four hidden, the pointer moving along a graph with the utilization then beside it](https://raw.githubusercontent.com/Han-DongHeun/nvmon/main/docs/demo-wide.gif)
 
 ## Install
 
@@ -38,10 +38,6 @@ ssh -t HOST nvmon  # over ssh: -t gives it a terminal
 
 The bottom line has the GPU numbers (click one, or press its key, to hide or show it), the keys, and a
 newer release when there is one.
-
-Pointing at a graph, 12 seconds back:
-
-<img src="https://raw.githubusercontent.com/Han-DongHeun/nvmon/main/docs/hover.png" alt="the pointer over a graph, a chip beside it saying 70% · 12s ago" width="530">
 
 ## Views: `v`
 

@@ -36,25 +36,13 @@ def focus(view):
     view.only = True
 
 
-HOVER_W = 100
-
-
-def hover(view):
-    """A GPU of the biggest job alone, the pointer over its graph, some 12 s back."""
-    shown = next(job for job in view.jobs if job.pid == biggest_job(view)).gpus[0]
-    view.hidden = {index for index in view.indices if index != shown}
-    room = HOVER_W - nvmon.CHROME_W - nvmon.INFO_W  # its graph, once alone: columns 2 on, rows 2 on
-    view.pointer = (3, 2 + room - 25)
-
-
 def numbers(view):
     view.left, view.gpu_top = "numbers", 10  # scrolled down to the last GPUs, the busy ones
 
 
 # (file, columns, rows, what is set on the view). The cards' windows are as narrow as the cards, as a window
 # kept beside another; the numbers' window too short for all eight, the brief ones' just tall enough.
-STILLS = [("hover.png", HOVER_W, nvmon.MAX_INNER_H + 4, hover),
-          ("view-graphs.png", 160, 31, lambda view: None),  # too short for eight one under the other
+STILLS = [("view-graphs.png", 160, 31, lambda view: None),  # too short for eight one under the other
           ("view-processes.png", 160, 31, lambda view: setattr(view, "left", "processes")),
           ("view-numbers.png", nvmon.CARD_W, 31, numbers),
           ("view-brief.png", nvmon.CARD_W, 8 * (nvmon.MIN_INNER_H + 2) + 2,
@@ -91,13 +79,38 @@ def anonymize():
     nvmon.__version__ = nvmon.__version__.split("+")[0]  # as released, not "+dev"
 
 
+STEPS = 4  # frames a half second while the pointer moves, as nvmon redraws on each move
+
+
+def pointer_path(view):
+    """Where the pointer goes in the GIF, as (seconds, (row, column)) keyframes: in over the second box's
+    numbers, left along its graph, a rest there, then down and out of the window."""
+    rows, cols, _ = view.graphs[min(1, len(view.graphs) - 1)]
+    mid, right = rows.start + len(rows) // 2, cols.stop
+    return [(4.0, (mid + 1, right + 20)), (5.0, (mid, right - 4)), (8.5, (mid, right - 40)),
+            (10.0, (mid, right - 40)), (11.5, (rows.stop + 6, right - 20)), (12.5, (rows.stop + 14, right - 10))]
+
+
+def along(path, t):
+    """The pointer's (row, column) at `t` seconds on `path`, or None when it is not in the window."""
+    if not path or not path[0][0] <= t <= path[-1][0]:
+        return None
+    for (t0, a), (t1, b) in zip(path, path[1:]):
+        if t0 <= t <= t1:
+            share = (t - t0) / (t1 - t0) if t1 > t0 else 0
+            return tuple(x + (y - x) * share for x, y in zip(a, b))
+    return None
+
+
 def record(seconds, warm_up=70):
-    """Screens, as nvmon's segment lines, every half second: {file: [frame, ...]}, and the GPUs as they are
-    at the end. The first `warm_up` seconds are not kept: they fill the graphs."""
+    """Screens every half second, and more often while the pointer moves: {file: [(lines, pointer or None,
+    milliseconds), ...]}, and the GPUs as they are at the end. The first `warm_up` seconds are not kept:
+    they fill the graphs."""
     nv = nvmon.load_nvml()
     gpus, driver = nvmon.open_gpus(nv), nvmon.versions(nv)
     views = {name: nvmon.View() for name, *_ in SIZES}
     frames = {name: [] for name, *_ in SIZES}
+    paths = {}
     for tick in range(-int(warm_up * 2), int(seconds * 2)):
         start = time.monotonic()
         for gpu in gpus:
@@ -106,12 +119,20 @@ def record(seconds, warm_up=70):
         if tick < 0:
             time.sleep(max(0, 0.5 - (time.monotonic() - start)))
             continue
-        if tick == 0:
-            busiest = sorted(gpus, key=lambda gpu: -sum(gpu.history))[:SHOWN]
-            for view in views.values():
-                view.hidden = {gpu.index for gpu in gpus if gpu not in busiest}
         for name, cols, rows in SIZES:
-            frames[name].append(views[name].screen(gpus, cols, rows, nvmon.header(cols, 0.5, driver), None))
+            view = views[name]
+            if tick == 0:
+                busiest = sorted(gpus, key=lambda gpu: -sum(gpu.history))[:SHOWN]
+                view.hidden = {gpu.index for gpu in gpus if gpu not in busiest}
+                view.screen(gpus, cols, rows, [], None)  # where the graphs are, for the pointer's path
+                paths[name] = pointer_path(view)
+            moving = any(along(paths[name], tick / 2 + s / 2 / STEPS) for s in range(STEPS))
+            steps = STEPS if moving else 1
+            for s in range(steps):
+                at = along(paths[name], tick / 2 + s / 2 / steps)
+                view.pointer = (round(at[0]), round(at[1])) if at else None
+                lines = view.screen(gpus, cols, rows, nvmon.header(cols, 0.5, driver), None)
+                frames[name].append((lines, at, 500 // steps))
         time.sleep(max(0, 0.5 - (time.monotonic() - start)))
     return frames, gpus, driver
 
@@ -192,6 +213,16 @@ def picture(lines, cols, rows, fonts):
     return image
 
 
+def arrow(image, at):
+    """`image` with the mouse pointer on it, its tip at `at` = (row, column) in cells, as the terminal would
+    draw it (a picture of the screen does not show it)."""
+    x = PAD + at[1] * CELL_W + CELL_W // 2
+    y = PAD + at[0] * CELL_H + CELL_H // 2
+    shape = [(0, 0), (0, 17), (4, 13), (7, 20), (10, 19), (7, 12), (12, 12)]
+    ImageDraw.Draw(image).polygon([(x + a, y + b) for a, b in shape], fill=(255, 255, 255), outline=(0, 0, 0))
+    return image
+
+
 def gallery(gpu, fonts, width=80):
     """`gpu`'s box once in each theme, its name above, two to a row."""
     boxes = []
@@ -227,10 +258,11 @@ def main():
     fonts = {False: ImageFont.truetype(FONT.format(""), SIZE), True: ImageFont.truetype(FONT.format("-Bold"), SIZE)}
     here = os.path.dirname(os.path.abspath(__file__))
     for name, cols, rows in SIZES:
-        pictures = [picture(lines, cols, rows, fonts) for lines in frames[name]]
+        pictures = [picture(lines, cols, rows, fonts) for lines, _, _ in frames[name]]
+        pictures = [arrow(p, at) if at else p for p, (_, at, _) in zip(pictures, frames[name])]
         pictures = [p.quantize(colors=128, method=Image.Quantize.MEDIANCUT) for p in pictures]
-        pictures[0].save(os.path.join(here, name), save_all=True, append_images=pictures[1:], duration=500,
-                         loop=0, optimize=True)
+        pictures[0].save(os.path.join(here, name), save_all=True, append_images=pictures[1:],
+                         duration=[ms for _, _, ms in frames[name]], loop=0, optimize=True)
         print(name, os.path.getsize(os.path.join(here, name)) // 1024, "KB")
     stills(gpus, driver, fonts, here)
     busiest = max(gpus, key=lambda gpu: sum(gpu.history))

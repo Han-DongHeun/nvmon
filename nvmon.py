@@ -956,9 +956,9 @@ def graph(history, width, height, two_tone=True):
     return rows
 
 
-def row(left, right=(), width=INFO_W):
-    """One stats line: `left`, then the `right` segments flush right; exactly `width` cells."""
-    room = width - width_of(right)
+def row(left, right=()):
+    """One stats line: `left`, then the `right` segments flush right; exactly INFO_W cells."""
+    room = INFO_W - width_of(right)
     return pad(clip(left, room - 1 if right else room), room) + list(right)
 
 
@@ -973,8 +973,8 @@ def num(value, fmt):
     return "-" if value is None else fmt.format(value)
 
 
-def info(gpu, height, width=INFO_W):
-    """The stats column, `width` cells wide; None for the rule between MEM and the PCIe traffic."""
+def info(gpu, height):
+    """The stats column; None for the rule between MEM and the PCIe traffic."""
     s = gpu.now
     total = num(s.mem_total, "{:.1f}")
     busy = [("GPU ", "")] + share(s.util, 100)
@@ -986,16 +986,15 @@ def info(gpu, height, width=INFO_W):
     cap = (" / {:.0f}".format(top), WARN if degraded(gpu) else "") if top else ("", "")
 
     def link(label, rate):  # "CPU -> GPU ... 0.16 / 63 GB/s", flush right like MEM's used / total
-        return row([(label, "")], [("-" if rate is None else "{:.2f}".format(rate / 1e9), ""), cap, (" GB/s", "")],
-                   width)
+        return row([(label, "")], [("-" if rate is None else "{:.2f}".format(rate / 1e9), ""), cap, (" GB/s", "")])
 
-    gpu_row = row(busy, (), width)
+    gpu_row = row(busy)
     mem_row = row([("MEM ", "")] + share(s.mem_used, s.mem_total),
-                  [("{} / {} GiB".format(num(s.mem_used, "{:.1f}"), total), "")], width)
+                  [("{} / {} GiB".format(num(s.mem_used, "{:.1f}"), total), "")])
     to_gpu, to_cpu = link("CPU -> GPU", s.rx), link("GPU -> CPU", s.tx)
     # The rule (None) between MEM and the PCIe traffic only appears when there is room.
     if height >= 5:
-        return [gpu_row, mem_row, None, to_gpu, to_cpu] + [row([], (), width)] * (height - 5)
+        return [gpu_row, mem_row, None, to_gpu, to_cpu] + [row([])] * (height - 5)
     return [gpu_row, mem_row, to_gpu, to_cpu][:height]
 
 
@@ -1005,10 +1004,10 @@ def degraded(gpu):
     return bool(s.pcie_width and gpu.pcie_max_width and s.pcie_width < gpu.pcie_max_width)
 
 
-def panel(gpu, width, height, selected=None, graphs=True):
-    """One GPU's box, the utilization graph beside the stats or, without `graphs`, a card: the stats, and
-    where the box is wide enough, its processes beside them, one a line; faded when a job is `selected` and
-    it does not run here."""
+def panel(gpu, width, height, selected=None, graphs=True, scroll=(0, 0)):
+    """One GPU's box: the utilization graph or, without `graphs`, the GPU's processes one a line, moved
+    `scroll` = (lines, cells) on (see process_lines), beside the stats; faded when a job is `selected` and it
+    does not run here."""
     s = gpu.now
     faded = selected is not None and not any(p.job == selected for p in s.processes)
     # Both sides as (segments, rank); when space runs out the lowest rank goes first:
@@ -1024,27 +1023,17 @@ def panel(gpu, width, height, selected=None, graphs=True):
     parts += [] if s.fan is None else [([("FAN {:>3}%".format(s.fan), "")], 1)]
     parts += [] if s.clock is None else [([("{:>4} MHz".format(s.clock), s.slowdown[1] if s.slowdown else "")], 4)]
     top = edge(width, label, parts)
+    graph_w = max(0, width - CHROME_W - INFO_W)
+    split = 2 + graph_w + 1  # column of the graph | stats divider
+    rule = [(" ├" + "─" * (INFO_W + 2) + "┤", DIM)]  # across the stats, joined to the borders
     if graphs:
-        graph_w = max(0, width - CHROME_W - INFO_W)
-        split = 2 + graph_w + 1  # column of the graph | stats divider
-        rule = [(" ├" + "─" * (INFO_W + 2) + "┤", DIM)]  # across the stats, joined to the borders
-        body = [[("│ ", DIM)] + g + (rule if i is None else [(" │ ", DIM)] + i + [(" │", DIM)])
-                for g, i in zip(graph(gpu.history, graph_w, height, not faded), info(gpu, height))]
-    elif width - CARD_W - 3 >= MIN_LIST_W:  # "│ " stats " │ " processes " │"
-        room, split = width - CARD_W - 3, width - 1
-        listed = process_lines(s.processes, room, height, selected, gpu.index)
-        body = [([("├" + "─" * (INFO_W + 2) + "┤ ", DIM)] if i is None else [("│ ", DIM)] + i + [(" │ ", DIM)])
-                + pad(clip(p, room), room) + [(" │", DIM)] for i, p in zip(info(gpu, height), listed)]
-    else:
-        split = width - 1  # the processes take the whole bottom edge
-        rule = [("├" + "─" * (width - 2) + "┤", DIM)]
-        body = [rule if i is None else [("│ ", DIM)] + i + [(" │", DIM)] for i in info(gpu, height, width - 4)]
-    if graphs or width - CARD_W - 3 < MIN_LIST_W:
+        left = graph(gpu.history, graph_w, height, not faded)
         label = process_label(s.processes, split - 4, selected, gpu.index)
-    else:  # the processes are in the box: the edge keeps the way to the list
-        label = [("+", DIM, ("list", gpu.index))]
-    bottom = bottom_edge(width, split, label)
-    lines = [top] + body + [bottom]
+    else:
+        left, label = process_lines(s.processes, graph_w, height, selected, gpu.index, *scroll)
+    body = [[("│ ", DIM)] + g + (rule if i is None else [(" │ ", DIM)] + i + [(" │", DIM)])
+            for g, i in zip(left, info(gpu, height))]
+    lines = [top] + body + [bottom_edge(width, split, label)]
     if not faded:
         return lines
     return [[(seg[0], FADED + (seg[1] if seg[1] != BOLD else "")) + seg[2:] for seg in line] for line in lines]
@@ -1088,8 +1077,9 @@ def elapsed(started):
 
 def process_entries(processes, selected=None):
     """Processes grouped by owner and conda environment, groups and processes by memory, biggest first, as
-    (tag, segments): the tag "kim/torch", "" for our own processes; the segments the name, which when clicked
-    means its job (the `selected` job's reversed), then run time and memory."""
+    (tag, segments, arguments): the tag "kim/torch", "" for our own processes; the segments the name, which
+    when clicked means its job (the `selected` job's reversed), then run time and memory; the arguments its
+    command line has after the name."""
     def mem(process):
         return process.mem or 0
     groups = {}
@@ -1102,7 +1092,8 @@ def process_entries(processes, selected=None):
             details = [elapsed(process.started)] if process.started is not None else []
             details += [] if process.mem is None else ["{:.1f}G".format(process.mem)]
             name = (process.name, THEME.selected if process.job == selected else THEME.accent, process.job)
-            entries.append((tag, [name] + ([(" " + " ".join(details), DIM, process.job)] if details else [])))
+            entries.append((tag, [name] + ([(" " + " ".join(details), DIM, process.job)] if details else []),
+                            process.command[len(process.name):].strip()))
     return entries
 
 
@@ -1111,7 +1102,7 @@ def process_label(processes, room, selected=None, index=None):
     a.py 1d4h 9.0G". As many whole entries as fit in `room` cells, then "+N" for the rest, or "+" when none
     is left out: clicked, it opens the process list at GPU `index`."""
     entries, last = [], None
-    for tag, segments in process_entries(processes, selected):
+    for tag, segments, _ in process_entries(processes, selected):
         gap = [] if not entries else [(" · ", DIM)] if tag == last else [("   ", "")]
         entries.append(gap + ([(tag + ": ", DIM)] if tag and tag != last else []) + segments)
         last = tag
@@ -1128,14 +1119,38 @@ def process_label(processes, room, selected=None, index=None):
     return label + [more(0)] if label else []
 
 
-def process_lines(processes, room, height, selected=None, index=None):
-    """The processes (process_entries) one a line, `height` lines of at most `room` cells; when not all fit,
-    the last line says how many more, and clicked opens the process list at GPU `index`."""
-    lines = [([(tag + ": ", DIM)] if tag else []) + segments for tag, segments in process_entries(processes, selected)]
-    if len(lines) > height:
-        more = len(lines) - height + 1
-        lines = lines[:height - 1] + [[("+{} more".format(more), DIM, ("list", index))]]
-    return [clip(line, room) for line in lines] + [[]] * (height - len(lines))
+def process_lines(processes, room, height, selected=None, index=None, top=0, shift=0):
+    """The processes (process_entries) one a line with their arguments, `height` lines of `room` cells, from
+    line `top` on and `shift` cells in (see listing_extent), and the label for the box's bottom edge: which
+    lines show of how many, when not all do, and "+", which clicked opens the process list at GPU `index`."""
+    lines = process_listing(processes, selected)
+    shown = [pad(clip(skip(line, shift), room), room) for line in lines[top:top + height]]
+    label = [("{}-{} of {}  ".format(top + 1, top + len(shown), len(lines)), DIM)] if len(lines) > height else []
+    return shown + [[(" " * room, "")]] * (height - len(shown)), label + [("+", DIM, ("list", index))]
+
+
+def process_listing(processes, selected=None):
+    """process_lines's lines, whole: "kim/torch: train.py 2h13m 15.1G  --config a.yaml"."""
+    return [([(tag + ": ", DIM)] if tag else []) + segments + ([("  " + arguments, DIM)] if arguments else [])
+            for tag, segments, arguments in process_entries(processes, selected)]
+
+
+def listing_extent(processes, room, height):
+    """How far process_lines can move on for these processes: (lines, cells)."""
+    lines = process_listing(processes)
+    return max(0, len(lines) - height), max([0] + [width_of(line) - room for line in lines])
+
+
+def skip(line, cells):
+    """`line` without its first `cells` cells."""
+    out = []
+    for seg in line:
+        if cells >= len(seg[0]):
+            cells -= len(seg[0])
+            continue
+        out.append((seg[0][cells:],) + seg[1:])
+        cells = 0
+    return out
 
 
 def bottom_edge(width, split, label):
@@ -1149,31 +1164,25 @@ def bottom_edge(width, split, label):
 MIN_INNER_H = 2  # the shortest a box gets; when even that leaves GPUs out, the boxes scroll
 
 
-CARD_W = INFO_W + 4  # a box without graph: the stats column as wide as beside a graph, and its borders
-MIN_LIST_W = 20      # beside them, the narrowest room worth a list of processes
-
-
-def layout(count, width, height, graphs=True):
+def layout(count, width, height):
     """(columns, inner height) for `count` GPU boxes in `width` x `height` cells."""
-    if graphs:  # two columns only when one column cannot show every GPU at full height
-        two_fit = width // 2 >= CHROME_W + INFO_W + MIN_GRAPH_W
-        cols = 2 if two_fit and count * (MAX_INNER_H + 2) > height else 1
-    else:  # cards: one under the other; side by side only as far as needed for all to show at full height
-        most = max(1, width // CARD_W)
-        cols = next((c for c in range(1, most + 1) if math.ceil(count / c) * (MAX_INNER_H + 2) <= height), most)
+    # Two columns only when one column cannot show every GPU at full height.
+    two_fit = width // 2 >= CHROME_W + INFO_W + MIN_GRAPH_W
+    cols = 2 if two_fit and count * (MAX_INNER_H + 2) > height else 1
     rows = max(1, math.ceil(count / cols))
     return cols, max(MIN_INNER_H, min(MAX_INNER_H, height // rows - 2))
 
 
-def render(gpus, width, height, selected=None, shape=None, graphs=True):
+def render(gpus, width, height, selected=None, shape=None, graphs=True, scroll=None):
     """The GPU boxes, in `shape` = (columns, inner height) or else the layout that fits: exactly `height`
-    lines of exactly `width` cells."""
-    cols, inner = shape or layout(len(gpus), width, height, graphs)
+    lines of exactly `width` cells. Without `graphs`, the processes, moved on as `scroll` has it for each
+    GPU (its index: (lines, cells))."""
+    cols, inner = shape or layout(len(gpus), width, height)
     rows = math.ceil(len(gpus) / cols)
     lines = []
     for r in range(rows):
-        box_w = width // cols if graphs or width // cols - CARD_W - 3 >= MIN_LIST_W else CARD_W
-        panels = [panel(g, box_w, inner, selected, graphs) for g in gpus[r * cols:(r + 1) * cols]]
+        panels = [panel(g, width // cols, inner, selected, graphs, (scroll or {}).get(g.index, (0, 0)))
+                  for g in gpus[r * cols:(r + 1) * cols]]
         lines += [[seg for part in parts for seg in part] for parts in zip(*panels)]
     lines = [pad(clip(line, width), width) for line in lines[:height]]
     return lines + [[(" " * width, "")]] * (height - len(lines))
@@ -1339,6 +1348,8 @@ class View:
         self.list_rows = range(0)         # the screen rows the list takes, when it is open
         self.shift, self.shifted = 0, None  # how far the selected job's command is scrolled, and whose
         self.clicked = (0, None)          # (when, what): the last click, to tell a double click
+        self.scroll = {}                  # GPU index: (lines, cells) its processes are moved on, no graphs
+        self.areas = []                   # (rows, columns, GPU) where those processes are on screen
 
     def restore(self, saved, indices):
         """Take up what an earlier run kept (Settings.load); of the GPUs `indices`, one always stays shown."""
@@ -1381,18 +1392,27 @@ class View:
 
     def boxes(self, gpus, width, height):
         """The GPU boxes in `height` lines; when not all fit, the rows from gpu_top on and a line on that."""
-        cols, inner = layout(len(gpus), width, height, self.graphs)
+        cols, inner = layout(len(gpus), width, height)
         rows = math.ceil(len(gpus) / cols)
-        if rows * (inner + 2) <= height:
+        note, count = [], len(gpus)
+        if rows * (inner + 2) > height:
+            self.gpu_page = max(1, (height - 1) // (inner + 2))
+            self.gpu_top = max(0, min(self.gpu_top, rows - self.gpu_page))
+            gpus = gpus[self.gpu_top * cols:(self.gpu_top + self.gpu_page) * cols]
+            note = [spread(width, [], [("GPUs {} of {} shown · wheel or PgUp/PgDn for the rest".format(
+                ranges([g.index for g in gpus]), count), DIM)])]
+            height -= 1
+        else:
             self.gpu_top, self.gpu_page = 0, rows
-            return render(gpus, width, height, self.job, (cols, inner), self.graphs)
-        self.gpu_page = max(1, (height - 1) // (inner + 2))
-        self.gpu_top = max(0, min(self.gpu_top, rows - self.gpu_page))
-        part = gpus[self.gpu_top * cols:(self.gpu_top + self.gpu_page) * cols]
-        note = "GPUs {} of {} shown · wheel or PgUp/PgDn for the rest".format(
-            ranges([g.index for g in part]), len(gpus))
-        return (render(part, width, height - 1, self.job, (cols, inner), self.graphs)
-                + [spread(width, [], [(note, DIM)])])
+        box_w, room = width // cols, max(0, width // cols - CHROME_W - INFO_W)
+        self.areas = []
+        for k, g in enumerate(gpus):  # the processes' offsets kept in range, and where they show
+            most = listing_extent(g.now.processes, room, inner)
+            top, shift = self.scroll.get(g.index, (0, 0))
+            self.scroll[g.index] = min(max(top, 0), most[0]), min(max(shift, 0), most[1])
+            y, x = 2 + k // cols * (inner + 2), k % cols * box_w + 2  # 2: the top line and the box's edge
+            self.areas.append((range(y, y + inner), range(x, x + room), g.index))
+        return render(gpus, width, height, self.job, (cols, inner), self.graphs, self.scroll) + note
 
     def detail(self, gpus):
         """The GPUs whose processes' utilization is shown: all with the list open, else the selected
@@ -1469,9 +1489,17 @@ class View:
     def handle(self, event):
         """Act on one key or mouse event; False means quit."""
         kind, value = event[0], event[1:]
-        if kind == "wheel":  # over the list it scrolls the list, or the selected job's command sideways;
-            step, row, col = value  # anywhere else, the GPU boxes
-            if row in self.list_rows:
+        if kind in ("wheel", "hwheel"):  # over a GPU's processes (no graphs), they scroll, either way;
+            step, row, col = value     # over the list, the list, or the picked job's command sideways;
+            area = next((index for rows, cols, index in self.areas  # anywhere else, the GPU boxes
+                         if not self.graphs and row in rows and col in cols), None)
+            if area is not None:
+                top, shift = self.scroll.get(area, (0, 0))
+                self.scroll[area] = (top + step, shift) if kind == "wheel" else (top, shift + 8 * step)
+            elif kind == "hwheel":
+                if row in self.list_rows:
+                    self.shift = max(0, self.shift + 8 * step)
+            elif row in self.list_rows:
                 if col >= COMMAND_AT and self.target(row, col) == self.job:
                     self.shift = max(0, self.shift + 8 * step)
                 else:
@@ -1676,7 +1704,8 @@ INPUT = re.compile(rb"\x1b\[<(?P<button>\d+);(?P<x>\d+);(?P<y>\d+)(?P<act>[Mm])"
 
 def events(data):
     """The input in `data`, the bytes a terminal sends: ("key", name) events, ("click", row, column) for
-    a left-button press, ("wheel", +1 down or -1 up, row, column)."""
+    a left-button press, ("wheel", +1 down or -1 up, row, column), ("hwheel", +1 right or -1 left, row,
+    column)."""
     out = []
     for m in INPUT.finditer(data):
         if m.group("button") or m.group("old"):
@@ -1686,8 +1715,9 @@ def events(data):
             else:
                 button, x, y = (c - 32 for c in m.group("old"))
                 press = button & 3 != 3
-            if button & 64:
-                out.append(("wheel", 1 if button & 1 else -1, y - 1, x - 1))
+            if button & 64:  # the wheel: 64 up, 65 down, 66 left, 67 right; with Shift (+4) sideways too
+                sideways = button & 2 or button & 4
+                out.append(("hwheel" if sideways else "wheel", 1 if button & 1 else -1, y - 1, x - 1))
             elif press and button & 3 == 0 and not button & 32:  # left button down, not a drag
                 out.append(("click", y - 1, x - 1))
         elif m.group("report"):

@@ -17,7 +17,7 @@ from PIL import Image, ImageDraw, ImageFont
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 import nvmon  # noqa: E402
 
-# (file, columns, rows, what is on: "list" = the process list with a job picked, "cards" = no graphs)
+# (file, columns, rows, what is on: "list" = the process list with a job picked, "cards" = the processes in place of the graphs)
 SIZES = [("demo-wide.gif", 160, 31, None), ("demo-small.gif", 100, 30, None), ("demo-list.gif", 160, 56, "list"),
          ("demo-cards.gif", 160, 23, "cards")]
 FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono{}.ttf"

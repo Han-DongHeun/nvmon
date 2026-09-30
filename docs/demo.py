@@ -1,5 +1,5 @@
-"""Record nvmon on this machine's GPUs and write the README's GIFs, one per window size, and a picture of
-its themes:
+"""Record nvmon on this machine's GPUs and write the README's pictures: a GIF, stills
+of its views and of the process list, and one of its themes:
 
     uv run --with pillow docs/demo.py [SECONDS]
 
@@ -17,9 +17,28 @@ from PIL import Image, ImageDraw, ImageFont
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 import nvmon  # noqa: E402
 
-# (file, columns, rows, what is on: "list" = the process list with a job picked, "cards" = the processes in place of the graphs)
-SIZES = [("demo-wide.gif", 160, 31, None), ("demo-small.gif", 100, 30, None), ("demo-list.gif", 160, 56, "list"),
-         ("demo-cards.gif", 160, 31, "cards")]
+SIZES = [("demo-wide.gif", 160, 31)]  # (file, columns, rows)
+
+
+def biggest_job(view):
+    """The job most worth showing: one with a launcher (torchrun), the most memory."""
+    return max(view.jobs, key=lambda job: (job.launcher is not None, job.mem)).pid
+
+
+def listing(view):
+    view.listing, view.job, view.sort = True, biggest_job(view), ("util", True)
+
+
+def focus(view):
+    view.job, view.only = biggest_job(view), True
+
+
+# (file, columns, rows, what is set on the view)
+STILLS = [("view-processes.png", 160, 31, lambda view: setattr(view, "left", "processes")),
+          ("view-numbers.png", 160, 31, lambda view: setattr(view, "left", "numbers")),
+          ("view-brief.png", 160, 31, lambda view: setattr(view, "left", "brief")),
+          ("list.png", 160, 48, listing),
+          ("focus.png", 160, 31, focus)]
 FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono{}.ttf"
 CELL_W, CELL_H, PAD, SIZE = 9, 18, 14, 15
 BG, FG = (24, 24, 27), (215, 215, 215)
@@ -47,6 +66,7 @@ def anonymize():
 
     nvmon.Gpu._facts_of = facts
     nvmon.socket.gethostname = lambda: "gpu-node"
+    nvmon.__version__ = nvmon.__version__.split("+")[0]  # as released, not "+dev"
 
 
 def record(seconds, warm_up=70):
@@ -64,16 +84,10 @@ def record(seconds, warm_up=70):
         if tick < 0:
             time.sleep(max(0, 0.5 - (time.monotonic() - start)))
             continue
-        for name, cols, rows, mode in SIZES:
-            view = views[name]
-            if mode == "list" and tick == 0:  # the list open, the biggest job with a launcher picked
-                view.screen(gpus, cols, rows, [], None)
-                view.listing = True
-                view.job = max(view.jobs, key=lambda job: (job.launcher is not None, job.mem)).pid
-            view.left = "processes" if mode == "cards" else "graph"
-            frames[name].append(view.screen(gpus, cols, rows, nvmon.header(cols, 0.5, driver), None))
+        for name, cols, rows in SIZES:
+            frames[name].append(views[name].screen(gpus, cols, rows, nvmon.header(cols, 0.5, driver), None))
         time.sleep(max(0, 0.5 - (time.monotonic() - start)))
-    return frames, gpus
+    return frames, gpus, driver
 
 
 def palette256(n):
@@ -135,7 +149,7 @@ def picture(lines, cols, rows, fonts):
         for seg in line:
             text, style = seg[0], seg[1]
             fg, bg, bold = colors(style)
-            if bg != BG:
+            if bg != BG and text:
                 draw.rectangle([x0 + col * CELL_W, y, x0 + (col + len(text)) * CELL_W - 1, y + CELL_H - 1], fill=bg)
             for i, ch in enumerate(text):
                 x = x0 + (col + i) * CELL_W
@@ -170,18 +184,29 @@ def gallery(gpu, fonts, width=80):
     return image
 
 
+def stills(gpus, driver, fonts, here):
+    for name, cols, rows, setup in STILLS:
+        view = nvmon.View()
+        view.screen(gpus, cols, rows, [], None)  # the jobs, for setup to pick from
+        setup(view)
+        lines = view.screen(gpus, cols, rows, nvmon.header(cols, 0.5, driver), None)
+        picture(lines, cols, rows, fonts).save(os.path.join(here, name), optimize=True)
+        print(name, os.path.getsize(os.path.join(here, name)) // 1024, "KB")
+
+
 def main():
     seconds = float(sys.argv[1]) if len(sys.argv) > 1 else 20
     anonymize()
-    frames, gpus = record(seconds)
+    frames, gpus, driver = record(seconds)
     fonts = {False: ImageFont.truetype(FONT.format(""), SIZE), True: ImageFont.truetype(FONT.format("-Bold"), SIZE)}
     here = os.path.dirname(os.path.abspath(__file__))
-    for name, cols, rows, _ in SIZES:
+    for name, cols, rows in SIZES:
         pictures = [picture(lines, cols, rows, fonts) for lines in frames[name]]
         pictures = [p.quantize(colors=128, method=Image.Quantize.MEDIANCUT) for p in pictures]
         pictures[0].save(os.path.join(here, name), save_all=True, append_images=pictures[1:], duration=500,
                          loop=0, optimize=True)
         print(name, os.path.getsize(os.path.join(here, name)) // 1024, "KB")
+    stills(gpus, driver, fonts, here)
     busiest = max(gpus, key=lambda gpu: sum(gpu.history))
     gallery(busiest, fonts).save(os.path.join(here, "themes.png"), optimize=True)
     print("themes.png", os.path.getsize(os.path.join(here, "themes.png")) // 1024, "KB")

@@ -83,14 +83,17 @@ def _nearest256(rgb):
 
 
 # Styles are written in 24-bit color and turned, as they are sent (restyle), into what the terminal shows:
-# 24-bit color or 256 colors, as color_mode finds; in gray, as the black and white theme has it.
+# 24-bit color or 256 colors, as color_mode finds; in gray, as the black and white theme has it: black on
+# white, every cell on PAPER in INK, every color the gray of its lightness turned around.
+PAPER, INK = (242, 242, 242), (30, 30, 30)
 COLOR_ARG = re.compile(r"\x1b\[([34])8;(?:2;(\d+);(\d+);(\d+)|5;(\d+))m")
 
 
 @lru_cache(maxsize=None)
 def restyle(style, mode, gray=False):
-    """`style` in color `mode`: "256" turns 24-bit colors into the palette's nearest. With `gray`, every color
-    first becomes the gray as light as it (OKLab lightness): the hue goes, the lightness stays."""
+    """`style` in color `mode`: "256" turns 24-bit colors into the palette's nearest. With `gray`, on PAPER
+    in INK, and every color first the gray as dark as it was light (OKLab lightness turned around): light
+    text on the dark screen becomes dark on the white one, and the busiest bars the darkest."""
     if mode == "truecolor" and not gray:
         return style
 
@@ -100,11 +103,15 @@ def restyle(style, mode, gray=False):
             return m.group(0)
         rgb = _palette_rgb(int(code)) if code else tuple(int(v) for v in m.group(2, 3, 4))
         if gray:
-            rgb = _from_oklab((_oklab(rgb)[0], 0, 0))
+            rgb = _from_oklab((1 - _oklab(rgb)[0], 0, 0))
+        return color(layer, rgb)
+
+    def color(layer, rgb):
         if mode == "256":
             return "\x1b[{}8;5;{}m".format(layer, _nearest256(rgb))
         return "\x1b[{}8;2;{};{};{}m".format(layer, *rgb)
-    return COLOR_ARG.sub(swap, style)
+    style = COLOR_ARG.sub(swap, style)
+    return color("4", PAPER) + color("3", INK) + style if gray else style
 
 
 def color_mode(truecolor):
@@ -162,7 +169,7 @@ class Theme(NamedTuple):
     temp: tuple       # style codes for 0 .. 100 °C
     accent: str
     selected: str     # the picked job: reverse video on the accent
-    gray: bool        # black and white: paint turns every color gray, as light as it was
+    gray: bool        # black on white: see restyle
 
 
 def theme(name, stops, accent, temp=None, gray=False):
@@ -201,7 +208,7 @@ THEMES = [
     theme("Cassatt", "#574571 #90719f #b695bc #dec5da", "#b695bc"),
     theme("Rose Pine", "#3e8fb0 #9ccfd8 #c4a7e7 #ea9a97 #eb6f92", "#c4a7e7"),
 ]
-# No hue, only lightness: dark gray when idle to near white when busy.
+# No hue, only lightness, black on white (see restyle): the lightest when idle, near black when busy.
 THEMES.append(theme("black and white", "#505050 #f0f0f0", "#d0d0d0", gray=True))
 THEME = THEMES[0]  # the one in use, set by View.screen before it draws
 SHOWS = "truecolor"  # what the terminal shows (color_mode), set with it

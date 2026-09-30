@@ -3,6 +3,12 @@
 What changes for you in each release. The same notes appear on the
 [releases page](https://github.com/Han-DongHeun/nvmon/releases).
 
+## Unreleased
+
+- The black and white theme is black on white: the whole screen on white, every color the gray as dark
+  as it was light, the busiest bars the darkest.
+- The README shows each view and the process list, and lists every key.
+
 ## 0.3.0
 
 - Processes: click one, or press Tab, to pick its job (a torchrun job's workers count as one). The GPUs

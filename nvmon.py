@@ -29,7 +29,7 @@ from ctypes import byref, c_int, c_uint, c_ulonglong, c_void_p
 from functools import lru_cache
 from typing import NamedTuple, Optional
 
-__version__ = "0.3.1"  # "+dev": work past this release; the release commit sets the next number
+__version__ = "0.3.1+dev"  # "+dev": work past this release; the release commit sets the next number
 REPO = "https://github.com/Han-DongHeun/nvmon"
 RELEASES = REPO + "/releases"                 # release notes, and nvmon.py for those who copy the file
 PYPI_JSON = "https://pypi.org/pypi/nvmon/json"

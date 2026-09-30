@@ -34,7 +34,7 @@ ssh -t HOST nvmon  # over ssh: -t gives it a terminal
   cores at 30 %.
 - **MEM**: memory in use. **CPU -> GPU**, **GPU -> CPU**: PCIe traffic against the link's top speed.
 - **Bottom edge**: the processes, with run time and memory, by account and conda environment (yours
-  unlabelled). `+` opens the process list.
+  unlabelled); `+3` for those that did not fit.
 
 The bottom line has the GPU numbers (click one, or press its key, to hide or show it), the keys, and a
 newer release when there is one.
@@ -63,13 +63,14 @@ Shift+wheel or ← → sideways.
 
 A **job** is a process, or a launcher (torchrun, deepspeed…) with its workers.
 
-- **Pick** one: click a process, or press Tab (Tab and the arrows move on). Its GPUs stand out, and the
-  bottom line sums it up.
-- `f`, or a double click: only its GPUs; again for all.
+- **Pick** one: click a process, or press Tab (Tab and the arrows move on). Its GPUs stand out, the
+  list opens with it picked, and the bottom line sums it up.
+- **Pick a GPU's jobs**: click anywhere else in its box. The same again lets go.
+- `f`, or a double click: only the picked jobs' GPUs; again for all.
 - `p`: every job in a list. Click a heading to sort, again to reverse (or `s`, `r`). ← → scroll the
   picked job's command. Esc, or a click on an empty spot, lets go.
-- `t` stops a job of yours (SIGTERM), `k` kills it (SIGKILL): each after a `y`, and only if it is still
-  the job you picked.
+- `t` stops the picked jobs of yours (SIGTERM), `k` kills them (SIGKILL): after a `y`, and only those
+  still the jobs you picked.
 
 The list, busiest first, one job picked; and that job with `f`:
 
@@ -97,8 +98,9 @@ The list, busiest first, one job picked; and that job with `f`:
 | `c` / `C` | next / previous theme |
 | `p` | process list, open or close |
 | click, Tab, ↑ ↓ | pick a job |
-| `f`, double click | only the picked job's GPUs, or all |
-| `t`, `k`, then `y` | stop (SIGTERM) or kill (SIGKILL) the picked job |
+| click a GPU | pick its jobs |
+| `f`, double click | only the picked jobs' GPUs, or all |
+| `t`, `k`, then `y` | stop (SIGTERM) or kill (SIGKILL) the picked jobs |
 | click a heading, `s`, `r` | sort the list, by the next heading, the other way |
 | wheel, ← → | scroll; sideways the commands |
 | PgUp, PgDn | scroll the GPUs |

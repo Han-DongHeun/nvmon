@@ -817,6 +817,15 @@ def about(job):
     return out
 
 
+def about_all(jobs):
+    """"GPUs 4-7 · 61.2G · 2 yours" for several jobs picked together, as segments."""
+    used = sorted({index for job in jobs for index in job.gpus})
+    parts = ["GPU{} {}".format("s" if len(used) > 1 else "", ranges(used)), "{:.1f}G".format(sum(j.mem for j in jobs))]
+    ours = sum(job.owner is None for job in jobs)
+    parts += ["{} yours".format(ours)] if 0 < ours < len(jobs) else []
+    return [(" · ".join(parts), DIM)]
+
+
 def stop(job, name):
     """Send signal `name` ("SIGTERM" or "SIGKILL") to `job`, once /proc confirms its PIDs still are the
     processes we saw: started when we saw them, holding a GPU open (inside a container, NVML can report
@@ -1059,12 +1068,12 @@ def degraded(gpu):
     return bool(s.pcie_width and gpu.pcie_max_width and s.pcie_width < gpu.pcie_max_width)
 
 
-def panel(gpu, width, height, selected=None, left="graph", scroll=(0, 0)):
+def panel(gpu, width, height, selected=frozenset(), left="graph", scroll=(0, 0)):
     """One GPU's box: beside the stats, as `left` says (see LEFTS), the utilization graph, or the GPU's
     processes one a line, moved `scroll` = (lines, cells) on (see process_lines); or the stats alone. Faded
-    when a job is `selected` and it does not run here."""
+    when jobs are `selected` (their PIDs) and none runs here."""
     s = gpu.now
-    faded = selected is not None and not any(p.job == selected for p in s.processes)
+    faded = bool(selected) and not any(p.job in selected for p in s.processes)
     # Both sides as (segments, rank); when space runs out the lowest rank goes first:
     # fan, name, power, clock, temperature, PCIe warning, slowdown warning. The GPU number stays.
     # Fixed widths keep things from shifting.
@@ -1078,20 +1087,20 @@ def panel(gpu, width, height, selected=None, left="graph", scroll=(0, 0)):
     parts += [] if s.fan is None else [([("FAN {:>3}%".format(s.fan), "")], 1)]
     parts += [] if s.clock is None else [([("{:>4} MHz".format(s.clock), s.slowdown[1] if s.slowdown else "")], 4)]
     top = edge(width, label, parts)
-    if left in CARDS:  # the numbers only: of the processes, just the way to the list
+    if left in CARDS:  # the numbers only, no processes
         split = width - 1
         body = [[("├" + "─" * (width - 2) + "┤", DIM)] if i is None else [("│ ", DIM)] + i + [(" │", DIM)]
                 for i in info(gpu, height)]
-        label = [("+", DIM, ("list", gpu.index))]
+        label = []
     else:
         graph_w = max(0, width - CHROME_W - INFO_W)
         split = 2 + graph_w + 1  # column of the graph | stats divider
         rule = [(" ├" + "─" * (INFO_W + 2) + "┤", DIM)]  # across the stats, joined to the borders
         if left == "graph":
             beside = graph(gpu.history, graph_w, height, not faded)
-            label = process_label(s.processes, split - 4, selected, gpu.index)
+            label = process_label(s.processes, split - 4, selected)
         else:
-            beside, label = process_lines(s.processes, graph_w, height, selected, gpu.index, *scroll)
+            beside, label = process_lines(s.processes, graph_w, height, selected, *scroll)
         body = [[("│ ", DIM)] + g + (rule if i is None else [(" │ ", DIM)] + i + [(" │", DIM)])
                 for g, i in zip(beside, info(gpu, height))]
     lines = [top] + body + [bottom_edge(width, split, label)]
@@ -1151,9 +1160,9 @@ def process_entries(processes):
             for process in group]
 
 
-def process_name(process, selected=None):
-    """The segment of `process`'s name: clicked, it means its job; the `selected` job's is reversed."""
-    return process.name, THEME.selected if process.job == selected else THEME.accent, process.job
+def process_name(process, selected=frozenset()):
+    """The segment of `process`'s name: clicked, it means its job; those of `selected` jobs reversed."""
+    return process.name, THEME.selected if process.job in selected else THEME.accent, process.job
 
 
 def run_time(process):
@@ -1164,10 +1173,9 @@ def memory(process):
     return "-" if process.mem is None else "{:.1f}G".format(process.mem)
 
 
-def process_label(processes, room, selected=None, index=None):
+def process_label(processes, room, selected=frozenset()):
     """The processes (process_entries) on one line: "migi: train.py 2h13m 15.1G · eval.py 5m 0.5G   kim/torch:
-    a.py 1d4h 9.0G". As many whole entries as fit in `room` cells, then "+N" for the rest, or "+" when none
-    is left out: clicked, it opens the process list at GPU `index`."""
+    a.py 1d4h 9.0G". As many whole entries as fit in `room` cells, then "+N" for the rest."""
     entries, last = [], None
     for tag, process in process_entries(processes):
         gap = [] if not entries else [(" · ", DIM)] if tag == last else [("   ", "")]
@@ -1177,29 +1185,29 @@ def process_label(processes, room, selected=None, index=None):
         last = tag
 
     def more(n):
-        return ("  +{}".format(n) if n else "  +", DIM, ("list", index))
+        return [("  +{}".format(n), DIM)] if n else []
     label = []
     for i, entry in enumerate(entries):
         rest = len(entries) - i - 1
-        if width_of(label + entry) + len(more(rest)[0]) > room:
+        if width_of(label + entry + more(rest)) > room:
             # The first entry is always shown, cut if need be; later ones collapse into the count.
-            return clip(entry, room - len(more(rest)[0])) + [more(rest)] if not label else label + [more(rest + 1)]
+            return clip(entry, room - width_of(more(rest))) + more(rest) if not label else label + more(rest + 1)
         label += entry
-    return label + [more(0)] if label else []
+    return label
 
 
-def process_lines(processes, room, height, selected=None, index=None, top=0, shift=0):
+def process_lines(processes, room, height, selected=frozenset(), top=0, shift=0):
     """The processes (process_listing) one a line, `height` lines of `room` cells, from
     line `top` on and `shift` cells in (see listing_extent), and the label for the box's bottom edge: which
-    lines show of how many, when not all do, and "+", which clicked opens the process list at GPU `index`."""
+    lines show of how many, when not all do."""
     lines = process_listing(processes, selected)
     # Sideways the command moves; account, run time and memory, the first segment, stay.
     shown = [pad(clip(line[:1] + skip(line[1:], shift), room), room) for line in lines[top:top + height]]
-    label = [("{}-{} of {}  ".format(top + 1, top + len(shown), len(lines)), DIM)] if len(lines) > height else []
-    return shown + [[(" " * room, "")]] * (height - len(shown)), label + [("+", DIM, ("list", index))]
+    label = [("{}-{} of {}".format(top + 1, top + len(shown), len(lines)), DIM)] if len(lines) > height else []
+    return shown + [[(" " * room, "")]] * (height - len(shown)), label
 
 
-def process_listing(processes, selected=None):
+def process_listing(processes, selected=frozenset()):
     """process_lines's lines, whole: account and environment, run time and memory in columns (one segment),
     then the command line, the name in the process names' color and the arguments dim: "kim/torch:  2d5h
     26.1G  train.py --lr 3". The columns are as wide as the GPU's longest."""
@@ -1265,7 +1273,7 @@ def layout(count, width, height, left="graph"):
     return cols, max(MIN_INNER_H, min(MAX_INNER_H, height // rows - 2))
 
 
-def render(gpus, width, height, selected=None, shape=None, left="graph", scroll=None):
+def render(gpus, width, height, selected=frozenset(), shape=None, left="graph", scroll=None):
     """The GPU boxes, in `shape` = (columns, inner height) or else the layout that fits: exactly `height`
     lines of exactly `width` cells. `left`: see panel; the processes moved on as `scroll` has it for each
     GPU (its index: (lines, cells))."""
@@ -1312,10 +1320,10 @@ def cells(values, width, fill=("",)):
     return line
 
 
-def process_list(jobs, width, rows, selected, top, sort, shift=0):
+def process_list(jobs, width, rows, selected, focus, top, sort, shift=0):
     """The list p opens, `rows` lines: the headings (clicking one sorts by it; `sort` = (column, descending)),
-    the jobs from index `top` on (clicking one means it; the `selected` one reversed, its command moved
-    `shift` characters on), how many more. A command too long to show ends in "…"."""
+    the jobs from index `top` on (clicking one means it; the `selected` ones reversed, the command of the one
+    in `focus` moved `shift` characters on), how many more. A command too long to show ends in "…"."""
     room = max(0, width - COMMAND_AT - 1)
     column, descending = sort
     head = []
@@ -1326,9 +1334,9 @@ def process_list(jobs, width, rows, selected, top, sort, shift=0):
     lines = [cells(head, width)]
     shown = jobs[top:top + rows - 2]
     for job in shown:
-        chosen = job.pid == selected
+        chosen = job.pid in selected
         values = [cell(job) for _, _, cell, _ in COLUMNS]
-        command = "…" + job.command[shift:] if chosen and shift else job.command
+        command = "…" + job.command[shift:] if job.pid == focus and shift else job.command
         values[-1] = (command if len(command) <= room else command[:max(0, room - 1)] + "…", DIM)
         lines.append(cells([(text, THEME.selected if chosen else color, job.pid) for text, color in values],
                            width, (THEME.selected if chosen else "", job.pid)))
@@ -1420,22 +1428,23 @@ MOVES = {"tab": 1, "down": 1, "up": -1, "backtab": -1, "pgdn": 10, "pgup": -10, 
 
 
 class View:
-    """What the screen shows around the numbers, and what keys and clicks do to it: the selected job,
-    only its GPUs, the process list, a question before stopping, a note on how that went."""
+    """What the screen shows around the numbers, and what keys and clicks do to it: the picked jobs (one, or
+    a GPU's), only their GPUs, the process list, a question before stopping, a note on how that went."""
 
     def __init__(self):
         self.shows = "truecolor"          # the colors the terminal shows, see color_mode
         self.theme = THEMES[0]            # the look, see THEMES (c)
         self.left = "graph"               # what the boxes have beside the stats, see LEFTS (v)
         self.hidden, self.indices = set(), []  # the GPUs left out, and all there are
-        self.job = None                   # the selected job's PID
-        self.only = False                 # show only the GPUs it uses
+        self.picked = set()               # the picked jobs' PIDs
+        self.job = None                   # of them the one in focus: the arrows go on from it, ← → move its command
+        self.only = False                 # show only the GPUs they use
         self.listing = False              # the process list is open
-        self.top, self.follow = 0, True   # the list's first job; keep the selected one in view
+        self.top, self.follow = 0, True   # the list's first job; keep the one in focus in view
         self.sort = ("GPUs", False)       # the list's order, and the order Tab and the arrows go in
         self.asking = None                # "SIGTERM" or "SIGKILL" awaiting y or n
         self.note = None                  # (segments, until): what the last stop did
-        self.sent = None                  # (PID, when) of a SIGTERM, to point at k if the job lives on
+        self.sent = None                  # (PIDs, when) of a SIGTERM, to point at k if a job lives on
         self.lines, self.jobs = [], []    # the last screen drawn, and the jobs on it
         self.gpu_top, self.gpu_page = 0, 1  # the first row of boxes shown, and how many rows fit
         self.list_rows = range(0)         # the screen rows the list takes, when it is open
@@ -1444,6 +1453,7 @@ class View:
         self.scroll = {}                  # GPU index: (lines, cells) its processes are moved on
         self.areas = []                   # (rows, columns, GPU) where those processes are on screen
         self.graphs = []                  # (rows, columns, GPU) where the graphs are on screen
+        self.panels = []                  # (rows, columns, GPU index) where the boxes are on screen
         self.pointer = None               # (row, column) of the mouse pointer, as the terminal last said
         self.interval = DEFAULT_INTERVAL  # seconds from one graph column to the next
 
@@ -1459,8 +1469,16 @@ class View:
         """What is kept for the next run: see Settings."""
         return {"left": self.left, "theme": self.theme.name, "sort": self.sort, "hidden": set(self.hidden)}
 
+    def pick(self, pids):
+        """Pick the jobs `pids`, in the list's order, the first in focus; none lets all go."""
+        self.picked = set(pids)
+        self.job = next((job.pid for job in self.jobs if job.pid in self.picked), None)
+        if not self.picked:
+            self.only = False
+
     def selected(self):
-        return next((job for job in self.jobs if job.pid == self.job), None)
+        """The picked jobs, in the list's order."""
+        return [job for job in self.jobs if job.pid in self.picked]
 
     def screen(self, gpus, width, height, top_line, newer):
         """The whole screen: `top_line`, the GPU boxes (and the list, when open), the bottom line."""
@@ -1468,12 +1486,17 @@ class View:
         THEME, SHOWS = self.theme, self.shows
         column, descending = self.sort
         self.jobs = sorted(jobs(gpus), key=lambda job: (SORTS[column](job), job.pid), reverse=descending)
-        job = self.selected()
-        if job is None:  # nothing selected, or its job ended
+        self.picked &= {job.pid for job in self.jobs}  # those that ended go
+        if not self.picked:
             self.job, self.only, self.asking = None, False, None
+        elif self.job not in self.picked:
+            self.job = next(job.pid for job in self.jobs if job.pid in self.picked)
+        picked = self.selected()
+        focus = next(job for job in picked if job.pid == self.job) if picked else None
         self.remind()
         self.indices = [g.index for g in gpus]
-        shown = [g for g in gpus if (g.index in job.gpus if self.only else g.index not in self.hidden)]
+        used = {index for job in picked for index in job.gpus}
+        shown = [g for g in gpus if (g.index in used if self.only else g.index not in self.hidden)]
         rows = min(len(self.jobs) + 2, max(4, (height - 2) // 2)) if self.listing else 0
         body = self.boxes(shown, width, height - 2 - rows)
         self.list_rows = range(1 + len(body), 1 + len(body) + rows)
@@ -1481,9 +1504,10 @@ class View:
             if self.shifted != self.job:
                 self.shift, self.shifted = 0, self.job
             room = max(0, width - COMMAND_AT - 1)
-            self.shift = max(0, min(self.shift, len(job.command) + 1 - room)) if job else 0
-            body += process_list(self.jobs, width, rows, self.job, self.scrolled(rows - 2), self.sort, self.shift)
-        self.lines = self.hover([top_line] + body + [self.bottom_line(width, job, newer, gpus)])
+            self.shift = max(0, min(self.shift, len(focus.command) + 1 - room)) if focus else 0
+            body += process_list(self.jobs, width, rows, self.picked, self.job, self.scrolled(rows - 2), self.sort,
+                                 self.shift)
+        self.lines = self.hover([top_line] + body + [self.bottom_line(width, picked, newer, gpus)])
         return self.lines
 
     def boxes(self, gpus, width, height):
@@ -1502,8 +1526,11 @@ class View:
             height -= 1
         else:
             self.gpu_top, self.gpu_page = 0, rows
-        box_w, room = width // cols, max(0, width // cols - CHROME_W - INFO_W)
+        box_w = CARD_W if self.left in CARDS else width // cols
+        room = max(0, box_w - CHROME_W - INFO_W)
         self.areas, self.graphs = [], []
+        self.panels = [(range(1 + k // cols * (inner + 2), 1 + (k // cols + 1) * (inner + 2)),
+                        range(k % cols * box_w, (k % cols + 1) * box_w), g.index) for k, g in enumerate(gpus)]
         for k, g in enumerate(gpus if self.left in ("graph", "processes") else []):
             y, x = 2 + k // cols * (inner + 2), k % cols * box_w + 2  # 2: the top line and the box's edge
             if self.left == "graph":
@@ -1513,7 +1540,7 @@ class View:
             top, shift = self.scroll.get(g.index, (0, 0))
             self.scroll[g.index] = min(max(top, 0), most[0]), min(max(shift, 0), most[1])
             self.areas.append((range(y, y + inner), range(x, x + room), g.index))
-        return render(gpus, width, height, self.job, (cols, inner), self.left, self.scroll) + note
+        return render(gpus, width, height, self.picked, (cols, inner), self.left, self.scroll) + note
 
     def hovered(self):
         """(GPU, graph rows, graph columns, the column pointed at, its sample) when the pointer is over a graph
@@ -1559,23 +1586,23 @@ class View:
         return lines
 
     def detail(self, gpus):
-        """The GPUs whose processes' utilization is shown: all with the list open, else the selected
-        job's. Only those are asked, as the driver takes some 2 ms a GPU to answer."""
+        """The GPUs whose processes' utilization is shown: all with the list open, else the picked jobs'.
+        Only those are asked, as the driver takes some 2 ms a GPU to answer."""
         if self.listing:
             return {g.index for g in gpus}
-        job = self.selected()
-        return set(job.gpus) if job else set()
+        return {index for job in self.selected() for index in job.gpus}
 
     def remind(self):
         """A job still there 5 s after its SIGTERM may be stuck, or slow to save: say that k ends it."""
         if not self.sent:
             return
-        pid, when = self.sent
-        job = next((job for job in self.jobs if job.pid == pid), None)
-        if job and time.monotonic() - when > 5:
-            self.note = ([("{} is still running 5 s after SIGTERM; k kills it at once".format(job.name), WARN)],
+        pids, when = self.sent
+        living = [job for job in self.jobs if job.pid in pids]
+        if living and time.monotonic() - when > 5:
+            what = living[0].name + " is" if len(living) == 1 else "{} jobs are".format(len(living))
+            self.note = ([("{} still running 5 s after SIGTERM; k kills at once".format(what), WARN)],
                          time.monotonic() + 6)
-        if not job or time.monotonic() - when > 5:
+        if not living or time.monotonic() - when > 5:
             self.sent = None
 
     def scrolled(self, room):
@@ -1595,14 +1622,18 @@ class View:
         return [("GPUs", DIM)] + [(" {}".format(g.index), FAINT if g.index in self.hidden else BOLD, ("gpu", g.index))
                                   for g in gpus]
 
-    def bottom_line(self, width, job, newer, gpus):
+    def bottom_line(self, width, picked, newer, gpus):
         if self.asking:
-            return spread(width, [(self.question(job), WARN)], keys(("y", "yes"), ("n", "no")))
+            return spread(width, [(self.question(picked), WARN)], keys(("y", "yes"), ("n", "no")))
         note = self.note[0] if self.note and time.monotonic() < self.note[1] else None
-        if job:
+        if picked:
             hints = [("f", "all GPUs" if self.only else "only these GPUs")]
-            hints += [("t", "stop"), ("k", "kill")] if job.owner is None and os.name != "nt" else []
-            left = [(job.name, THEME.accent, job.pid), ("  ", DIM)] + about(job)
+            ours = any(job.owner is None for job in picked) and os.name != "nt"
+            hints += [("t", "stop"), ("k", "kill")] if ours else []
+            if len(picked) == 1:
+                left = [(picked[0].name, THEME.accent, picked[0].pid), ("  ", DIM)] + about(picked[0])
+            else:
+                left = [("{} jobs".format(len(picked)), THEME.accent), ("  ", DIM)] + about_all(picked)
             return spread(width, note or left, keys(*hints, ("Esc", "back")))
         if self.listing:
             return spread(width, note or [("click a job or a heading", DIM)],
@@ -1611,9 +1642,16 @@ class View:
             return spread(width, note, keys(("p", "processes"), ("Esc / q", "quit")))
         return footer(width, newer, self.picker(gpus))
 
-    def question(self, job):
-        """"stop train.py: SIGTERM to its torchrun (PID 48213), which ends its 2 workers?" and the like."""
+    def question(self, picked):
+        """"stop train.py: SIGTERM to its torchrun (PID 48213), which ends its 2 workers?" and the like; for
+        several jobs "stop your 2 of 3 jobs, SIGTERM to each: train.py, eval.py?"."""
         what = "stop" if self.asking == "SIGTERM" else "kill"
+        ours = [job for job in picked if job.owner is None]
+        if len(picked) > 1:
+            which = "{} jobs".format(len(ours)) if len(ours) == len(picked) else "your {} of {} jobs".format(
+                len(ours), len(picked))
+            return "{} {}, {} to each: {}?".format(what, which, self.asking, ", ".join(job.name for job in ours))
+        job = ours[0]
         if not job.launcher:
             return "{} {} (PID {}) with {}?".format(what, job.name, job.pid, self.asking)
         passed = ", which ends its" if self.asking == "SIGTERM" else " and to its"
@@ -1654,10 +1692,6 @@ class View:
             else:
                 self.gpu_top += step
             return True
-        if kind == "list":  # "+" under a GPU: the list, from that GPU's first job
-            self.listing, self.follow = True, False
-            self.top = next((i for i, job in enumerate(self.jobs) if value[0] in job.gpus), self.top)
-            return True
         if kind == "gpu":  # a GPU's number at the bottom: hide that GPU, or show it again; one always stays
             index = value[0]
             if index in self.hidden:
@@ -1670,26 +1704,39 @@ class View:
             self.sort, self.follow = (value[0], not descending if value[0] == column else False), True
             return True
         if kind == "click":
-            target = self.target(*value)
-            if isinstance(target, tuple):  # a key hint, a heading of the list, "+" under a GPU
+            row, col = value
+            target = self.target(row, col)
+            if isinstance(target, tuple):  # a key hint, a heading of the list, a GPU's number at the bottom
                 return self.handle(target)
-            # A job picks it; the picked job again, or a place meaning nothing, lets it go, and outside the
-            # list closes that too. A double click on a job picks it and shows only its GPUs, or all again.
+            if target is None:  # anywhere else in a GPU's box: that GPU
+                target = next((("box", index) for rows, cols, index in self.panels if row in rows and col in cols),
+                              None)
             now = time.monotonic()
-            if target is None and value[0] not in self.list_rows:
-                self.listing = False
-            if target is not None and self.clicked[1] == target and now - self.clicked[0] < 0.4:
-                self.job, self.only = target, not self.only
-            else:
-                self.job = target if target is not None and target != self.job else None
+            double = target is not None and self.clicked[1] == target and now - self.clicked[0] < 0.4
             self.asking, self.follow, self.clicked = None, True, (now, target)
+            # A job picks it, a GPU the jobs on it, and outside the list opens that; the same again lets them
+            # go, as does a place meaning nothing, which outside the list closes that too. A double click picks
+            # them and shows only their GPUs, or all again.
+            if target is None:
+                self.pick(())
+                self.listing = self.listing and row in self.list_rows
+                return True
+            pids = [job.pid for job in self.jobs if target[1] in job.gpus] if isinstance(target, tuple) else [target]
+            if not pids:
+                self.note = ([("no processes on GPU {}".format(target[1]), DIM)], now + 2)
+            elif double:
+                self.pick(pids)
+                self.only = not self.only
+            elif set(pids) == self.picked:
+                self.pick(())
+            else:
+                self.pick(pids)
+                self.listing = True
             return True
         key = value[0].lower() if len(value[0]) == 1 else value[0]
         if self.asking:  # y stops; anything else, n and Esc among them, lets it be
             if key == "y":
-                note, sent = stop(self.selected(), self.asking)
-                self.note = (note, time.monotonic() + 4)
-                self.sent = (self.job, time.monotonic()) if sent and self.asking == "SIGTERM" else None
+                self.stop_picked()
             self.asking = None
             return key != "q"
         if key == "q":
@@ -1699,8 +1746,8 @@ class View:
                 self.only = False
             elif self.listing:
                 self.listing = False
-            elif self.job is not None:
-                self.job = None
+            elif self.picked:
+                self.pick(())
             else:
                 return False
         elif key == "p":
@@ -1733,15 +1780,31 @@ class View:
         elif key in MOVES and self.jobs:
             order = [job.pid for job in self.jobs]
             i = order.index(self.job) if self.job in order else (-1 if MOVES[key] > 0 else len(order))
-            self.job, self.follow = order[min(max(i + MOVES[key], 0), len(order) - 1)], True
-        elif self.job is not None and key in ("f", "enter"):
+            self.pick([order[min(max(i + MOVES[key], 0), len(order) - 1)]])
+            self.follow = True
+        elif self.picked and key in ("f", "enter"):
             self.only = not self.only
-        elif self.job is not None and key in ("t", "k"):
-            if self.selected().owner is None:
+        elif self.picked and key in ("t", "k"):
+            if any(job.owner is None for job in self.selected()):
                 self.asking = "SIGTERM" if key == "t" else "SIGKILL"
             else:
                 self.note = ([("only your own processes can be stopped", WARN)], time.monotonic() + 3)
         return True
+
+    def stop_picked(self):
+        """Send the signal asked for to each picked job of ours (see stop), and say how that went."""
+        ours = [job for job in self.selected() if job.owner is None]
+        results = [stop(job, self.asking) for job in ours]
+        sent = {job.pid for job, (_, ok) in zip(ours, results) if ok}
+        failed = [note for note, ok in results if not ok]
+        if len(ours) == 1:
+            note = results[0][0]
+        elif not failed:
+            note = [("sent {} to {} jobs".format(self.asking, len(sent)), "")]
+        else:
+            note = [("sent {} to {} of {} jobs; ".format(self.asking, len(sent), len(ours)), WARN)] + failed[0]
+        self.note = (note, time.monotonic() + 4)
+        self.sent = (sent, time.monotonic()) if sent and self.asking == "SIGTERM" else None
 
 
 # For terminals that draw the line, block and other characters above two cells wide, as they may for Korean,

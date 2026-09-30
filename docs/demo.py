@@ -27,11 +27,13 @@ def biggest_job(view):
 
 
 def listing(view):
-    view.listing, view.job, view.sort = True, biggest_job(view), ("util", True)
+    view.listing, view.sort = True, ("util", True)
+    view.pick([biggest_job(view)])
 
 
 def focus(view):
-    view.job, view.only = biggest_job(view), True
+    view.pick([biggest_job(view)])
+    view.only = True
 
 
 def numbers(view):

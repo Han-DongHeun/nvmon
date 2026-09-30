@@ -8,6 +8,10 @@ What changes for you in each release. The same notes appear on the
 - Point at a graph: its column lights up, and a chip beside the pointer says the utilization then and how
   long ago.
 - Only what changed on the screen is sent to the terminal, a few hundred bytes for most redraws.
+- Click a GPU's box to pick all its jobs; `t` and `k` then stop or kill all of them that are yours, after
+  one `y`. Picking a job, or a GPU's, opens the process list.
+- `+` under a box only counts the processes that did not fit; the process list opens from a click on the
+  box instead.
 
 ## 0.3.2
 

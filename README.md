@@ -44,20 +44,20 @@ and the keys; a newer release, when there is one, with the command that updates 
 
 ## Views: `v`
 
-`v` goes through four views, `V` back. The boxes go one under the other, side by side only when they
-would not all fit; in a small window they get shorter, then scroll (wheel, PgUp/PgDn).
+`v` goes through four views, `V` back. What does not fit the window scrolls (wheel, PgUp/PgDn).
 
-**Graphs**, as above.
+**Graphs**, as above: one under the other, two side by side only when they would not all fit, and in a
+small window shorter.
 
 **Processes** in the graph's place, one a line: account, run time, memory, and the command line. The
 wheel over them scrolls them up and down; tilted, or with Shift, sideways, as do ← and →.
 
 ![nvmon with each GPU's processes in place of its graph](https://raw.githubusercontent.com/Han-DongHeun/nvmon/main/docs/view-processes.png)
 
-**Numbers only**, and **GPU and MEM only**, for many GPUs in little room:
+**Numbers only**, and **GPU and MEM only**: narrow boxes, always one under the other, for a window kept
+beside another. Here the numbers scrolled down to the last four GPUs, and GPU and MEM for all eight:
 
 ![nvmon with the numbers alone](https://raw.githubusercontent.com/Han-DongHeun/nvmon/main/docs/view-numbers.png)
-
 ![nvmon with GPU and MEM alone](https://raw.githubusercontent.com/Han-DongHeun/nvmon/main/docs/view-brief.png)
 
 ## Processes and jobs: `p`

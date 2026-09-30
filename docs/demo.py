@@ -33,12 +33,15 @@ def focus(view):
     view.job, view.only = biggest_job(view), True
 
 
-# (file, columns, rows, what is set on the view). The cards' windows are just big enough for eight GPUs
-# in four columns: no empty space around them.
+def numbers(view):
+    view.left, view.gpu_top = "numbers", 10  # scrolled down to the last GPUs, the busy ones
+
+
+# (file, columns, rows, what is set on the view). The cards' windows are as narrow as the cards, as a window
+# kept beside another; the numbers' window too short for all eight, the brief ones' just tall enough.
 STILLS = [("view-processes.png", 160, 31, lambda view: setattr(view, "left", "processes")),
-          ("view-numbers.png", 4 * nvmon.CARD_W, 2 * (nvmon.MAX_INNER_H + 2) + 2,
-           lambda view: setattr(view, "left", "numbers")),
-          ("view-brief.png", 4 * nvmon.CARD_W, 2 * (nvmon.MIN_INNER_H + 2) + 2,
+          ("view-numbers.png", nvmon.CARD_W, 31, numbers),
+          ("view-brief.png", nvmon.CARD_W, 8 * (nvmon.MIN_INNER_H + 2) + 2,
            lambda view: setattr(view, "left", "brief")),
           ("list.png", 160, 48, listing),
           ("focus.png", 160, 31, focus)]

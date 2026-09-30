@@ -1220,16 +1220,15 @@ CARD_W = INFO_W + 4
 
 
 def layout(count, width, height, left="graph"):
-    """(columns, inner height) for `count` GPU boxes in `width` x `height` cells: one column, side by side
-    only as far as needed for all to show at full height, then shorter."""
+    """(columns, inner height) for `count` GPU boxes in `width` x `height` cells: one column, two side by
+    side only when that lets all show at full height, then shorter. Cards stay one column at their height,
+    and scroll: shorter numbers would be the brief ones."""
     if left in CARDS:
-        most = max(1, width // CARD_W)
-    else:
-        most = 2 if width // 2 >= CHROME_W + INFO_W + MIN_GRAPH_W else 1  # a narrower graph is not worth it
-    tallest = MIN_INNER_H if left == "brief" else MAX_INNER_H
-    cols = next((c for c in range(1, most + 1) if math.ceil(count / c) * (tallest + 2) <= height), most)
+        return 1, MIN_INNER_H if left == "brief" else MAX_INNER_H
+    most = 2 if width // 2 >= CHROME_W + INFO_W + MIN_GRAPH_W else 1  # a narrower graph is not worth it
+    cols = next((c for c in range(1, most + 1) if math.ceil(count / c) * (MAX_INNER_H + 2) <= height), most)
     rows = max(1, math.ceil(count / cols))
-    return cols, max(MIN_INNER_H, min(tallest, height // rows - 2))
+    return cols, max(MIN_INNER_H, min(MAX_INNER_H, height // rows - 2))
 
 
 def render(gpus, width, height, selected=None, shape=None, left="graph", scroll=None):
@@ -1459,8 +1458,10 @@ class View:
             self.gpu_page = max(1, (height - 1) // (inner + 2))
             self.gpu_top = max(0, min(self.gpu_top, rows - self.gpu_page))
             gpus = gpus[self.gpu_top * cols:(self.gpu_top + self.gpu_page) * cols]
-            note = [spread(width, [], [("GPUs {} of {} shown · wheel or PgUp/PgDn for the rest".format(
-                ranges([g.index for g in gpus]), count), DIM)])]
+            shown = "GPUs {} of {}".format(ranges([g.index for g in gpus]), count)
+            text = next((t for t in (shown + " shown · wheel or PgUp/PgDn for the rest", shown + " · PgUp/PgDn")
+                         if len(t) <= width), shown)
+            note = [spread(width, [], [(text, DIM)])]
             height -= 1
         else:
             self.gpu_top, self.gpu_page = 0, rows

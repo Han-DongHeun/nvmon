@@ -41,7 +41,7 @@ Click a process, or press Tab, to pick its job: the GPUs it uses stand out, and 
 Click an empty spot to let the job go and close the list.
 
 The GPU numbers at the bottom left hide a GPU when clicked, and show it again; so does the number's
-key. `g` turns the graphs on and off. `c` goes through the themes (`C` back): nvmon's own, then colour
+key. `g` turns the graphs on and off. `c` goes through the themes (`C` back): nvmon's own, then color
 scales that GitHub, IBM (Carbon), Grafana, Tableau and Radix publish, then black and white. The theme,
 graphs on or off, the list's order and the GPUs hidden stay for the next run, for each computer you
 connect from (in `~/.config/nvmon/settings.json`). Hold Shift to select text with the mouse.
@@ -66,7 +66,7 @@ connect from (in `~/.config/nvmon/settings.json`). Hold Shift to select text wit
 - On Windows, run it in Windows Terminal; Git Bash's default window is not a terminal to Python.
 - nvmon asks the terminal how it draws. One that puts line and block characters two cells wide (Xshell,
   PuTTY and the like, set up for Korean, Chinese or Japanese) gets boxes and graphs drawn in ASCII. One
-  that does not say it shows 24-bit colour gets 256 colours, which look nearly the same.
+  that does not say it shows 24-bit color gets 256 colors, which look nearly the same.
 - Boxes still broken: the terminal moves on one cell, but its font draws the characters two wide. Pick a
   font whose line characters are one cell wide, and make sure the encoding is UTF-8.
 - When a newer release is out, the bottom line says so, with the command that updates your install.

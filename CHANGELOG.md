@@ -14,11 +14,12 @@ What changes for you in each release. The same notes appear on the
   to show them. `g` turns the graphs off, leaving compact cards, several to a row.
 - Works in Xshell, PuTTY and the like without setting them up: nvmon asks the terminal how it draws.
   Where lines come out two cells wide (Korean, Chinese, Japanese settings), boxes and graphs are drawn
-  in ASCII; where 24-bit colour is not known to work, 256 colours are used.
-- The graph shades smoothly: each cell shows two colours, so there are twice as many steps from green
-  to red, and in 256 colours no more dull olive among the greens.
-- Themes: `c` goes through them, `C` back. nvmon's own colours stay the default; the others take the
-  colour scales GitHub, IBM (Carbon), Grafana, Tableau and Radix publish, and one is black and white.
+  in ASCII; where 24-bit color is not known to work, 256 colors are used.
+- The graph shades smoothly: each cell shows two colors, so there are twice as many steps from green
+  to red, and in 256 colors no more dull olive among the greens.
+- Themes: `c` goes through them, `C` back. nvmon's own colors stay the default; the others take the
+  color scales GitHub, IBM (Carbon), Grafana, Tableau and Radix publish, and black and white: grays as
+  light as the colors were.
 - The theme, graphs on or off, the process list's order and the GPUs hidden stay for the next run, for
   each computer you connect from.
 - A capital A, B, C, D, F, H or Z typed is that letter, no longer an arrow key, Home or End.

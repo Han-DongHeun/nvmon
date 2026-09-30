@@ -87,12 +87,12 @@ def palette256(n):
     return (8 + 10 * (n - 232),) * 3
 
 
-def colours(style):
+def colors(style):
     """(foreground, background, bold) for one of nvmon's styles."""
     fg, bg, faint = FG, BG, style.startswith(nvmon.FADED)
     for layer, r, g, b, code in re.findall(r"\x1b\[([34])8;(?:2;(\d+);(\d+);(\d+)|5;(\d+))m", style):
-        colour = palette256(int(code)) if code else (int(r), int(g), int(b))
-        fg, bg = (colour, bg) if layer == "3" else (fg, colour)
+        color = palette256(int(code)) if code else (int(r), int(g), int(b))
+        fg, bg = (color, bg) if layer == "3" else (fg, color)
     if faint:
         fg = tuple((a + b) // 2 for a, b in zip(fg, BG))
     if "\x1b[7m" in style:
@@ -134,7 +134,7 @@ def picture(lines, cols, rows, fonts):
         col = 0
         for seg in line:
             text, style = seg[0], seg[1]
-            fg, bg, bold = colours(style)
+            fg, bg, bold = colors(style)
             if bg != BG:
                 draw.rectangle([x0 + col * CELL_W, y, x0 + (col + len(text)) * CELL_W - 1, y + CELL_H - 1], fill=bg)
             for i, ch in enumerate(text):
@@ -157,9 +157,10 @@ def gallery(gpu, fonts, width=80):
     boxes = []
     for theme in nvmon.THEMES:
         nvmon.THEME = theme
-        lines = nvmon.panel(gpu, width, 5, None, True, not theme.mono)
-        if theme.mono:
-            lines = [[(seg[0], nvmon.restyle(seg[1], "mono")) + tuple(seg[2:]) for seg in line] for line in lines]
+        lines = nvmon.panel(gpu, width, 5)
+        if theme.gray:
+            lines = [[(seg[0], nvmon.restyle(seg[1], "truecolor", True)) + tuple(seg[2:]) for seg in line]
+                     for line in lines]
         boxes.append(picture([[(theme.name, nvmon.BOLD)]] + lines, width, 8, fonts))
     nvmon.THEME = nvmon.THEMES[0]
     w, h = boxes[0].size

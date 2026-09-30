@@ -1023,11 +1023,11 @@ def panel(gpu, width, height, selected=None, left="graph", scroll=(0, 0)):
     parts += [] if s.fan is None else [([("FAN {:>3}%".format(s.fan), "")], 1)]
     parts += [] if s.clock is None else [([("{:>4} MHz".format(s.clock), s.slowdown[1] if s.slowdown else "")], 4)]
     top = edge(width, label, parts)
-    if left == "none":
-        split = width - 1  # the processes take the whole bottom edge
+    if left == "none":  # the numbers only: of the processes, just the way to the list
+        split = width - 1
         body = [[("├" + "─" * (width - 2) + "┤", DIM)] if i is None else [("│ ", DIM)] + i + [(" │", DIM)]
                 for i in info(gpu, height)]
-        label = process_label(s.processes, split - 4, selected, gpu.index)
+        label = [("+", DIM, ("list", gpu.index))]
     else:
         graph_w = max(0, width - CHROME_W - INFO_W)
         split = 2 + graph_w + 1  # column of the graph | stats divider

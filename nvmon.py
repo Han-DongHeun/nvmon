@@ -1144,16 +1144,19 @@ def process_lines(processes, room, height, selected=None, index=None, top=0, shi
 
 def process_listing(processes, selected=None):
     """process_lines's lines, whole: account and environment, run time and memory in columns (one segment),
-    then the command line, the name in the process names' color: "kim/torch:  2d5h  26.1G  train.py --lr 3"."""
+    then the command line, the name in the process names' color and the arguments dim: "kim/torch:  2d5h
+    26.1G  train.py --lr 3". The columns are as wide as the GPU's longest."""
     entries = process_entries(processes)
     tag_w = max([0] + [len(tag) + 1 for tag, _ in entries])  # the longest "kim/torch:", when any has one
+    time_w = max([0] + [len(run_time(process)) for _, process in entries])
+    mem_w = max([0] + [len(memory(process)) for _, process in entries])
     lines = []
     for tag, process in entries:
         command = process.command
         rest = command[len(process.name):] if command.startswith(process.name) else " " + command
-        columns = ("{:<{}}  ".format(tag + ":" if tag else "", tag_w) if tag_w else "") + "{:>6} {:>6}  ".format(
-            run_time(process), memory(process))
-        lines.append([(columns, DIM, process.job), process_name(process, selected), (rest, "", process.job)])
+        columns = ("{:<{}}  ".format(tag + ":" if tag else "", tag_w) if tag_w else "") + "{:>{}}  {:>{}}  ".format(
+            run_time(process), time_w, memory(process), mem_w)
+        lines.append([(columns, DIM, process.job), process_name(process, selected), (rest, DIM, process.job)])
     return lines
 
 

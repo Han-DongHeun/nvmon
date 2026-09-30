@@ -24,6 +24,7 @@ What changes for you in each release. The same notes appear on the
 - The theme, graphs on or off, the process list's order and the GPUs hidden stay for the next run, for
   each computer you connect from.
 - A capital A, B, C, D, F, H or Z typed is that letter, no longer an arrow key, Home or End.
+- The keys work with a Korean keyboard in Hangul mode: ㅂ is q, ㅊ is c, and so on.
 - When the GPUs do not fit the window, their boxes scroll (wheel, PgUp/PgDn). The boxes are a line
   shorter: the "PCIe transfer" title is gone, as CPU -> GPU and GPU -> CPU say it already.
 - No more stutter when another program uses the GPU driver at the same time, such as someone

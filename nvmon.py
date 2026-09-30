@@ -1232,6 +1232,25 @@ SEQUENCE_KEYS = {"A": "up", "B": "down", "C": "right", "D": "left", "H": "home",
                  "1~": "home", "4~": "end", "5~": "pgup", "6~": "pgdn"}
 HINT_KEYS = {"Esc": "esc", "Esc / q": "q"}  # what clicking a key hint presses
 
+# A Korean keyboard in Hangul mode types letters of Hangul: the key of q gives ㅂ. Taken back to the keys of
+# the common layout (2-beolsik), the keys work without switching to English; a syllable the input method has
+# put together, such as 사, counts as the keys typed for it, t and k.
+JAMO_KEYS = dict(zip("ㅂㅈㄷㄱㅅㅛㅕㅑㅐㅔㅁㄴㅇㄹㅎㅗㅓㅏㅣㅋㅌㅊㅍㅠㅜㅡㅃㅉㄸㄲㅆㅒㅖ", "qwertyuiopasdfghjklzxcvbnmQWERTOP"))
+JAMO_KEYS.update({"ㅘ": "hk", "ㅙ": "ho", "ㅚ": "hl", "ㅝ": "nj", "ㅞ": "np", "ㅟ": "nl", "ㅢ": "ml", "ㄳ": "rt",
+                  "ㄵ": "sw", "ㄶ": "sg", "ㄺ": "fr", "ㄻ": "fa", "ㄼ": "fq", "ㄽ": "ft", "ㄾ": "fx", "ㄿ": "fv",
+                  "ㅀ": "fg", "ㅄ": "qt"})
+INITIALS, MEDIALS, FINALS = "ㄱㄲㄴㄷㄸㄹㅁㅂㅃㅅㅆㅇㅈㅉㅊㅋㅌㅍㅎ", "ㅏㅐㅑㅒㅓㅔㅕㅖㅗㅘㅙㅚㅛㅜㅝㅞㅟㅠㅡㅢㅣ", \
+    " ㄱㄲㄳㄴㄵㄶㄷㄹㄺㄻㄼㄽㄾㄿㅀㅁㅂㅄㅅㅆㅇㅈㅊㅋㅌㅍㅎ"
+
+
+def typed(char):
+    """The keys `char` was typed with: "q" for ㅂ, "tk" for 사, `char` itself for anything not Hangul."""
+    syllable = ord(char) - 0xAC00
+    if 0 <= syllable < 19 * 21 * 28:
+        parts = INITIALS[syllable // 588], MEDIALS[syllable // 28 % 21], FINALS[syllable % 28].strip()
+        return "".join(JAMO_KEYS[part] for part in parts if part)
+    return JAMO_KEYS.get(char, char)
+
 
 def keys(*hints):
     """Key hints for the bottom line, keys(("p", "processes"), ...); clicking one presses its key."""
@@ -1617,6 +1636,7 @@ INPUT = re.compile(rb"\x1b\[<(?P<button>\d+);(?P<x>\d+);(?P<y>\d+)(?P<act>[Mm])"
                    rb"|\x1b\[M(?P<old>...)"                                     # mouse, the old encoding
                    rb"|\x1b[\[O](?P<args>[?0-9;]*)(?P<end>[A-Za-z~])"            # arrows, Home, PgUp and such
                    rb"|(?P<report>\x1bP[^\x1b]*\x1b\\)"                           # a late answer to Screen.probe
+                   rb"|(?P<text>[\xc2-\xf4][\x80-\xbf]+)"                          # a letter beyond ASCII, as UTF-8
                    rb"|(?P<char>.)", re.DOTALL)                                 # any other key; a lone ESC is Esc
 
 
@@ -1643,6 +1663,8 @@ def events(data):
             name = SEQUENCE_KEYS.get(args + end) or SEQUENCE_KEYS.get(end)
             if name:
                 out.append(("key", name))
+        elif m.group("text"):  # Hangul among them, see typed
+            out += [("key", key) for char in m.group("text").decode("utf-8", "replace") for key in typed(char)]
         else:
             char = m.group("char").decode("latin-1")
             out.append(("key", CONTROL_KEYS.get(char, char)))
@@ -1707,9 +1729,9 @@ class Screen:
                     char = msvcrt.getwch()
                     if char in ("\x00", "\xe0"):  # arrows and the like come as two characters
                         name = WINDOWS_KEYS.get(msvcrt.getwch())
+                        found += [("key", name)] if name else []
                     else:
-                        name = CONTROL_KEYS.get(char, char)
-                    found += [("key", name)] if name else []
+                        found += [("key", CONTROL_KEYS.get(char) or key) for key in typed(char)]
                 left = end - time.monotonic()
                 if found or left <= 0:
                     return found

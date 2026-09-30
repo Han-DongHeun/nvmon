@@ -45,7 +45,8 @@ key. `g` turns the graphs on and off. `c` goes through the themes (`C` back): nv
 from works by Hiroshige, Hokusai, O'Keeffe, Van Gogh, Bénédictus and Cassatt (as [MetBrewer](https://github.com/BlakeRMills/MetBrewer)
 has them) and the [Rosé Pine](https://rosepinetheme.com) theme's, then black and white. The theme,
 graphs on or off, the list's order and the GPUs hidden stay for the next run, for each computer you
-connect from (in `~/.config/nvmon/settings.json`). Hold Shift to select text with the mouse.
+connect from (in `~/.config/nvmon/settings.json`). The keys work with a Korean keyboard in Hangul mode
+too (ㅂ quits). Hold Shift to select text with the mouse.
 
 ![nvmon's themes, one box in each](https://raw.githubusercontent.com/Han-DongHeun/nvmon/main/docs/themes.png)
 

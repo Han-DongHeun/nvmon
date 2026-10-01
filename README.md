@@ -128,4 +128,4 @@ The view, theme, list order and hidden GPUs, for each computer you connect from,
 
 ## License
 
-MIT
+MIT. Written largely with an AI coding assistant, to a design of mine, and tested on shared H100 servers.

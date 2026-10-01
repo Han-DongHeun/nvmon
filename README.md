@@ -128,4 +128,5 @@ The view, theme, list order and hidden GPUs, for each computer you connect from,
 
 ## License
 
-MIT. Written largely with an AI coding assistant, to a design of mine, and tested on shared H100 servers.
+MIT. I designed nvmon's features and usability and tested it on shared H100 servers; most of the code was
+written with an AI coding assistant.

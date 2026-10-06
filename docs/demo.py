@@ -1,11 +1,12 @@
-"""Record nvmon on this machine's GPUs and write the README's pictures: a GIF, stills
-of its views and of the process list, and one of its themes:
+"""Record nvmon on this machine's GPUs and write the README's pictures: a GIF and a still of it (for link
+previews and tool directories), stills of its views and of the process list, and one of its themes:
 
     uv run --with pillow docs/demo.py [SECONDS]
 
 Process names, conda environments, accounts, commands and the host name are swapped for made-up ones,
 so nothing of the machine or its users shows. Needs an NVIDIA GPU, and DejaVu Sans Mono for the text.
 """
+import itertools
 import math
 import os
 import re
@@ -80,13 +81,14 @@ def anonymize():
 
 
 STEPS = 6  # frames a half second while the pointer is in, as nvmon redraws on each move
+STILL_AT = 5.2  # seconds into the GIF for its still: the pointer resting on a graph, its chip shown
 
 
 def pointer_path(view, cols):
     """Where the pointer goes in the GIF, as (seconds, (row, column), bow) keyframes: in from the right, onto
-    the second box's graph, left along it, a rest, a little further, then out to the right again. Each way
+    the busiest GPU's graph, left along it, a rest, a little further, then out to the right again. Each way
     there bends by `bow` rows, as a hand's does."""
-    rows, graph, _ = view.graphs[min(1, len(view.graphs) - 1)]
+    rows, graph, _ = max(view.graphs, key=lambda shown: sum(shown[2].history))
     mid, right = rows.start + len(rows) // 2, graph.stop
     return [(1.5, (mid + 3.5, cols + 2), 0), (2.7, (mid + 0.4, right - 5), -1.5), (4.8, (mid - 0.3, right - 33), 0.6),
             (5.6, (mid - 0.3, right - 33), 0), (6.3, (mid + 0.5, right - 41), 0.4), (8.0, (mid - 2, cols + 3), -2)]
@@ -264,6 +266,9 @@ def main():
     for name, cols, rows in SIZES:
         pictures = [picture(lines, cols, rows, fonts) for lines, _, _ in frames[name]]
         pictures = [arrow(p, at) if at else p for p, (_, at, _) in zip(pictures, frames[name])]
+        starts = itertools.accumulate([0] + [ms for _, _, ms in frames[name]])
+        still = next((p for p, start in zip(pictures, starts) if start >= STILL_AT * 1000), pictures[-1])
+        still.save(os.path.join(here, name.replace(".gif", ".png")), optimize=True)
         pictures = [p.quantize(colors=128, method=Image.Quantize.MEDIANCUT) for p in pictures]
         pictures[0].save(os.path.join(here, name), save_all=True, append_images=pictures[1:],
                          duration=[ms for _, _, ms in frames[name]], loop=0, optimize=True)

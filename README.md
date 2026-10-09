@@ -2,7 +2,7 @@
 
 A fancy NVIDIA GPU monitor for the terminal. One Python file, no dependencies.
 
-![nvmon showing four busy H100 GPUs one under the other, the other four hidden, the pointer moving along a graph with the utilization then beside it](https://raw.githubusercontent.com/Han-DongHeun/nvmon/main/docs/demo-wide.gif)
+![nvmon showing four H100 GPUs one under the other, two people's jobs on them, the other four hidden, the pointer moving along a graph with the utilization and memory then beside it](https://raw.githubusercontent.com/Han-DongHeun/nvmon/main/docs/demo-wide.gif)
 
 ## Install
 
@@ -58,7 +58,7 @@ Shift+wheel or ← → sideways.
 
 <div align="center">
 
-| Numbers only, scrolled down | GPU and MEM only |
+| Numbers only | GPU and MEM only |
 |:---:|:---:|
 | <img src="https://raw.githubusercontent.com/Han-DongHeun/nvmon/main/docs/view-numbers.png" alt="nvmon with the numbers alone" width="200"> | <img src="https://raw.githubusercontent.com/Han-DongHeun/nvmon/main/docs/view-brief.png" alt="nvmon with GPU and MEM alone" width="200"> |
 

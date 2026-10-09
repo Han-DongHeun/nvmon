@@ -1,85 +1,148 @@
-"""Record nvmon on this machine's GPUs and write the README's pictures: a GIF and a still of it (for link
-previews and tool directories), stills of its views and of the process list, and one of its themes:
+"""Write the README's pictures of nvmon on a made-up GPU server: a GIF and a still of it (for link previews and
+tool directories), stills of its views and of the process list, and one of its themes:
 
-    uv run --with pillow docs/demo.py [SECONDS]
+    uv run --with pillow docs/demo.py
 
-Process names, conda environments, accounts, commands and the host name are swapped for made-up ones,
-so nothing of the machine or its users shows. Needs an NVIDIA GPU, and DejaVu Sans Mono for the text.
+The server is a script: each GPU's utilization and memory over time and the processes on it, the rest as an H100
+shows it. So the pictures come out the same each time, but for the clock, and need no GPU; only DejaVu Sans Mono
+for the text.
 """
 import itertools
 import math
 import os
+import random
 import re
 import sys
 import time
+from collections import deque
 
 from PIL import Image, ImageDraw, ImageFont
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 import nvmon  # noqa: E402
 
-SHOWN = 4  # GPUs in the GIF, the busiest: the others hidden, as a click on their numbers does
-SIZES = [("demo-wide.gif", 120, SHOWN * (nvmon.MAX_INNER_H + 2) + 2)]  # (file, columns, rows): one under the other
+# ── the server ───────────────────────────────────────────────────────────────
+
+WARM, SECONDS = 240, 10  # half-second ticks that fill the graphs before the GIF; the GIF's length
+TICKS = WARM + 2 * SECONDS
 
 
-def biggest_job(view):
-    """The job most worth showing: one with a launcher (torchrun), the most memory."""
-    return max(view.jobs, key=lambda job: (job.launcher is not None, job.mem)).pid
+class Clock:
+    """nvmon's time: as in the real world, but for time.time(), which goes on half a second a tick here."""
+    now = time.time()
+
+    def time(self):
+        return Clock.now
+
+    def __getattr__(self, name):
+        return getattr(time, name)
 
 
-def listing(view):
-    view.listing, view.sort = True, ("util", True)
-    view.pick([biggest_job(view)])
+# Utilization over TICKS ticks, by kind of work.
+
+def phases(rng, segments):
+    """By turns: (ticks, level, spread, gaps) segments, the last long enough to reach the end; `gaps`, the
+    chance a tick drops near zero (a step waiting on something)."""
+    out = [3 + rng.uniform(0, 8) if rng.random() < gaps else level + rng.gauss(0, spread)
+           for ticks, level, spread, gaps in segments for _ in range(ticks)]
+    return out[:TICKS]
 
 
-def focus(view):
-    view.pick([biggest_job(view)])
-    view.only = True
+def blocks(rng, high=95, low=18, busy=(12, 22), quiet=(5, 12)):
+    """A sweep: run after run, each busy for a while, a pause between."""
+    out = []
+    while len(out) < TICKS:
+        out += [high + rng.gauss(0, 4) for _ in range(rng.randint(*busy))]
+        out += [low + rng.gauss(0, 8) for _ in range(rng.randint(*quiet))]
+    return out[:TICKS]
 
 
-def numbers(view):
-    view.left, view.gpu_top = "numbers", 10  # scrolled down to the last GPUs, the busy ones
+def wavering(rng, center=45):
+    """A job its data loader keeps waiting: never long busy, never long idle."""
+    out, u = [], 40.0
+    for _ in range(TICKS):
+        u += (center - u) * 0.3 + rng.uniform(-24, 24)
+        out.append(min(88, u))
+    return out
 
 
-# (file, columns, rows, what is set on the view). The cards' windows are as narrow as the cards, as a window
-# kept beside another; the numbers' window too short for all eight, the brief ones' just tall enough.
-STILLS = [("view-graphs.png", 160, 31, lambda view: None),  # too short for eight one under the other
-          ("view-processes.png", 160, 31, lambda view: setattr(view, "left", "processes")),
-          ("view-numbers.png", nvmon.CARD_W, 31, numbers),
-          ("view-brief.png", nvmon.CARD_W, 8 * (nvmon.MIN_INNER_H + 2) + 2,
-           lambda view: setattr(view, "left", "brief")),
-          ("list.png", 160, 48, listing),
-          ("focus.png", 160, 31, focus)]
-FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono{}.ttf"
-CELL_W, CELL_H, PAD, SIZE = 9, 18, 14, 15
-BG, FG = (24, 24, 27), (215, 215, 215)
+def bursts(rng, low=6, high=84):
+    """Serving requests: bursts of work, quiet between."""
+    out = []
+    while len(out) < TICKS:
+        busy = rng.random() < 0.5
+        out += [(high if busy else low) + rng.uniform(-10, 8)
+                for _ in range(rng.randint(3, 12) if busy else rng.randint(2, 9))]
+    return out[:TICKS]
 
 
-def anonymize():
-    """Swap every process's name, account, environment and command for made-up ones, consistently."""
-    jobs, alone = iter(["train.py", "finetune.py", "pretrain.py"]), iter(["sweep.py", "eval.py", "bench.py"])
-    owners, envs = iter(["kim", "lee", "park", "choi"]), iter(["torch", "jax", "vllm", "hf"])
-    seen = {}
-
-    def pick(pool, value, fallback):
-        if value and (id(pool), value) not in seen:
-            seen[id(pool), value] = next(pool, fallback)
-        return seen.get((id(pool), value))
-
-    real = nvmon.Gpu._facts_of
-
-    def facts(self, pid):
-        name, _, owner, env, started, job, launcher = real(self, pid)
-        name = pick(jobs, name, "job.py") if launcher else pick(alone, name, "run.py")  # launched: training
-        command = "{} --config configs/{}.yaml --seed {}".format(name, name[:-3], pid % 7)
-        return (name, command, pick(owners, owner, "user"), pick(envs, env, "env"), started, job,
-                "torchrun" if launcher else None)
-
-    nvmon.Gpu._facts_of = facts
-    nvmon.socket.gethostname = lambda: "gpu-node"
-    nvmon.__version__ = nvmon.__version__.split("+")[0]  # as released, not "+dev"
+def idle(rng):
+    return [0] * TICKS
 
 
+# The share of the utilization the SMs and the Tensor Cores are busy, by kind of work (cores, tensor)
+KINDS = {phases: (0.7, 0.45), blocks: (0.74, 0.48), wavering: (0.55, 0.28), bursts: (0.62, 0.34), idle: (0, 0)}
+
+
+class Scripted(nvmon.Gpu):
+    """An H100 whose readings come from a script, not a driver: `kind` of work (with `shape`, its arguments)
+    using `mem` GiB for `procs`; `hot`: held back by heat."""
+
+    def __init__(self, index, kind, mem, procs, hot=False, **shape):
+        self.index, self.name = index, "H100 80GB HBM3"
+        self.history, self.memory = deque(maxlen=nvmon.HISTORY), deque(maxlen=nvmon.HISTORY)
+        self.sample = self.now = None
+        self.pcie_max_gen, self.pcie_max_width, self.has_activity = 5, 16, True
+        self.utils = kind(random.Random(index), **shape)
+        self.kind, self.mem, self.procs, self.hot = kind, mem, procs, hot
+        self.rng, self.tick, self.temp = random.Random(index * 7 + 3), 0, 31.0
+
+    def poll(self, detail=False):
+        u = max(0, min(100, round(self.utils[min(self.tick, TICKS - 1)])))
+        self.tick += 1
+        # It warms and cools slowly; held back by heat, until it has cooled
+        self.temp += (31 + (0.42 * u + 28 * self.hot) * (u > 0) - self.temp) * 0.06
+        cores, tensor = KINDS[self.kind]
+        mem = self.mem + self.rng.uniform(-0.05, 0.05) if self.mem else 0.0
+        busy = bool(self.procs)
+        self.sample = nvmon.Sample(
+            util=u, temp=round(self.temp), fan=None, power_limit=700,
+            power=min(700, 72 + 6.2 * u + self.rng.uniform(-8, 8)) if busy else 70 + self.rng.uniform(-3, 3),
+            clock=(1350 + self.rng.randint(-60, 60) if self.hot else 1980) if busy else 345,
+            mem_used=mem, mem_total=79.6, pcie_width=16,
+            tx=(0.02 + 0.06 * self.rng.random()) * 1e9 * (u > 0),
+            rx=((6 if self.kind is wavering else 0.5) * u / 100 + 0.05 * self.rng.random()) * 1e9 * (u > 0),
+            cores=cores * u + self.rng.uniform(0, 2) * (u > 0), tensor=tensor * u,
+            slowdown=("SLOWED: too hot", nvmon.ALERT) if self.hot and busy else None,
+            processes=[p._replace(mem=mem / len(self.procs)) for p in self.procs],
+            process_util={p.pid: u / len(self.procs) for p in self.procs} if detail else None)
+
+
+def proc(pid, name, owner, env, minutes, args, job=None, launcher=None):
+    """A process `minutes` old; `owner` None for ours."""
+    return nvmon.Process(pid, name, name + " " + args, 0, owner, env, Clock.now - 60 * minutes, job or pid, launcher)
+
+
+def server():
+    """The eight GPUs, and the four the GIF shows: han's training on 0-1 (busy, then less so; low and broken),
+    yoon's sweeps on 2-3 (one in big blocks, on a GPU held back by heat); a model being served, our evaluation
+    waiting on its data loader, a notebook holding memory, and one idle."""
+    han = [proc(241801 + k, "train.py", "han", "torch", 312, "--config configs/train.yaml", 241800, "torchrun")
+           for k in range(2)]
+    gpus = [Scripted(0, phases, 4.6, han[:1], segments=[(190, 93, 6, 0.03), (200, 34, 9, 0.08)]),
+            Scripted(1, phases, 5.2, han[1:], segments=[(400, 20, 8, 0.15)]),
+            Scripted(2, blocks, 42.0, [proc(287700, "sweep.py", "yoon", "jax", 97, "--lr 1e-4")], hot=True),
+            Scripted(3, wavering, 24.5, [proc(270500, "sweep.py", "yoon", "jax", 1800, "--lr 3e-4")], center=35),
+            Scripted(4, bursts, 71.2, [proc(198733, "serve.py", "park", "vllm", 1520, "--model llama-3-8b")]),
+            Scripted(5, wavering, 22.4, [proc(325017, "eval.py", None, "torch", 26, "--config configs/eval.yaml")]),
+            Scripted(6, idle, 31.5, [proc(287390, "ipykernel_launcher", "choi", "hf", 2900, "-f kernel.json")]),
+            Scripted(7, idle, 0, [])]
+    return gpus, (0, 1, 2, 3)
+
+
+# ── the GIF ──────────────────────────────────────────────────────────────────
+
+GIF = ("demo-wide.gif", 120, 4 * (nvmon.MAX_INNER_H + 2) + 2)  # (file, columns, rows): four boxes one under the other
 STEPS = 6  # frames a half second while the pointer is in, as nvmon redraws on each move
 STILL_AT = 5.2  # seconds into the GIF for its still: the pointer resting on a graph, its chip shown
 
@@ -97,7 +160,7 @@ def pointer_path(view, cols):
 def along(path, t):
     """The pointer's (row, column) at `t` seconds on `path`, or None before and after: each way eased in and
     out, as a hand starts and stops, and bent by its bow."""
-    if not path or not path[0][0] <= t <= path[-1][0]:
+    if not path[0][0] <= t <= path[-1][0]:
         return None
     for (t0, a, _), (t1, b, bow) in zip(path, path[1:]):
         if t0 <= t <= t1:
@@ -107,40 +170,64 @@ def along(path, t):
     return None
 
 
-def record(seconds, warm_up=70):
-    """Screens every half second, and more often while the pointer moves: {file: [(lines, pointer or None,
-    milliseconds), ...]}, and the GPUs as they are at the end. The first `warm_up` seconds are not kept:
-    they fill the graphs."""
-    nv = nvmon.load_nvml()
-    gpus, driver = nvmon.open_gpus(nv), nvmon.versions(nv)
-    views = {name: nvmon.View() for name, *_ in SIZES}
-    frames = {name: [] for name, *_ in SIZES}
-    paths = {}
-    for tick in range(-int(warm_up * 2), int(seconds * 2)):
-        start = time.monotonic()
+def record(gpus, shown, driver):
+    """The GIF's screens, every half second and more often while the pointer moves: [(lines, pointer or None,
+    milliseconds)], after WARM ticks have filled the graphs."""
+    def tick():
         for gpu in gpus:
             gpu.poll(detail=True)
             gpu.frame()
-        if tick < 0:
-            time.sleep(max(0, 0.5 - (time.monotonic() - start)))
-            continue
-        for name, cols, rows in SIZES:
-            view = views[name]
-            if tick == 0:
-                busiest = sorted(gpus, key=lambda gpu: -sum(gpu.history))[:SHOWN]
-                view.hidden = {gpu.index for gpu in gpus if gpu not in busiest}
-                view.screen(gpus, cols, rows, [], None)  # where the graphs are, for the pointer's path
-                paths[name] = pointer_path(view, cols)
-            moving = any(along(paths[name], tick / 2 + s / 2 / STEPS) for s in range(STEPS))
-            steps = STEPS if moving else 1
-            for s in range(steps):
-                at = along(paths[name], tick / 2 + s / 2 / steps)
-                cell = at and (round(at[0]), round(at[1]))  # outside the window the terminal says nothing
-                view.pointer = cell if cell and 0 <= cell[0] < rows and 0 <= cell[1] < cols else None
-                lines = view.screen(gpus, cols, rows, nvmon.header(cols, 0.5, driver), None)
-                frames[name].append((lines, at, 500 // steps))
-        time.sleep(max(0, 0.5 - (time.monotonic() - start)))
-    return frames, gpus, driver
+    for _ in range(WARM):
+        tick()
+        Clock.now += 0.5
+    _, cols, rows = GIF
+    view = nvmon.View()
+    view.hidden = {gpu.index for gpu in gpus if gpu.index not in shown}  # as a click on their numbers does
+    frames, path = [], None
+    for k in range(2 * SECONDS):
+        tick()
+        if path is None:
+            view.screen(gpus, cols, rows, [], None)  # where the graphs are, for the pointer's path
+            path = pointer_path(view, cols)
+        steps = STEPS if any(along(path, k / 2 + s / 2 / STEPS) for s in range(STEPS)) else 1
+        for s in range(steps):
+            at = along(path, k / 2 + s / 2 / steps)
+            cell = at and (round(at[0]), round(at[1]))  # outside the window the terminal says nothing
+            view.pointer = cell if cell and 0 <= cell[0] < rows and 0 <= cell[1] < cols else None
+            frames.append((view.screen(gpus, cols, rows, nvmon.header(cols, 0.5, driver), None), at, 500 // steps))
+            Clock.now += 0.5 / steps
+    return frames
+
+
+# ── pictures ─────────────────────────────────────────────────────────────────
+
+def biggest_job(view):
+    """The job most worth showing: one with a launcher (torchrun), the most memory."""
+    return max(view.jobs, key=lambda job: (job.launcher is not None, job.mem)).pid
+
+
+def listing(view):
+    view.listing, view.sort = True, ("util", True)
+    view.pick([biggest_job(view)])
+
+
+def focus(view):
+    view.pick([biggest_job(view)])
+    view.only = True
+
+
+# (file, columns, rows, what is set on the view). The cards' windows are as narrow as the cards, as a window
+# kept beside another; the numbers' window too short for all eight, the brief ones' just tall enough.
+STILLS = [("view-graphs.png", 160, 31, lambda view: None),  # too short for eight one under the other
+          ("view-processes.png", 160, 31, lambda view: setattr(view, "left", "processes")),
+          ("view-numbers.png", nvmon.CARD_W, 31, lambda view: setattr(view, "left", "numbers")),
+          ("view-brief.png", nvmon.CARD_W, 8 * (nvmon.MIN_INNER_H + 2) + 2,
+           lambda view: setattr(view, "left", "brief")),
+          ("list.png", 160, 48, listing),
+          ("focus.png", 160, 31, focus)]
+FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono{}.ttf"
+CELL_W, CELL_H, PAD, SIZE = 9, 18, 14, 15
+BG, FG = (24, 24, 27), (215, 215, 215)
 
 
 def palette256(n):
@@ -247,36 +334,42 @@ def gallery(gpu, fonts, width=80):
     return image
 
 
-def stills(gpus, driver, fonts, here):
+def save(image, here, name):
+    image.save(os.path.join(here, name), optimize=True)
+    print(name, os.path.getsize(os.path.join(here, name)) // 1024, "KB")
+
+
+def main():
+    nvmon.time = Clock()
+    nvmon.socket.gethostname = lambda: "gpu-node"
+    nvmon.__version__ = nvmon.__version__.split("+")[0]  # as released, not "+dev"
+    driver = "driver 580.173.02  CUDA 13.0"
+    fonts = {False: ImageFont.truetype(FONT.format(""), SIZE), True: ImageFont.truetype(FONT.format("-Bold"), SIZE)}
+    here = os.path.dirname(os.path.abspath(__file__))
+    gpus, shown = server()
+    frames = record(gpus, shown, driver)
+    name, cols, rows = GIF
+    pictures = [picture(lines, cols, rows, fonts) for lines, _, _ in frames]
+    pictures = [arrow(p, at) if at else p for p, (_, at, _) in zip(pictures, frames)]
+    starts = itertools.accumulate([0] + [ms for _, _, ms in frames])
+    save(next((p for p, start in zip(pictures, starts) if start >= STILL_AT * 1000), pictures[-1]), here,
+         name.replace(".gif", ".png"))
+    pictures = [p.quantize(colors=128, method=Image.Quantize.MEDIANCUT) for p in pictures]
+    pictures[0].save(os.path.join(here, name), save_all=True, append_images=pictures[1:],
+                     duration=[ms for _, _, ms in frames], loop=0, optimize=True)
+    print(name, os.path.getsize(os.path.join(here, name)) // 1024, "KB")
     for name, cols, rows, setup in STILLS:
         view = nvmon.View()
         view.screen(gpus, cols, rows, [], None)  # the jobs, for setup to pick from
         setup(view)
-        lines = view.screen(gpus, cols, rows, nvmon.header(cols, 0.5, driver), None)
-        picture(lines, cols, rows, fonts).save(os.path.join(here, name), optimize=True)
-        print(name, os.path.getsize(os.path.join(here, name)) // 1024, "KB")
-
-
-def main():
-    seconds = float(sys.argv[1]) if len(sys.argv) > 1 else 10
-    anonymize()
-    frames, gpus, driver = record(seconds)
-    fonts = {False: ImageFont.truetype(FONT.format(""), SIZE), True: ImageFont.truetype(FONT.format("-Bold"), SIZE)}
-    here = os.path.dirname(os.path.abspath(__file__))
-    for name, cols, rows in SIZES:
-        pictures = [picture(lines, cols, rows, fonts) for lines, _, _ in frames[name]]
-        pictures = [arrow(p, at) if at else p for p, (_, at, _) in zip(pictures, frames[name])]
-        starts = itertools.accumulate([0] + [ms for _, _, ms in frames[name]])
-        still = next((p for p, start in zip(pictures, starts) if start >= STILL_AT * 1000), pictures[-1])
-        still.save(os.path.join(here, name.replace(".gif", ".png")), optimize=True)
-        pictures = [p.quantize(colors=128, method=Image.Quantize.MEDIANCUT) for p in pictures]
-        pictures[0].save(os.path.join(here, name), save_all=True, append_images=pictures[1:],
-                         duration=[ms for _, _, ms in frames[name]], loop=0, optimize=True)
-        print(name, os.path.getsize(os.path.join(here, name)) // 1024, "KB")
-    stills(gpus, driver, fonts, here)
-    busiest = max(gpus, key=lambda gpu: sum(gpu.history))
-    gallery(busiest, fonts).save(os.path.join(here, "themes.png"), optimize=True)
-    print("themes.png", os.path.getsize(os.path.join(here, "themes.png")) // 1024, "KB")
+        save(picture(view.screen(gpus, cols, rows, nvmon.header(cols, 0.5, driver), None), cols, rows, fonts), here,
+             name)
+    # The themes on GPU 2's sweep, idle to full and back, without the heat to warn of
+    calm = Scripted(2, blocks, 42.0, gpus[2].procs)
+    for _ in range(TICKS):
+        calm.poll()
+        calm.frame()
+    save(gallery(calm, fonts), here, "themes.png")
 
 
 if __name__ == "__main__":

@@ -3,7 +3,7 @@
 What changes for you in each release. The same notes appear on the
 [releases page](https://github.com/Han-DongHeun/nvmon/releases).
 
-## Unreleased
+## 0.3.4
 
 - Pointing at a graph shows the memory in use then as well: "73% · 41.2G · 16s ago". Where the graph is
   narrow, the memory gives way first, then the time.

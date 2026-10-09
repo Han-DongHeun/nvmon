@@ -126,25 +126,25 @@ def proc(pid, name, owner, env, minutes, mem, args, job=None, launcher=None):
 
 def server():
     """The eight GPUs, and the four the GIF shows: han's training on 0-1 (busy, then less so; low and broken),
-    with a checkpoint being evaluated and someone's notebook beside it; yoon's sweeps on 2-3 (one in big blocks,
-    on a GPU held back by heat); a model being served, our evaluation in shards waiting on its data loader,
-    notebooks holding memory, and one idle."""
+    with a checkpoint being evaluated and yoon's notebook beside it; yoon's sweeps on 2-3 (one in big blocks,
+    on a GPU held back by heat); han's model being served, our evaluation in shards waiting on its data loader,
+    yoon's notebooks holding memory, and one idle. Only those two names, and ours."""
     han = [proc(241801 + k, "train.py", "han", "torch", 312, mem, "--config configs/train.yaml", 241800, "torchrun")
            for k, mem in enumerate((4.6, 5.2))]
     sweep = [proc(pid, "sweep.py", "yoon", "jax", minutes, mem, "--lr " + lr) for pid, minutes, mem, lr in
              ((287700, 97, 30.2, "1e-4"), (287731, 41, 6.9, "2e-4"), (287765, 12, 4.9, "5e-4"),
               (270500, 1800, 18.3, "3e-4"), (270544, 1680, 6.2, "3e-5"))]
     checkpoint = proc(330112, "eval_ckpt.py", "han", "torch", 3, 0.8, "--ckpt runs/step_42000")
-    notebook = proc(301877, "ipykernel_launcher", "kang", "torch", 95, 2.1, "-f kernel-2.json")
+    notebook = proc(301877, "ipykernel_launcher", "yoon", "jax", 95, 2.1, "-f kernel-2.json")
     shards = [proc(325017 + k, "eval.py", None, "torch", 28 - k // 2, 3.7, "--shard {}/6".format(k)) for k in range(6)]
     gpus = [Scripted(0, phases, han[:1] + [checkpoint], segments=[(190, 93, 6, 0.03), (200, 34, 9, 0.08)]),
             Scripted(1, phases, han[1:] + [notebook], segments=[(400, 20, 8, 0.15)]),
             Scripted(2, blocks, sweep[:3], hot=True),
             Scripted(3, wavering, sweep[3:], center=35),
-            Scripted(4, bursts, [proc(198733, "serve.py", "park", "vllm", 1520, 71.2, "--model llama-3-8b")]),
+            Scripted(4, bursts, [proc(198733, "serve.py", "han", "vllm", 1520, 71.2, "--model llama-3-8b")]),
             Scripted(5, wavering, shards),
-            Scripted(6, idle, [proc(287390, "ipykernel_launcher", "choi", "hf", 2900, 31.5, "-f kernel.json"),
-                               proc(287455, "ipykernel_launcher", "choi", "hf", 300, 2.4, "-f kernel-1.json")]),
+            Scripted(6, idle, [proc(287390, "ipykernel_launcher", "yoon", "hf", 2900, 31.5, "-f kernel.json"),
+                               proc(287455, "ipykernel_launcher", "yoon", "hf", 300, 2.4, "-f kernel-1.json")]),
             Scripted(7, idle, [])]
     return gpus, (0, 1, 2, 3)
 

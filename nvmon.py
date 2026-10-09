@@ -387,7 +387,8 @@ class Gpu:
         nv.nvmlDeviceGetName(handle, name, NVML_DEVICE_NAME_BUFFER_SIZE)
         name = name.value.decode("utf-8", "replace")
         self.name = name[len("NVIDIA "):] if name.startswith("NVIDIA ") else name
-        self.history = deque(maxlen=HISTORY)
+        self.history = deque(maxlen=HISTORY)  # utilization, one a frame: the graph
+        self.memory = deque(maxlen=HISTORY)   # and the memory in use then (GiB), for the chip (View.hover)
         self.sample = None  # the newest reading, written by poll()
         self.now = None     # the reading on screen, taken from `sample` by frame()
         self.pcie_max_gen = self._uint("nvmlDeviceGetMaxPcieLinkGeneration")
@@ -586,6 +587,7 @@ class Gpu:
         """Put the newest reading on screen for the next frame; the graph gains one column per frame."""
         self.now = self.sample
         self.history.append(self.now.util or 0)
+        self.memory.append(self.now.mem_used)
 
 
 class Poller(threading.Thread):
@@ -1560,16 +1562,16 @@ class View:
         return render(gpus, width, height, self.picked, (cols, inner), self.left, self.scroll) + note
 
     def hovered(self):
-        """(GPU, graph rows, graph columns, the column pointed at, its sample) when the pointer is over a graph
-        column that has one; else None."""
+        """(GPU, graph rows, graph columns, the column pointed at, how many samples back from the newest that
+        is) when the pointer is over a graph column that has a sample; else None."""
         if self.pointer is None:
             return None
         row, col = self.pointer
         for rows, cols, gpu in self.graphs:
             if row in rows and col in cols:
-                back = cols.stop - 1 - col  # samples back from the newest, on the right
+                back = cols.stop - 1 - col  # the newest is on the right
                 if back < len(gpu.history):
-                    return gpu, rows, cols, col, gpu.history[-1 - back]
+                    return gpu, rows, cols, col, back
         return None
 
     def pointed(self):
@@ -1579,25 +1581,29 @@ class View:
 
     def hover(self, lines):
         """`lines` with the column under the pointer lit up, and beside the pointer a chip with that moment:
-        the utilization, and how long ago."""
+        the utilization, the memory in use, and how long ago."""
         hovered = self.hovered()
         if hovered is None:
             return lines
-        gpu, rows, cols, col, value = hovered
-        back = (cols.stop - 1 - col) * self.interval
-        chip = " {}% · {} ".format(value, ago(back))
+        gpu, rows, cols, col, back = hovered
+        mem = gpu.memory[-1 - back]
+        parts = ["{}%".format(gpu.history[-1 - back]), None if mem is None else "{:.1f}G".format(mem),
+                 ago(back * self.interval)]
+        # As much as fits on the pointer's right, or else its left: all, without the memory, the utilization alone.
+        chips = [" {} ".format(" · ".join(filter(None, shown))) for shown in (parts, parts[::2], parts[:1])]
+        place = next(((chip, start) for chip in chips for start in (col + 2, col - 1 - len(chip))
+                      if cols.start <= start and start + len(chip) <= cols.stop), None)
         lines = list(lines)
         for row in rows:
             cells = [(ch,) + tuple(seg[1:]) for seg in lines[row] for ch in seg[0]]
             ch, style = cells[col][:2]
             paper = ON_PAPER if style.startswith(ON_PAPER) else ""
             cells[col] = ("│", paper + GUIDE) if ch == " " else (ch, lit(style))
-            if row == self.pointer[0]:
-                start = col + 2 if col + 2 + len(chip) <= cols.stop else col - 1 - len(chip)
-                if start >= cols.start:
-                    bold = chip.index("%") + 1
-                    for k, c in enumerate(chip):
-                        cells[start + k] = (c, paper + CHIP + (BOLD if k < bold else ""))
+            if row == self.pointer[0] and place:
+                chip, start = place
+                bold = chip.index("%") + 1
+                for k, c in enumerate(chip):
+                    cells[start + k] = (c, paper + CHIP + (BOLD if k < bold else ""))
             lines[row] = [("".join(c[0] for c in run),) + key for key, run in
                           itertools.groupby(cells, key=lambda c: c[1:])]
         return lines

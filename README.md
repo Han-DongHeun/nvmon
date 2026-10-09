@@ -28,7 +28,8 @@ ssh -t HOST nvmon  # over ssh: -t gives it a terminal
 
 - **Top edge**: number and name, power against its limit, temperature, fan (if any), clock. Warnings
   only when something is off: `SLOWED: power cap | too hot | hw brake`, `PCIe DEGRADED: x16 -> x8`.
-- **Graph**: utilization over time, newest on the right. Point at it for the value at that moment.
+- **Graph**: utilization over time, newest on the right. Point at it for the utilization and memory at that
+  moment.
 - **GPU**: how much of the time a kernel ran. **cores / tensor** (H100 and newer): how busy that kept
   the chip, and how much was Tensor Core math. One small kernel running nonstop reads GPU 100 % with
   cores at 30 %.
@@ -98,7 +99,7 @@ The list, busiest first, one job picked; and that job with `f`:
 | `v` / `V` | next / previous view |
 | `c` / `C` | next / previous theme |
 | `p` | process list, open or close |
-| point at a graph | its value then |
+| point at a graph | utilization and memory then |
 | click, Tab, ↑ ↓ | pick a job |
 | click a GPU | pick its jobs |
 | `f`, double click | only the picked jobs' GPUs, or all |

@@ -86,15 +86,15 @@ KINDS = {phases: (0.7, 0.45), blocks: (0.74, 0.48), wavering: (0.55, 0.28), burs
 
 class Scripted(nvmon.Gpu):
     """An H100 whose readings come from a script, not a driver: `kind` of work (with `shape`, its arguments)
-    using `mem` GiB for `procs`; `hot`: held back by heat."""
+    for `procs`, which hold their memory; `hot`: held back by heat."""
 
-    def __init__(self, index, kind, mem, procs, hot=False, **shape):
+    def __init__(self, index, kind, procs, hot=False, **shape):
         self.index, self.name = index, "H100 80GB HBM3"
         self.history, self.memory = deque(maxlen=nvmon.HISTORY), deque(maxlen=nvmon.HISTORY)
         self.sample = self.now = None
         self.pcie_max_gen, self.pcie_max_width, self.has_activity = 5, 16, True
         self.utils = kind(random.Random(index), **shape)
-        self.kind, self.mem, self.procs, self.hot = kind, mem, procs, hot
+        self.kind, self.procs, self.hot = kind, procs, hot
         self.rng, self.tick, self.temp = random.Random(index * 7 + 3), 0, 31.0
 
     def poll(self, detail=False):
@@ -103,40 +103,49 @@ class Scripted(nvmon.Gpu):
         # It warms and cools slowly; held back by heat, until it has cooled
         self.temp += (31 + (0.42 * u + 28 * self.hot) * (u > 0) - self.temp) * 0.06
         cores, tensor = KINDS[self.kind]
-        mem = self.mem + self.rng.uniform(-0.05, 0.05) if self.mem else 0.0
+        held = sum(p.mem for p in self.procs)
         busy = bool(self.procs)
         self.sample = nvmon.Sample(
             util=u, temp=round(self.temp), fan=None, power_limit=700,
             power=min(700, 72 + 6.2 * u + self.rng.uniform(-8, 8)) if busy else 70 + self.rng.uniform(-3, 3),
             clock=(1350 + self.rng.randint(-60, 60) if self.hot else 1980) if busy else 345,
-            mem_used=mem, mem_total=79.6, pcie_width=16,
+            mem_used=held + self.rng.uniform(-0.05, 0.05) if busy else 0.0, mem_total=79.6, pcie_width=16,
             tx=(0.02 + 0.06 * self.rng.random()) * 1e9 * (u > 0),
             rx=((6 if self.kind is wavering else 0.5) * u / 100 + 0.05 * self.rng.random()) * 1e9 * (u > 0),
             cores=cores * u + self.rng.uniform(0, 2) * (u > 0), tensor=tensor * u,
             slowdown=("SLOWED: too hot", nvmon.ALERT) if self.hot and busy else None,
-            processes=[p._replace(mem=mem / len(self.procs)) for p in self.procs],
-            process_util={p.pid: u / len(self.procs) for p in self.procs} if detail else None)
+            processes=self.procs,
+            process_util={p.pid: u * p.mem / held for p in self.procs} if detail else None)  # the bigger, the busier
 
 
-def proc(pid, name, owner, env, minutes, args, job=None, launcher=None):
-    """A process `minutes` old; `owner` None for ours."""
-    return nvmon.Process(pid, name, name + " " + args, 0, owner, env, Clock.now - 60 * minutes, job or pid, launcher)
+def proc(pid, name, owner, env, minutes, mem, args, job=None, launcher=None):
+    """A process `minutes` old holding `mem` GiB; `owner` None for ours."""
+    return nvmon.Process(pid, name, name + " " + args, mem, owner, env, Clock.now - 60 * minutes, job or pid,
+                         launcher)
 
 
 def server():
     """The eight GPUs, and the four the GIF shows: han's training on 0-1 (busy, then less so; low and broken),
-    yoon's sweeps on 2-3 (one in big blocks, on a GPU held back by heat); a model being served, our evaluation
-    waiting on its data loader, a notebook holding memory, and one idle."""
-    han = [proc(241801 + k, "train.py", "han", "torch", 312, "--config configs/train.yaml", 241800, "torchrun")
-           for k in range(2)]
-    gpus = [Scripted(0, phases, 4.6, han[:1], segments=[(190, 93, 6, 0.03), (200, 34, 9, 0.08)]),
-            Scripted(1, phases, 5.2, han[1:], segments=[(400, 20, 8, 0.15)]),
-            Scripted(2, blocks, 42.0, [proc(287700, "sweep.py", "yoon", "jax", 97, "--lr 1e-4")], hot=True),
-            Scripted(3, wavering, 24.5, [proc(270500, "sweep.py", "yoon", "jax", 1800, "--lr 3e-4")], center=35),
-            Scripted(4, bursts, 71.2, [proc(198733, "serve.py", "park", "vllm", 1520, "--model llama-3-8b")]),
-            Scripted(5, wavering, 22.4, [proc(325017, "eval.py", None, "torch", 26, "--config configs/eval.yaml")]),
-            Scripted(6, idle, 31.5, [proc(287390, "ipykernel_launcher", "choi", "hf", 2900, "-f kernel.json")]),
-            Scripted(7, idle, 0, [])]
+    with a checkpoint being evaluated and someone's notebook beside it; yoon's sweeps on 2-3 (one in big blocks,
+    on a GPU held back by heat); a model being served, our evaluation in shards waiting on its data loader,
+    notebooks holding memory, and one idle."""
+    han = [proc(241801 + k, "train.py", "han", "torch", 312, mem, "--config configs/train.yaml", 241800, "torchrun")
+           for k, mem in enumerate((4.6, 5.2))]
+    sweep = [proc(pid, "sweep.py", "yoon", "jax", minutes, mem, "--lr " + lr) for pid, minutes, mem, lr in
+             ((287700, 97, 30.2, "1e-4"), (287731, 41, 6.9, "2e-4"), (287765, 12, 4.9, "5e-4"),
+              (270500, 1800, 18.3, "3e-4"), (270544, 1680, 6.2, "3e-5"))]
+    checkpoint = proc(330112, "eval_ckpt.py", "han", "torch", 3, 0.8, "--ckpt runs/step_42000")
+    notebook = proc(301877, "ipykernel_launcher", "kang", "torch", 95, 2.1, "-f kernel-2.json")
+    shards = [proc(325017 + k, "eval.py", None, "torch", 28 - k // 2, 3.7, "--shard {}/6".format(k)) for k in range(6)]
+    gpus = [Scripted(0, phases, han[:1] + [checkpoint], segments=[(190, 93, 6, 0.03), (200, 34, 9, 0.08)]),
+            Scripted(1, phases, han[1:] + [notebook], segments=[(400, 20, 8, 0.15)]),
+            Scripted(2, blocks, sweep[:3], hot=True),
+            Scripted(3, wavering, sweep[3:], center=35),
+            Scripted(4, bursts, [proc(198733, "serve.py", "park", "vllm", 1520, 71.2, "--model llama-3-8b")]),
+            Scripted(5, wavering, shards),
+            Scripted(6, idle, [proc(287390, "ipykernel_launcher", "choi", "hf", 2900, 31.5, "-f kernel.json"),
+                               proc(287455, "ipykernel_launcher", "choi", "hf", 300, 2.4, "-f kernel-1.json")]),
+            Scripted(7, idle, [])]
     return gpus, (0, 1, 2, 3)
 
 
@@ -364,12 +373,12 @@ def main():
         setup(view)
         save(picture(view.screen(gpus, cols, rows, nvmon.header(cols, 0.5, driver), None), cols, rows, fonts), here,
              name)
-    # The themes on GPU 2's sweep, idle to full and back, without the heat to warn of
-    calm = Scripted(2, blocks, 42.0, gpus[2].procs)
+    # The themes on a GPU busy all along: its graph a wall of the theme's colors, bottom to top, ragged at the top
+    busy = Scripted(0, phases, gpus[0].procs, segments=[(TICKS, 88, 8, 0)])
     for _ in range(TICKS):
-        calm.poll()
-        calm.frame()
-    save(gallery(calm, fonts), here, "themes.png")
+        busy.poll()
+        busy.frame()
+    save(gallery(busy, fonts), here, "themes.png")
 
 
 if __name__ == "__main__":

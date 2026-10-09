@@ -3,6 +3,12 @@
 What changes for you in each release. The same notes appear on the
 [releases page](https://github.com/Han-DongHeun/nvmon/releases).
 
+## Unreleased
+
+- A GPU running more than 64 processes showed none of them; now it shows them all.
+- `-i` with something other than seconds, such as `-i abc`, is an error, as a wrong `-g` is, rather than
+  0.5 without a word.
+
 ## 0.3.3
 
 - Point at a graph: its column lights up, and a chip beside the pointer says the utilization then and how

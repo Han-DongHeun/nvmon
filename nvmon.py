@@ -282,7 +282,6 @@ class ProcessInfo(ctypes.Structure):  # nvmlProcessInfo_v2_t
 
 
 NVML_VALUE_NOT_AVAILABLE = 2**64 - 1  # usedGpuMemory under Windows WDDM
-MAX_PROCESSES = 64
 
 
 class GpmSupport(ctypes.Structure):  # nvmlGpmSupport_t
@@ -398,7 +397,8 @@ class Gpu:
         self._facts = {}  # pid -> what _facts_of says: fixed for a process's life, so read once
         self._listed, self._listed_mem = [], None  # process list, and the memory in use when it was read
         # Per-process utilization: the driver's samples since `seen` (µs), read at most every second.
-        self._util, self._util_due, self._util_seen, self._util_buf = None, 0, 0, (ProcessUtil * 128)()
+        self._util, self._util_due, self._util_seen = None, 0, 0
+        self._sizes = {}  # entry type -> how many the last array of them held, see _entries
 
     def _call(self, fn, *args):
         """Run the device query `fn`; its NVML return code. A query this GPU or driver cannot answer is not
@@ -475,11 +475,25 @@ class Gpu:
             return None
         return next(((label, color) for bits, label, color in SLOWDOWNS if reasons.value & bits), None)
 
+    def _entries(self, kind, query):
+        """(return code, entries) of `query(array, count)`, a query that fills an array of `kind` and sets
+        `count`. The array is made bigger while the driver says it is too small (more may come between its
+        answer and asking again), and starts that big the next time."""
+        size = self._sizes.get(kind, 64)
+        for _ in range(3):
+            array, count = (kind * size)(), c_uint(size)
+            rc = query(array, count)
+            if rc != NVML_ERROR_INSUFFICIENT_SIZE:
+                break
+            size = 2 * max(count.value, size)
+        self._sizes[kind] = size
+        return rc, array[:count.value] if rc == NVML_SUCCESS else []
+
     def _processes(self):
-        infos, count = (ProcessInfo * MAX_PROCESSES)(), c_uint(MAX_PROCESSES)
-        if not self._ok("nvmlDeviceGetComputeRunningProcesses_v3", byref(count), infos):
+        rc, running = self._entries(ProcessInfo, lambda array, count: self._call(
+            "nvmlDeviceGetComputeRunningProcesses_v3", byref(count), array))
+        if rc != NVML_SUCCESS:
             return []
-        running = infos[:count.value]
         self._facts = {p.pid: self._facts.get(p.pid) or self._facts_of(p.pid) for p in running}
         procs = []
         for p in running:
@@ -520,18 +534,12 @@ class Gpu:
     def _process_util(self):
         """{pid: % of the time its kernels ran} since the last call; None where the GPU cannot tell
         (with MIG, say). The driver takes some 2 ms to answer, so this is asked only while it is shown."""
-        for _ in range(3):
-            count = c_uint(len(self._util_buf))
-            rc = self._call("nvmlDeviceGetProcessUtilization", self._util_buf, byref(count),
-                            c_ulonglong(self._util_seen))
-            if rc != NVML_ERROR_INSUFFICIENT_SIZE:
-                break
-            self._util_buf = (ProcessUtil * (2 * count.value))()
+        rc, samples = self._entries(ProcessUtil, lambda array, count: self._call(
+            "nvmlDeviceGetProcessUtilization", array, byref(count), c_ulonglong(self._util_seen)))
         if rc == NVML_ERROR_NOT_FOUND:  # no new samples: nothing ran
             return {}
         if rc != NVML_SUCCESS:
             return None
-        samples = self._util_buf[:count.value]
         self._util_seen = max([self._util_seen] + [s.timeStamp for s in samples])
         runs = {}
         for s in samples:
@@ -1878,32 +1886,27 @@ class Settings:
         return data if isinstance(data, dict) else {}
 
     def load(self, host):
-        """This client's settings as View.restore takes them, the GPUs hidden those on `host`."""
-        mine = self._read().get(self.client)
-        mine = mine if isinstance(mine, dict) else {}
-        out = {"left": mine["left"]} if mine.get("left") in LEFTS else {}
-        if isinstance(mine.get("theme"), str):
-            out["theme"] = mine["theme"]
-        sort = mine.get("sort")
-        if isinstance(sort, list) and len(sort) == 2 and sort[0] in SORTS and isinstance(sort[1], bool):
-            out["sort"] = tuple(sort)
-        hidden = mine.get("hidden")
-        if isinstance(hidden, dict) and isinstance(hidden.get(host), list):
-            out["hidden"] = {i for i in hidden[host] if isinstance(i, int)}
-        return out
+        """This client's settings as View.restore takes them, the GPUs hidden those on `host`; none when they
+        are not as nvmon writes them (edited by hand, say)."""
+        try:
+            mine = self._read()[self.client]
+            kept = {"left": mine["left"], "theme": mine["theme"], "sort": (mine["sort"][0], bool(mine["sort"][1])),
+                    "hidden": set(map(int, mine["hidden"].get(host, [])))}
+            return kept if kept["left"] in LEFTS and kept["sort"][0] in SORTS else {}
+        except (KeyError, IndexError, TypeError, ValueError, AttributeError):
+            return {}
 
     def save(self, kept, indices, host):
-        """Keep `kept` (View.kept) for this client; for GPUs that are not `indices` (nvmon -g), what was
-        kept for them. Everyone else's settings stay as the file has them now."""
+        """Keep `kept` (View.kept) for this client; for GPUs that are not `indices` (nvmon -g), and on other
+        hosts, what was kept for them. Everyone else's settings stay as the file has them now."""
         data = self._read()
-        mine = data.get(self.client) if isinstance(data.get(self.client), dict) else {}
-        hidden = mine.get("hidden") if isinstance(mine.get("hidden"), dict) else {}
-        earlier = hidden.get(host) if isinstance(hidden.get(host), list) else []
-        hidden[host] = sorted({i for i in earlier if isinstance(i, int) and i not in indices} | kept["hidden"])
-        mine.pop("graphs", None)  # what "left" says now
-        mine.update(left=kept["left"], theme=kept["theme"], sort=list(kept["sort"]),
-                    hidden={name: gpus for name, gpus in hidden.items() if gpus})
-        data[self.client] = mine
+        try:
+            hidden = {name: set(map(int, gpus)) for name, gpus in data[self.client]["hidden"].items()}
+        except (KeyError, TypeError, ValueError, AttributeError):
+            hidden = {}
+        hidden[host] = hidden.get(host, set()) - set(indices) | kept["hidden"]
+        data[self.client] = {"left": kept["left"], "theme": kept["theme"], "sort": list(kept["sort"]),
+                             "hidden": {name: sorted(gpus) for name, gpus in hidden.items() if gpus}}
         temp = "{}.{}".format(self.path, os.getpid())
         try:
             os.makedirs(os.path.dirname(self.path), exist_ok=True)
@@ -2124,13 +2127,14 @@ DEFAULT_INTERVAL, MIN_INTERVAL = 0.5, 0.1  # seconds
 
 def interval(text):
     """argparse type for -i: seconds between updates. The GPU's own readings change every 0.1-0.2 s, so
-    anything faster would only keep the driver busier and counts as MIN_INTERVAL; what is not a number of
-    seconds (abc, nan, inf) means the default."""
+    anything faster would only keep the driver busier and counts as MIN_INTERVAL."""
     try:
         seconds = float(text)
     except ValueError:
-        return DEFAULT_INTERVAL
-    return max(MIN_INTERVAL, seconds) if math.isfinite(seconds) else DEFAULT_INTERVAL
+        seconds = math.nan
+    if not seconds >= 0 or math.isinf(seconds):  # abc, nan, -1, inf
+        raise argparse.ArgumentTypeError("expected seconds such as 0.5 or 2, got {!r}".format(text))
+    return max(MIN_INTERVAL, seconds)
 
 
 def main():

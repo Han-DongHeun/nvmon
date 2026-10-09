@@ -314,6 +314,9 @@ def picture(lines, cols, rows, fonts):
                     draw.rectangle([x, y, x + CELL_W - 1, y + CELL_H // 2 - 1], fill=fg)
                 elif not box(draw, ch, x, y, fg):
                     draw.text((x, y + 1), ch, font=fonts[bold], fill=fg)
+            if "\x1b[4m" in style and text:  # underlined
+                draw.line([(x0 + col * CELL_W, y + CELL_H - 2), (x0 + (col + len(text)) * CELL_W - 2, y + CELL_H - 2)],
+                          fill=fg)
             col += len(text)
     return image
 

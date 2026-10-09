@@ -238,6 +238,7 @@ SHOWS = "truecolor"  # what the terminal shows (color_mode), set with it
 # Warnings on the top edge, the same in every theme: yellow = worth a look, orange = slowed, red = act.
 WARN, SLOW, ALERT = _rgb(YELLOW), _rgb(ORANGE), _rgb(RED)
 DIM, FAINT = _fg(240), _fg(238)
+UNDERLINE = "[4m"  # first in a style, so that the next one starts with a reset (see paint)
 BOLD, RESET = "\x1b[1m", "\x1b[0m"
 
 
@@ -349,7 +350,7 @@ class Process(NamedTuple):
     command: str                  # the command line from `name` on, e.g. "train.py --lr 3e-4"
     mem: Optional[float]          # GPU memory, GiB
     owner: Optional[str]          # account; None where unknown (Windows)
-    mine: bool                    # ours: its account in bold, and only ours can be stopped
+    mine: bool                    # ours: its account underlined, and only ours can be stopped
     env: Optional[str]            # conda environment
     started: Optional[float]      # start time, seconds since the epoch
     job: int                      # the job it is part of: its launcher's PID (torchrun...), else its own
@@ -819,15 +820,17 @@ def account(job):
     return "/".join(part for part in (job.owner, job.env) if part)
 
 
-def whose(mine):
-    """The style of an account: ours bold and bright, so that it stands out among the others', dim."""
-    return BOLD if mine else DIM
+def tagged(who):
+    """"kim/torch", whose a process or job (`who`) is and its conda environment, as segments: dim, and ours
+    underlined, so that they stand apart without standing out."""
+    text = "/".join(part for part in (who.owner, who.env) if part)
+    return [(text, UNDERLINE + DIM if who.mine else DIM)] if text else []
 
 
 def about(job):
     """"kim/torch · GPUs 4-5 · util 86% · 30.2G · 2h13m · torchrun job" as segments, util in its color;
     the launcher, often a long name, comes last, where a narrow line cuts first."""
-    parts = [(account(job), whose(job.mine))] if account(job) else []
+    parts = [sum(tagged(job), ())] if account(job) else []
     parts.append((gpu_numbers(job.gpus), DIM))
     if job.util is not None:
         parts.append(("util ", DIM, "{:.0f}%".format(job.util), heat(job.util / 100)))
@@ -1203,7 +1206,7 @@ def process_label(processes, room, selected=frozenset()):
     for tag, process in process_entries(processes):
         gap = [] if not entries else [(" · ", DIM)] if tag == last else [("   ", "")]
         details = " ".join(part for part in (run_time(process), memory(process)) if part != "-")
-        entries.append(gap + ([(tag + ": ", whose(process.mine))] if tag and tag != last else [])
+        entries.append(gap + (tagged(process) + [(": ", DIM)] if tag and tag != last else [])
                        + [process_name(process, selected)] + ([(" " + details, DIM, process.job)] if details else []))
         last = tag
 
@@ -1224,16 +1227,17 @@ def process_lines(processes, room, height, selected=frozenset(), top=0, shift=0)
     line `top` on and `shift` cells in (see listing_extent), and the label for the box's bottom edge: which
     lines show of how many, when not all do."""
     lines = process_listing(processes, selected)
-    # Sideways the command moves; account, run time and memory, the first two segments, stay.
-    shown = [pad(clip(line[:2] + skip(line[2:], shift), room), room) for line in lines[top:top + height]]
+    # Sideways the command moves; account, run time and memory stay.
+    shown = [pad(clip(fixed + skip(moving, shift), room), room) for fixed, moving in lines[top:top + height]]
     label = [("{}-{} of {}".format(top + 1, top + len(shown), len(lines)), DIM)] if len(lines) > height else []
     return shown + [[(" " * room, "")]] * (height - len(shown)), label
 
 
 def process_listing(processes, selected=frozenset()):
-    """process_lines's lines, whole: account and environment (bold for ours), run time and memory in columns,
-    then the command line, the name in the process names' color and the arguments dim: "kim/torch:  2d5h
-    26.1G  train.py --lr 3". The columns are as wide as the GPU's longest."""
+    """process_lines's lines, whole, as (what stays, what moves sideways): account and environment (see
+    tagged), run time and memory in columns; then the command line, the name in the process names' color and
+    the arguments dim: "kim/torch:  2d5h  26.1G  train.py --lr 3". The columns are as wide as the GPU's
+    longest."""
     entries = process_entries(processes)
     tag_w = max([0] + [len(tag) + 1 for tag, _ in entries])  # the longest "kim/torch:", when any has one
     time_w = max([0] + [len(run_time(process)) for _, process in entries])
@@ -1242,17 +1246,18 @@ def process_listing(processes, selected=frozenset()):
     for tag, process in entries:
         command = process.command
         rest = command[len(process.name):] if command.startswith(process.name) else " " + command
-        who = "{:<{}}  ".format(tag + ":" if tag else "", tag_w) if tag_w else ""
-        numbers = "{:>{}}  {:>{}}  ".format(run_time(process), time_w, memory(process), mem_w)
-        lines.append([(who, whose(process.mine), process.job), (numbers, DIM, process.job),
-                      process_name(process, selected), (rest, DIM, process.job)])
+        who = tagged(process) + [(":", DIM)] if tag else []
+        numbers = " " * (tag_w + 2 - width_of(who) if tag_w else 0) + "{:>{}}  {:>{}}  ".format(
+            run_time(process), time_w, memory(process), mem_w)
+        lines.append(([seg[:2] + (process.job,) for seg in who] + [(numbers, DIM, process.job)],
+                      [process_name(process, selected), (rest, DIM, process.job)]))
     return lines
 
 
 def listing_extent(processes, room, height):
     """How far process_lines can move on for these processes: (lines, cells)."""
     lines = process_listing(processes)
-    return max(0, len(lines) - height), max([0] + [width_of(line) - room for line in lines])
+    return max(0, len(lines) - height), max([0] + [width_of(fixed + moving) - room for fixed, moving in lines])
 
 
 def skip(line, cells):
@@ -1313,33 +1318,36 @@ def render(gpus, width, height, selected=frozenset(), shape=None, left="graph", 
     return lines + [[(" " * width, "")]] * (height - len(lines))
 
 
-# The process list's columns: heading, width (">" when flush right), the cell for a job as (text, style),
-# and the key it sorts by. "command" takes whatever width is left.
+# The process list's columns: heading, width (">" when flush right), the cell for a job as segments, and the
+# key it sorts by. "command" takes whatever width is left.
 COLUMNS = [
-    ("PID", 8, lambda j: (str(j.pid), ""), lambda j: j.pid),
-    ("account/env", 14, lambda j: (account(j), whose(j.mine)), account),
-    ("process", 22, lambda j: (j.name + ("  {} workers".format(len(j.members)) if len(j.members) > 1 else ""),
-                               THEME.accent), lambda j: j.name.lower()),
-    ("GPUs", 8, lambda j: (ranges(j.gpus), ""), lambda j: j.gpus),
-    (">util", 5, lambda j: share(j.util, 100)[0] if j.util is not None else ("-", ""),
+    ("PID", 8, lambda j: [(str(j.pid), "")], lambda j: j.pid),
+    ("account/env", 14, lambda j: tagged(j), account),
+    ("process", 22, lambda j: [(j.name + ("  {} workers".format(len(j.members)) if len(j.members) > 1 else ""),
+                                THEME.accent)], lambda j: j.name.lower()),
+    ("GPUs", 8, lambda j: [(ranges(j.gpus), "")], lambda j: j.gpus),
+    (">util", 5, lambda j: share(j.util, 100) if j.util is not None else [("-", "")],
      lambda j: -1 if j.util is None else j.util),
-    (">memory", 7, lambda j: ("{:.1f}G".format(j.mem), ""), lambda j: j.mem),
-    (">time", 7, lambda j: (elapsed(j.started) if j.started is not None else "-", ""),
+    (">memory", 7, lambda j: [("{:.1f}G".format(j.mem), "")], lambda j: j.mem),
+    (">time", 7, lambda j: [(elapsed(j.started) if j.started is not None else "-", "")],
      lambda j: -(j.started or 0)),
-    ("command", 0, lambda j: (j.command, DIM), lambda j: j.command),
+    ("command", 0, lambda j: [(j.command, DIM)], lambda j: j.command),
 ]
 SORTS = {heading.lstrip(">"): key for heading, _, _, key in COLUMNS}
 COMMAND_AT = 1 + sum(size + 2 for _, size, _, _ in COLUMNS[:-1])  # the column where commands start
 
 
 def cells(values, width, fill=("",)):
-    """One list line of `width` cells from (text, style, ...) values, one per column, two spaces apart;
-    `fill` = (style, ...) of the spaces between, so a selected row stays one bar and clicks anywhere."""
+    """One list line of `width` cells from the columns' segments, two spaces apart; `fill` = (style, ...) of
+    the spaces, so that a selected row stays one bar and clicks anywhere: those padding a column mean what
+    its last segment does, but take nothing else of it, an underline, say."""
     line, used = [(" ",) + fill], 1
-    for (heading, size, _, _), (text, *rest) in zip(COLUMNS, values):
+    for (heading, size, _, _), segments in zip(COLUMNS, values):
         size = size or max(0, width - used - 1)
-        text = text[:size].rjust(size) if heading.startswith(">") else text[:size].ljust(size)
-        line += [(text,) + tuple(rest), (" " if heading == "command" else "  ",) + fill]
+        segments = clip(segments, size)
+        padding = [(" " * (size - width_of(segments)),) + fill[:1] + (segments[-1][2:3] if segments else fill[1:])]
+        line += padding + segments if heading.startswith(">") else segments + padding
+        line.append((" " if heading == "command" else "  ",) + fill)
         used += size + 2
     return line
 
@@ -1353,17 +1361,17 @@ def process_list(jobs, width, rows, selected, focus, top, sort, shift=0):
     head = []
     for heading, _, _, _ in COLUMNS:
         name = heading.lstrip(">")
-        head.append((name + ("▼" if descending else "▲") if name == column else name,
-                     "" if name == column else DIM, ("sort", name)))
+        head.append([(name + ("▼" if descending else "▲") if name == column else name,
+                      "" if name == column else DIM, ("sort", name))])
     lines = [cells(head, width)]
     shown = jobs[top:top + rows - 2]
     for job in shown:
         chosen = job.pid in selected
         values = [cell(job) for _, _, cell, _ in COLUMNS]
         command = "…" + job.command[shift:] if job.pid == focus and shift else job.command
-        values[-1] = (command if len(command) <= room else command[:max(0, room - 1)] + "…", DIM)
-        lines.append(cells([(text, THEME.selected if chosen else color, job.pid) for text, color in values],
-                           width, (THEME.selected if chosen else "", job.pid)))
+        values[-1] = [(command if len(command) <= room else command[:max(0, room - 1)] + "…", DIM)]
+        lines.append(cells([[(seg[0], THEME.selected if chosen else seg[1], job.pid) for seg in column]
+                            for column in values], width, (THEME.selected if chosen else "", job.pid)))
     if not jobs:
         lines.append([(" no processes on these GPUs", DIM)])
     above, below = top, len(jobs) - top - len(shown)

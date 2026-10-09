@@ -34,8 +34,8 @@ ssh -t HOST nvmon  # over ssh: -t gives it a terminal
   the chip, and how much was Tensor Core math. One small kernel running nonstop reads GPU 100 % with
   cores at 30 %.
 - **MEM**: memory in use. **CPU -> GPU**, **GPU -> CPU**: PCIe traffic against the link's top speed.
-- **Bottom edge**: the processes, with run time and memory, by account and conda environment (yours in
-  bold); `+3` for those that did not fit.
+- **Bottom edge**: the processes, with run time and memory, by account and conda environment (yours
+  underlined); `+3` for those that did not fit.
 
 The bottom line has the GPU numbers (click one, or press its key, to hide or show it), the keys, and a
 newer release when there is one.

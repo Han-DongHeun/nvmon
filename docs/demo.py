@@ -118,17 +118,20 @@ class Scripted(nvmon.Gpu):
             process_util={p.pid: u * p.mem / held for p in self.procs} if detail else None)  # the bigger, the busier
 
 
+ME = "han"  # the one looking at the screen: han's processes are ours
+
+
 def proc(pid, name, owner, env, minutes, mem, args, job=None, launcher=None):
-    """A process `minutes` old holding `mem` GiB; `owner` None for ours."""
-    return nvmon.Process(pid, name, name + " " + args, mem, owner, env, Clock.now - 60 * minutes, job or pid,
-                         launcher)
+    """A process `minutes` old holding `mem` GiB."""
+    return nvmon.Process(pid, name, name + " " + args, mem, owner, owner == ME, env, Clock.now - 60 * minutes,
+                         job or pid, launcher)
 
 
 def server():
     """The eight GPUs, and the four the GIF shows: han's training on 0-1 (busy, then less so; low and broken),
     with a checkpoint being evaluated and yoon's notebook beside it; yoon's sweeps on 2-3 (one in big blocks,
-    on a GPU held back by heat); han's model being served, our evaluation in shards waiting on its data loader,
-    yoon's notebooks holding memory, and one idle. Only those two names, and ours."""
+    on a GPU held back by heat); han's model being served, han's evaluation in shards waiting on its data
+    loader, yoon's notebooks holding memory, and one idle. Only those two names."""
     han = [proc(241801 + k, "train.py", "han", "torch", 312, mem, "--config configs/train.yaml", 241800, "torchrun")
            for k, mem in enumerate((4.6, 5.2))]
     sweep = [proc(pid, "sweep.py", "yoon", "jax", minutes, mem, "--lr " + lr) for pid, minutes, mem, lr in
@@ -136,7 +139,7 @@ def server():
               (270500, 1800, 18.3, "3e-4"), (270544, 1680, 6.2, "3e-5"))]
     checkpoint = proc(330112, "eval_ckpt.py", "han", "torch", 3, 0.8, "--ckpt runs/step_42000")
     notebook = proc(301877, "ipykernel_launcher", "yoon", "jax", 95, 2.1, "-f kernel-2.json")
-    shards = [proc(325017 + k, "eval.py", None, "torch", 28 - k // 2, 3.7, "--shard {}/6".format(k)) for k in range(6)]
+    shards = [proc(325017 + k, "eval.py", "han", "torch", 28 - k // 2, 3.7, "--shard {}/6".format(k)) for k in range(6)]
     gpus = [Scripted(0, phases, han[:1] + [checkpoint], segments=[(190, 93, 6, 0.03), (200, 34, 9, 0.08)]),
             Scripted(1, phases, han[1:] + [notebook], segments=[(400, 20, 8, 0.15)]),
             Scripted(2, blocks, sweep[:3], hot=True),

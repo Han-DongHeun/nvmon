@@ -348,7 +348,8 @@ class Process(NamedTuple):
     name: str                     # script name for Python, else the executable
     command: str                  # the command line from `name` on, e.g. "train.py --lr 3e-4"
     mem: Optional[float]          # GPU memory, GiB
-    owner: Optional[str]          # account; None for our own processes
+    owner: Optional[str]          # account; None where unknown (Windows)
+    mine: bool                    # ours: its account in bold, and only ours can be stopped
     env: Optional[str]            # conda environment
     started: Optional[float]      # start time, seconds since the epoch
     job: int                      # the job it is part of: its launcher's PID (torchrun...), else its own
@@ -499,12 +500,12 @@ class Gpu:
         procs = []
         for p in running:
             mem = None if p.usedGpuMemory == NVML_VALUE_NOT_AVAILABLE else p.usedGpuMemory / 2**30
-            name, command, owner, env, started, job, launcher = self._facts[p.pid]
-            procs.append(Process(p.pid, name, command, mem, owner, env, started, job, launcher))
+            name, command, owner, mine, env, started, job, launcher = self._facts[p.pid]
+            procs.append(Process(p.pid, name, command, mem, owner, mine, env, started, job, launcher))
         return procs
 
     def _facts_of(self, pid):
-        """(name, command, owner, conda environment, start time, job, launcher name) of `pid`."""
+        """(name, command, owner, ours, conda environment, start time, job, launcher name) of `pid`."""
         launcher = launcher_of(pid)
         return (self._command(pid) + process_facts(pid)
                 + ((launcher, self._command(launcher)[0]) if launcher else (pid, None)))
@@ -643,8 +644,10 @@ def versions(nv):
 
 
 def process_facts(pid):
-    """(owner, conda environment, start time) of `pid` from /proc; Nones where unknown (e.g. Windows)."""
-    return process_owner(pid), conda_env(pid), start_time(pid)
+    """(owner, whether it is ours, conda environment, start time) of `pid` from /proc; Nones, and not ours,
+    where unknown (e.g. Windows)."""
+    uid = uid_of(pid)
+    return account_name(uid), uid is not None and uid == os.getuid(), conda_env(pid), start_time(pid)
 
 
 def conda_env(pid):
@@ -676,10 +679,9 @@ def start_time(pid):
     return boot + ticks / os.sysconf("SC_CLK_TCK")
 
 
-def process_owner(pid):
-    """Account running `pid`; None for our own processes or where there is no /proc (Windows)."""
-    uid = uid_of(pid)
-    if uid is None or uid == os.getuid():
+def account_name(uid):
+    """The name of the account `uid`; None for None."""
+    if uid is None:
         return None
     import pwd
     try:
@@ -767,6 +769,7 @@ class Job(NamedTuple):
     mem: float                    # GiB, on all of them
     started: Optional[float]
     owner: Optional[str]
+    mine: bool
     env: Optional[str]
     command: str                  # its biggest process's command line
 
@@ -790,7 +793,7 @@ def jobs(gpus):
         found.append(Job(pid, main.name, main.launcher, tuple(sorted({(p.pid, p.started) for p in procs})),
                          tuple(sorted({gpu.index for gpu, _ in entries})),
                          sum(shares.values()) / len(shares) if shares else None, sum(p.mem or 0 for p in procs),
-                         min(starts) if starts else None, main.owner, main.env, main.command))
+                         min(starts) if starts else None, main.owner, main.mine, main.env, main.command))
     return sorted(found, key=lambda job: (job.gpus, job.pid))
 
 
@@ -812,14 +815,19 @@ def gpu_numbers(indices):
 
 
 def account(job):
-    """"kim/torch": whose it is, and the conda environment; our own go without an account."""
+    """"kim/torch": whose it is, and the conda environment."""
     return "/".join(part for part in (job.owner, job.env) if part)
+
+
+def whose(mine):
+    """The style of an account: ours bold and bright, so that it stands out among the others', dim."""
+    return BOLD if mine else DIM
 
 
 def about(job):
     """"kim/torch · GPUs 4-5 · util 86% · 30.2G · 2h13m · torchrun job" as segments, util in its color;
     the launcher, often a long name, comes last, where a narrow line cuts first."""
-    parts = [(account(job), DIM)] if account(job) else []
+    parts = [(account(job), whose(job.mine))] if account(job) else []
     parts.append((gpu_numbers(job.gpus), DIM))
     if job.util is not None:
         parts.append(("util ", DIM, "{:.0f}%".format(job.util), heat(job.util / 100)))
@@ -836,7 +844,7 @@ def about(job):
 def about_all(jobs):
     """"GPUs 4-7 · 61.2G · 2 yours" for several jobs picked together, as segments."""
     parts = [gpu_numbers(index for job in jobs for index in job.gpus), "{:.1f}G".format(sum(j.mem for j in jobs))]
-    ours = sum(job.owner is None for job in jobs)
+    ours = sum(job.mine for job in jobs)
     parts += ["{} yours".format(ours)] if 0 < ours < len(jobs) else []
     return [(" · ".join(parts), DIM)]
 
@@ -1164,7 +1172,7 @@ def elapsed(started):
 
 def process_entries(processes):
     """Processes grouped by owner and conda environment, groups and processes by memory, biggest first, as
-    (tag, process): the tag "kim/torch", "" for our own processes."""
+    (tag, process): the tag "kim/torch", "" where neither is known."""
     def mem(process):
         return process.mem or 0
     groups = {}
@@ -1195,8 +1203,8 @@ def process_label(processes, room, selected=frozenset()):
     for tag, process in process_entries(processes):
         gap = [] if not entries else [(" · ", DIM)] if tag == last else [("   ", "")]
         details = " ".join(part for part in (run_time(process), memory(process)) if part != "-")
-        entries.append(gap + ([(tag + ": ", DIM)] if tag and tag != last else []) + [process_name(process, selected)]
-                       + ([(" " + details, DIM, process.job)] if details else []))
+        entries.append(gap + ([(tag + ": ", whose(process.mine))] if tag and tag != last else [])
+                       + [process_name(process, selected)] + ([(" " + details, DIM, process.job)] if details else []))
         last = tag
 
     def more(n):
@@ -1216,14 +1224,14 @@ def process_lines(processes, room, height, selected=frozenset(), top=0, shift=0)
     line `top` on and `shift` cells in (see listing_extent), and the label for the box's bottom edge: which
     lines show of how many, when not all do."""
     lines = process_listing(processes, selected)
-    # Sideways the command moves; account, run time and memory, the first segment, stay.
-    shown = [pad(clip(line[:1] + skip(line[1:], shift), room), room) for line in lines[top:top + height]]
+    # Sideways the command moves; account, run time and memory, the first two segments, stay.
+    shown = [pad(clip(line[:2] + skip(line[2:], shift), room), room) for line in lines[top:top + height]]
     label = [("{}-{} of {}".format(top + 1, top + len(shown), len(lines)), DIM)] if len(lines) > height else []
     return shown + [[(" " * room, "")]] * (height - len(shown)), label
 
 
 def process_listing(processes, selected=frozenset()):
-    """process_lines's lines, whole: account and environment, run time and memory in columns (one segment),
+    """process_lines's lines, whole: account and environment (bold for ours), run time and memory in columns,
     then the command line, the name in the process names' color and the arguments dim: "kim/torch:  2d5h
     26.1G  train.py --lr 3". The columns are as wide as the GPU's longest."""
     entries = process_entries(processes)
@@ -1234,9 +1242,10 @@ def process_listing(processes, selected=frozenset()):
     for tag, process in entries:
         command = process.command
         rest = command[len(process.name):] if command.startswith(process.name) else " " + command
-        columns = ("{:<{}}  ".format(tag + ":" if tag else "", tag_w) if tag_w else "") + "{:>{}}  {:>{}}  ".format(
-            run_time(process), time_w, memory(process), mem_w)
-        lines.append([(columns, DIM, process.job), process_name(process, selected), (rest, DIM, process.job)])
+        who = "{:<{}}  ".format(tag + ":" if tag else "", tag_w) if tag_w else ""
+        numbers = "{:>{}}  {:>{}}  ".format(run_time(process), time_w, memory(process), mem_w)
+        lines.append([(who, whose(process.mine), process.job), (numbers, DIM, process.job),
+                      process_name(process, selected), (rest, DIM, process.job)])
     return lines
 
 
@@ -1308,7 +1317,7 @@ def render(gpus, width, height, selected=frozenset(), shape=None, left="graph", 
 # and the key it sorts by. "command" takes whatever width is left.
 COLUMNS = [
     ("PID", 8, lambda j: (str(j.pid), ""), lambda j: j.pid),
-    ("account/env", 14, lambda j: (account(j), ""), account),
+    ("account/env", 14, lambda j: (account(j), whose(j.mine)), account),
     ("process", 22, lambda j: (j.name + ("  {} workers".format(len(j.members)) if len(j.members) > 1 else ""),
                                THEME.accent), lambda j: j.name.lower()),
     ("GPUs", 8, lambda j: (ranges(j.gpus), ""), lambda j: j.gpus),
@@ -1651,7 +1660,7 @@ class View:
         note = self.note[0] if self.note and time.monotonic() < self.note[1] else None
         if picked:
             hints = [("f", "all GPUs" if self.only else "only these GPUs")]
-            ours = any(job.owner is None for job in picked) and os.name != "nt"
+            ours = any(job.mine for job in picked) and os.name != "nt"
             hints += [("t", "stop"), ("k", "kill")] if ours else []
             if len(picked) == 1:
                 left = [(picked[0].name, THEME.accent, picked[0].pid), ("  ", DIM)] + about(picked[0])
@@ -1670,7 +1679,7 @@ class View:
         like; for several jobs "stop your 2 of 3 jobs on GPUs 4-5,7, SIGTERM to each: train.py, eval.py?". The
         GPUs are those the signal reaches, whichever was clicked."""
         what = "stop" if self.asking == "SIGTERM" else "kill"
-        ours = [job for job in picked if job.owner is None]
+        ours = [job for job in picked if job.mine]
         where = "on " + gpu_numbers(index for job in ours for index in job.gpus)
         if len(picked) > 1:
             which = "{} jobs".format(len(ours)) if len(ours) == len(picked) else "your {} of {} jobs".format(
@@ -1812,7 +1821,7 @@ class View:
         elif self.picked and key in ("f", "enter"):
             self.only = not self.only
         elif self.picked and key in ("t", "k"):
-            if any(job.owner is None for job in self.selected()):
+            if any(job.mine for job in self.selected()):
                 self.asking = "SIGTERM" if key == "t" else "SIGKILL"
             else:
                 self.note = ([("only your own processes can be stopped", WARN)], time.monotonic() + 3)
@@ -1820,7 +1829,7 @@ class View:
 
     def stop_picked(self):
         """Send the signal asked for to each picked job of ours (see stop), and say how that went."""
-        ours = [job for job in self.selected() if job.owner is None]
+        ours = [job for job in self.selected() if job.mine]
         results = [stop(job, self.asking) for job in ours]
         sent = {job.pid for job, (_, ok) in zip(ours, results) if ok}
         failed = [note for note, ok in results if not ok]

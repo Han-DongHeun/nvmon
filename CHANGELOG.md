@@ -7,6 +7,8 @@ What changes for you in each release. The same notes appear on the
 
 - Pointing at a graph shows the memory in use then as well: "73% · 41.2G · 16s ago". Where the graph is
   narrow, the memory gives way first, then the time.
+- Your own processes carry your account too, in bold, where they had none: yours stand out from the others'
+  by name, not by a missing one.
 - A GPU running more than 64 processes showed none of them; now it shows them all.
 - `-i` with something other than seconds, such as `-i abc`, is an error, as a wrong `-g` is, rather than
   0.5 without a word.

@@ -1403,7 +1403,8 @@ def header(width, interval, driver, waiting=0):
 
 # Keys by what the terminal sends: a control character, or how an escape sequence ends ("ESC [ A" is up).
 # Apart, so that a typed "C" is a C, not the right arrow.
-CONTROL_KEYS = {"\r": "enter", "\n": "enter", "\t": "tab", "\x1b": "esc"}
+CONTROL_KEYS = {"\r": "enter", "\n": "enter", "\t": "tab", "\x1b": "esc",
+                "\x03": "q"}  # Ctrl+C, a key on Windows (raw_keys); elsewhere the terminal makes it a signal
 SEQUENCE_KEYS = {"A": "up", "B": "down", "C": "right", "D": "left", "H": "home", "F": "end", "Z": "backtab",
                  "1~": "home", "4~": "end", "5~": "pgup", "6~": "pgdn"}
 HINT_KEYS = {"Esc": "esc", "Esc / q": "q"}  # what clicking a key hint presses
@@ -1988,9 +1989,6 @@ def events(data):
     return out
 
 
-WINDOWS_KEYS = {"H": "up", "P": "down", "K": "left", "M": "right", "G": "home", "O": "end", "I": "pgup", "Q": "pgdn", "\x0f": "backtab"}
-
-
 # What a terminal that shows 24-bit color answers to Screen.probe; one is enough. Anything else, no answer
 # included, means 256 colors, as for NetSarang Xshell (24-bit color is off there unless turned on), PuTTY
 # before 0.71, Tera Term, macOS Terminal before macOS 26.
@@ -2010,15 +2008,15 @@ class Screen:
     restored on exit."""
 
     def __enter__(self):
-        self._keys = sys.stdin.isatty()
-        self._mouse = self._keys and os.name != "nt"  # Windows reads keys with msvcrt, which sees no mouse
+        self._keys = self._mouse = sys.stdin.isatty()  # keys stop if stdin closes; the mouse goes off on exit
         self._restore = [enable_vt(), raw_keys() if self._keys else (lambda: None)]
         self._painted, self._size = [], None  # the lines last sent, and the window they were sent to
         # 1000 + 1003 + 1006: clicks, the wheel and every move of the pointer come in as SGR-encoded sequences
         # (Shift+drag still selects text). A terminal without 1003 sends clicks and the wheel all the same.
         self._write("\x1b[?1049h\x1b[?25l\x1b[?7l" + ("\x1b[?1000h\x1b[?1003h\x1b[?1006h" if self._mouse else ""))
-        # Windows Terminal and the console of Windows 10 on show 24-bit color and draw lines one cell wide.
-        self.wide, self.truecolor = self.probe() if self._mouse else (False, os.name == "nt")
+        # Windows Terminal and the console of Windows 10 on show 24-bit color and draw lines one cell wide;
+        # not asked there, as the console would answer nothing on color, and so get 256 colors.
+        self.wide, self.truecolor = self.probe() if self._keys and os.name != "nt" else (False, os.name == "nt")
         return self
 
     def probe(self):
@@ -2032,8 +2030,7 @@ class Screen:
                     "\x1bP+q524742;5463\x1b\\"        # XTGETTCAP: whether its terminfo has RGB or Tc
                     "\x1b[38;2;1;2;3m\x1bP$qm\x1b\\"  # DECRQSS: the color set now, as the terminal kept it
                     + RESET + "\x1b[c")                 # DA1, answered last
-        import select
-        fd, data, end = sys.stdin.fileno(), b"", time.monotonic() + 1
+        data, end = b"", time.monotonic() + 1
         answered = False  # DA1 is in
         while True:
             if not answered and re.search(rb"\x1b\[\?[0-9;]*c", data):
@@ -2041,9 +2038,7 @@ class Screen:
             if answered and re.search(rb"\x1bP[01]\$r[^\x1b]*\x1b\\", data):
                 break
             left = end - time.monotonic()
-            if left <= 0 or not select.select([fd], [], [], left)[0]:
-                break
-            more = os.read(fd, 1024)
+            more = incoming(left) if left > 0 else None
             if not more:
                 break
             data += more
@@ -2061,30 +2056,10 @@ class Screen:
         if not self._keys:
             time.sleep(max(0, seconds))
             return []
-        if os.name == "nt":
-            import msvcrt
-            end = time.monotonic() + seconds
-            while True:
-                found = []
-                while msvcrt.kbhit():
-                    char = msvcrt.getwch()
-                    if char in ("\x00", "\xe0"):  # arrows and the like come as two characters
-                        name = WINDOWS_KEYS.get(msvcrt.getwch())
-                        found += [("key", name)] if name else []
-                    else:
-                        found += [("key", CONTROL_KEYS.get(char) or key) for key in typed(char)]
-                left = end - time.monotonic()
-                if found or left <= 0:
-                    return found
-                time.sleep(min(left, 0.02))
-        import select
-        fd = sys.stdin.fileno()
-        if not select.select([fd], [], [], max(0, seconds))[0]:
-            return []
-        data = os.read(fd, 1024)
-        if not data:  # stdin closed: nothing more will come
+        data = incoming(seconds)
+        if data is None:  # stdin closed: nothing more will come
             self._keys = False
-        return events(data)
+        return events(data or b"")
 
     def draw(self, lines, mode, gray, size):
         """The screen `lines`, in a window of `size`: only the lines that changed since the last time, so that
@@ -2104,25 +2079,70 @@ class Screen:
         sys.stdout.buffer.flush()
 
 
+def incoming(seconds):
+    """What the terminal sends within `seconds`, as soon as there is some: bytes, b"" when nothing came,
+    None once stdin is closed."""
+    if os.name == "nt":
+        return console_input(seconds)
+    import select
+    fd = sys.stdin.fileno()
+    if not select.select([fd], [], [], max(0, seconds))[0]:
+        return b""
+    return os.read(fd, 1024) or None
+
+
+class KeyEventRecord(ctypes.Structure):  # Windows's INPUT_RECORD, read as the KEY_EVENT_RECORD it holds for a key
+    _fields_ = [("EventType", ctypes.c_ushort), ("bKeyDown", c_int), ("wRepeatCount", ctypes.c_ushort),
+                ("wVirtualKeyCode", ctypes.c_ushort), ("wVirtualScanCode", ctypes.c_ushort),
+                ("UnicodeChar", ctypes.c_wchar), ("dwControlKeyState", ctypes.c_ulong)]
+
+
+def console_input(seconds):
+    """incoming, on Windows: the characters typed into the console, the arrows, the mouse and the like among
+    them as the same sequences as from any other terminal (raw_keys sees to that). The console's other
+    input, keys let go among it, is skipped, and the wait goes on."""
+    import msvcrt
+    kernel32, handle = ctypes.windll.kernel32, c_void_p(msvcrt.get_osfhandle(sys.stdin.fileno()))
+    records, count, end = (KeyEventRecord * 1024)(), ctypes.c_ulong(), time.monotonic() + seconds
+    while True:
+        signaled = kernel32.WaitForSingleObject(handle, max(0, int((end - time.monotonic()) * 1000)))
+        if signaled == 0x102:  # WAIT_TIMEOUT
+            return b""
+        if signaled != 0 or not kernel32.ReadConsoleInputW(handle, records, len(records), byref(count)):
+            return None  # no console to read from after all: NUL, for one, passes for a terminal
+        text = "".join(r.UnicodeChar for r in records[:count.value]
+                       if r.EventType == 1 and r.bKeyDown and r.UnicodeChar != "\0")  # KEY_EVENT
+        if text:
+            return text.encode("utf-8", "ignore")  # "ignore": half of an emoji, the other half read next
+
+
+def console_mode(stream, on, off=0):
+    """Windows: the console mode of `stream` with the flags `on` set and `off` cleared; returns a function
+    that undoes it."""
+    import msvcrt
+    kernel32, handle, mode = ctypes.windll.kernel32, c_void_p(msvcrt.get_osfhandle(stream.fileno())), ctypes.c_ulong()
+    if not kernel32.GetConsoleMode(handle, byref(mode)):
+        return lambda: None
+    kernel32.SetConsoleMode(handle, mode.value & ~off | on)
+    return lambda: kernel32.SetConsoleMode(handle, mode.value)
+
+
 def enable_vt():
     """Make the Windows console interpret ANSI codes; returns a function that undoes it."""
     if os.name != "nt":
         return lambda: None
-    kernel32 = ctypes.windll.kernel32
-    kernel32.GetStdHandle.restype = c_void_p
-    handle = c_void_p(kernel32.GetStdHandle(-11))  # STD_OUTPUT_HANDLE
-    mode = ctypes.c_ulong()
-    if not kernel32.GetConsoleMode(handle, byref(mode)):
-        return lambda: None
     # ENABLE_VIRTUAL_TERMINAL_PROCESSING | DISABLE_NEWLINE_AUTO_RETURN (VT-style end of line)
-    kernel32.SetConsoleMode(handle, mode.value | 0x0004 | 0x0008)
-    return lambda: kernel32.SetConsoleMode(handle, mode.value)
+    return console_mode(sys.stdout, 0x0004 | 0x0008)
 
 
 def raw_keys():
     """Deliver key presses at once and without echo; returns a function that undoes it."""
     if os.name == "nt":
-        return lambda: None  # msvcrt already reads single keys without echo
+        # On: ENABLE_VIRTUAL_TERMINAL_INPUT, keys and the mouse as escape sequences, as elsewhere. Off:
+        # ENABLE_PROCESSED_INPUT, so that Ctrl+C comes as a key (CONTROL_KEYS): as a signal, it would only
+        # stop nvmon once console_input's wait is over, up to an interval later; ENABLE_LINE_INPUT and
+        # ENABLE_ECHO_INPUT.
+        return console_mode(sys.stdin, 0x0200, 0x0001 | 0x0002 | 0x0004)
     import termios
     import tty
     fd = sys.stdin.fileno()

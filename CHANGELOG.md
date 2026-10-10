@@ -3,6 +3,10 @@
 What changes for you in each release. The same notes appear on the
 [releases page](https://github.com/Han-DongHeun/nvmon/releases).
 
+## 0.3.5
+
+- The mouse works on Windows as well: point at a graph, click, scroll with the wheel.
+
 ## 0.3.4
 
 - Pointing at a graph shows the memory in use then as well: "73% · 41.2G · 16s ago". Where the graph is

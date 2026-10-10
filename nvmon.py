@@ -2161,6 +2161,22 @@ class KeyEventRecord(ctypes.Structure):  # Windows's INPUT_RECORD, read as the K
                 ("UnicodeChar", ctypes.c_wchar), ("dwControlKeyState", ctypes.c_ulong)]
 
 
+# Keys as the console may hand them over, by virtual-key code, rather than as the sequences raw_keys asks for:
+# Windows's own ConPTY did so for the first ones it got from a terminal (as under Windows's ssh). What any
+# other terminal sends for them.
+CONSOLE_KEYS = {0x26: "\x1b[A", 0x28: "\x1b[B", 0x27: "\x1b[C", 0x25: "\x1b[D", 0x24: "\x1b[H", 0x23: "\x1b[F",
+                0x21: "\x1b[5~", 0x22: "\x1b[6~"}
+
+
+def key_text(record):
+    """What a key-down record (KeyEventRecord) types: its character, or for a key handed over as itself, the
+    sequence (CONSOLE_KEYS); Shift+Tab so handed over is ESC [ Z, as elsewhere."""
+    if record.UnicodeChar == "\0":
+        return CONSOLE_KEYS.get(record.wVirtualKeyCode, "")
+    shift_tab = record.wVirtualKeyCode == 0x09 and record.dwControlKeyState & 0x0010  # VK_TAB, SHIFT_PRESSED
+    return "\x1b[Z" if shift_tab else record.UnicodeChar
+
+
 def console_input(seconds):
     """incoming, on Windows: the characters typed into the console, the arrows, the mouse and the like among
     them as the same sequences as from any other terminal (raw_keys sees to that). The console's other
@@ -2174,8 +2190,7 @@ def console_input(seconds):
             return b""
         if signaled != 0 or not kernel32.ReadConsoleInputW(handle, records, len(records), byref(count)):
             return None  # no console to read from after all: NUL, for one, passes for a terminal
-        text = "".join(r.UnicodeChar for r in records[:count.value]
-                       if r.EventType == 1 and r.bKeyDown and r.UnicodeChar != "\0")  # KEY_EVENT
+        text = "".join(key_text(r) for r in records[:count.value] if r.EventType == 1 and r.bKeyDown)  # KEY_EVENT
         if text:
             return text.encode("utf-8", "ignore")  # "ignore": half of an emoji, the other half read next
 

@@ -6,6 +6,20 @@ What changes for you in each release. The same notes appear on the
 ## 0.3.5
 
 - The mouse works on Windows as well: point at a graph, click, scroll with the wheel.
+- Moving the mouse over a slow ssh link no longer hides GPUs, closes the list or quits: a pointer's move
+  that came in two pieces was read as Esc and digit keys.
+- A command line with control characters in it, anyone's, shows them as `?` rather than sending them to
+  your terminal, where they could clear the screen or set the window title.
+- A notebook's kernel is a job of its own. `t` on one stopped Jupyter itself, and with it every notebook.
+- `k` reaches the workers of a job whose launcher has already ended, and all of them when one ends first;
+  a launcher that uses a GPU itself can be stopped too.
+- Processes show with drivers before R510 (from R450 on).
+- `python -X faulthandler train.py` and the like show as train.py.
+- A resized window is redrawn at once, not at the next refresh.
+- Fixed: a crash on ² or ³, and when your jobs ended while nvmon asked about stopping them; in a very
+  short window, a crash and clicks that hit the wrong place; a mouse's side buttons clicking; one GPU
+  drawn half as wide as a short window; a settings file nvmon cannot read being written over; the
+  terminal left as nvmon had set it after Ctrl+C at the very start.
 
 ## 0.3.4
 

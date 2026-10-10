@@ -238,7 +238,7 @@ SHOWS = "truecolor"  # what the terminal shows (color_mode), set with it
 # Warnings on the top edge, the same in every theme: yellow = worth a look, orange = slowed, red = act.
 WARN, SLOW, ALERT = _rgb(YELLOW), _rgb(ORANGE), _rgb(RED)
 DIM, FAINT = _fg(240), _fg(238)
-UNDERLINE = "[4m"  # first in a style, so that the next one starts with a reset (see paint)
+UNDERLINE = "\x1b[4m"  # first in a style, so that the next one starts with a reset (see paint)
 BOLD, RESET = "\x1b[1m", "\x1b[0m"
 
 
@@ -493,8 +493,11 @@ class Gpu:
         return rc, array[:count.value] if rc == NVML_SUCCESS else []
 
     def _processes(self):
-        rc, running = self._entries(ProcessInfo, lambda array, count: self._call(
-            "nvmlDeviceGetComputeRunningProcesses_v3", byref(count), array))
+        # _v3 from driver R510 on; before it (R450 on) _v2, with the same entries.
+        for query in ("nvmlDeviceGetComputeRunningProcesses_v3", "nvmlDeviceGetComputeRunningProcesses_v2"):
+            rc, running = self._entries(ProcessInfo, lambda array, count: self._call(query, byref(count), array))
+            if query not in self._unsupported:
+                break
         if rc != NVML_SUCCESS:
             return []
         self._facts = {p.pid: self._facts.get(p.pid) or self._facts_of(p.pid) for p in running}
@@ -506,32 +509,35 @@ class Gpu:
         return procs
 
     def _facts_of(self, pid):
-        """(name, command, owner, ours, conda environment, start time, job, launcher name) of `pid`."""
-        launcher = launcher_of(pid)
-        return (self._command(pid) + process_facts(pid)
+        """(name, command, owner, ours, conda environment, start time, job, launcher name) of `pid`. A
+        notebook's kernel is a job of its own: what started it, Jupyter or an editor, runs every notebook, and
+        stopping that would stop them all."""
+        command = self._command(pid)
+        launcher = None if command[0].startswith("ipykernel") else launcher_of(pid)
+        return (command + process_facts(pid)
                 + ((launcher, self._command(launcher)[0]) if launcher else (pid, None)))
 
     def _command(self, pid):
         """(short name, command line from it on) of `pid`. For a Python interpreter the name is the script
         or module it runs: ("train.py", "train.py --lr 3e-4"), ("torch.distributed.run", ...)."""
-        try:
-            with open("/proc/{}/cmdline".format(pid), "rb") as f:
-                argv = [a for a in f.read().decode("utf-8", "replace").split("\0") if a]
-        except OSError:  # not Linux, or the process already exited
-            argv = []
-        if not argv:
+        argv = [a for a in (proc("{}/cmdline".format(pid)) or "").split("\0") if a]
+        if not argv:  # not Linux, or the process already exited
             name = ctypes.create_string_buffer(256)
             if self.nv.nvmlSystemGetProcessName(pid, name, 256) != NVML_SUCCESS:
                 return str(pid), ""
             argv = [name.value.decode("utf-8", "replace")]
         exe, rest = os.path.basename(argv[0]), argv[1:]
         if exe.startswith("python"):
+            value = False  # the argument before was an option that takes one, as -X faulthandler
             for i, arg in enumerate(rest):
+                if arg == "-c":  # code, no script: the interpreter it is
+                    break
                 if arg == "-m" and i + 1 < len(rest):
                     return rest[i + 1], " ".join(rest[i + 1:])
-                if not arg.startswith("-"):
+                if not arg.startswith("-") and not value:
                     name = os.path.basename(arg)
                     return name, " ".join([name] + rest[i + 1:])
+                value = arg in ("-X", "-W", "--check-hash-based-pycs")
         return exe, " ".join([exe] + rest)
 
     def _process_util(self):
@@ -668,16 +674,37 @@ def conda_name(prefix):
     return os.path.basename(prefix) if os.path.basename(os.path.dirname(prefix)) == "envs" else "base"
 
 
+def proc(path):
+    """The text of /proc/`path`; None where there is none. UTF-8 whatever the locale, and a letter that is
+    not (a process's name is cut at 15 bytes, inside one maybe) does not lose the rest."""
+    try:
+        with open("/proc/" + path, encoding="utf-8", errors="replace") as f:
+            return f.read()
+    except OSError:
+        return None
+
+
+def stat_field(pid, n):
+    """Field `n` of /proc/`pid`/stat, counted from 1 as `man proc` does, as a number; None where unknown.
+    Counted after "(name)", as a name may hold spaces and parentheses."""
+    try:
+        return int(proc("{}/stat".format(pid)).rsplit(")", 1)[1].split()[n - 3])
+    except (AttributeError, IndexError, ValueError):
+        return None
+
+
+@lru_cache(maxsize=None)
+def boot_time():
+    """When the machine started, in seconds since the epoch. Read once: the kernel's figure moves when the
+    clock is set, and a process's start time is to stay the same all run long, as stop compares it."""
+    lines = (proc("stat") or "").splitlines()
+    return next((int(line.split()[1]) for line in lines if line.startswith("btime")), None)
+
+
 def start_time(pid):
     """When `pid` started, in seconds since the epoch."""
-    try:
-        with open("/proc/{}/stat".format(pid)) as f:
-            ticks = int(f.read().rsplit(")", 1)[1].split()[19])  # field 22, counted after "(name)"
-        with open("/proc/stat") as f:
-            boot = next(int(line.split()[1]) for line in f if line.startswith("btime"))
-    except (OSError, StopIteration, ValueError, IndexError):
-        return None
-    return boot + ticks / os.sysconf("SC_CLK_TCK")
+    ticks = stat_field(pid, 22)
+    return None if ticks is None or boot_time() is None else boot_time() + ticks / os.sysconf("SC_CLK_TCK")
 
 
 def account_name(uid):
@@ -693,25 +720,19 @@ def account_name(uid):
 
 def uid_of(pid):
     """The uid of the account running `pid`; None where unknown."""
-    try:
-        with open("/proc/{}/status".format(pid)) as f:
-            return next(int(line.split()[1]) for line in f if line.startswith("Uid:"))
-    except (OSError, StopIteration, ValueError):
-        return None
+    lines = (proc("{}/status".format(pid)) or "").splitlines()
+    return next((int(line.split()[1]) for line in lines if line.startswith("Uid:")), None)
 
 
 def parent_of(pid):
     """The PID of `pid`'s parent; None where unknown."""
-    try:
-        with open("/proc/{}/stat".format(pid)) as f:
-            return int(f.read().rsplit(")", 1)[1].split()[1])  # field 4, counted after "(name)"
-    except (OSError, ValueError, IndexError):
-        return None
+    return stat_field(pid, 4)
 
 
-# Parents that start each program on its own, rather than as the parts of one job.
+# Parents that start each program on its own, rather than as the parts of one job (a notebook's kernel stands
+# alone too, see Gpu._facts_of).
 NOT_LAUNCHERS = {"bash", "sh", "dash", "zsh", "fish", "ksh", "tcsh", "csh", "tmux: server", "screen", "SCREEN",
-                 "sshd", "sudo", "su", "login", "systemd", "init", "script", "nohup"}
+                 "sshd", "sudo", "su", "login", "systemd", "init", "script", "nohup", "raylet"}
 
 
 def launcher_of(pid):
@@ -720,11 +741,8 @@ def launcher_of(pid):
     parent = parent_of(pid)
     if not parent or parent <= 1 or uid_of(parent) != uid_of(pid):
         return None
-    try:
-        with open("/proc/{}/comm".format(parent)) as f:
-            return None if f.read().strip() in NOT_LAUNCHERS else parent
-    except OSError:
-        return None
+    name = proc("{}/comm".format(parent))
+    return None if name is None or name.strip() in NOT_LAUNCHERS else parent
 
 
 def holds_gpu(pid):
@@ -791,7 +809,10 @@ def jobs(gpus):
         for gpu, p in entries:
             if gpu.now.process_util is not None:
                 shares[gpu.index] = shares.get(gpu.index, 0) + gpu.now.process_util.get(p.pid, 0)
-        found.append(Job(pid, main.name, main.launcher, tuple(sorted({(p.pid, p.started) for p in procs})),
+        # The launcher's name from any of them: a launcher on a GPU itself has none of its own. The members by
+        # PID, once each though seen on several GPUs, which may have read it at different times.
+        launcher = next((p.launcher for p in procs if p.launcher), None)
+        found.append(Job(pid, main.name, launcher, tuple(sorted({p.pid: p.started for p in procs}.items())),
                          tuple(sorted({gpu.index for gpu, _ in entries})),
                          sum(shares.values()) / len(shares) if shares else None, sum(p.mem or 0 for p in procs),
                          min(starts) if starts else None, main.owner, main.mine, main.env, main.command))
@@ -815,15 +836,14 @@ def gpu_numbers(indices):
     return "GPU{} {}".format("s" if len(indices) > 1 else "", ranges(indices))
 
 
-def account(job):
-    """"kim/torch": whose it is, and the conda environment."""
-    return "/".join(part for part in (job.owner, job.env) if part)
+def account(who):
+    """"kim/torch": whose a process or job (`who`) is, and its conda environment; "" where neither is known."""
+    return "/".join(part for part in (who.owner, who.env) if part)
 
 
 def tagged(who):
-    """"kim/torch", whose a process or job (`who`) is and its conda environment, as segments: dim, and ours
-    underlined, so that they stand apart without standing out."""
-    text = "/".join(part for part in (who.owner, who.env) if part)
+    """account as segments: dim, and ours underlined, so that they stand apart without standing out."""
+    text = account(who)
     return [(text, UNDERLINE + DIM if who.mine else DIM)] if text else []
 
 
@@ -855,24 +875,36 @@ def about_all(jobs):
 def stop(job, name):
     """Send signal `name` ("SIGTERM" or "SIGKILL") to `job`, once /proc confirms its PIDs still are the
     processes we saw: started when we saw them, holding a GPU open (inside a container, NVML can report
-    PIDs of the host), and ours. SIGTERM goes to the launcher, which then ends its workers; SIGKILL, which
-    it cannot pass on, goes to each worker as well. Returns (a note on what happened, whether it was sent)."""
+    PIDs of the host), and ours. While its launcher still leads them (their parent, ours), SIGTERM goes to
+    the launcher, which then ends its workers, and SIGKILL, which it cannot pass on, to each worker as well;
+    with no launcher, or one gone (its workers left to PID 1), to each process. Returns (a note on what
+    happened, whether any was sent)."""
     if os.name == "nt":
         return [("stopping processes works on Linux", WARN)], False
     for pid, started in job.members:
-        if start_time(pid) != started or not holds_gpu(pid) or (job.launcher and parent_of(pid) != job.pid):
+        if start_time(pid) != started or not holds_gpu(pid):
             return [("{} has changed meanwhile: nothing sent".format(job.name), WARN)], False
-    if uid_of(job.pid) != os.getuid():
-        return [("only your own processes can be stopped", WARN)], False
-    targets = [job.pid] + ([pid for pid, _ in job.members] if name == "SIGKILL" and job.launcher else [])
-    try:
-        for pid in targets:
+        if uid_of(pid) != os.getuid():
+            return [("only your own processes can be stopped", WARN)], False
+    workers = [pid for pid, _ in job.members if pid != job.pid]  # the launcher may be on a GPU too
+    led = bool(job.launcher) and uid_of(job.pid) == os.getuid() and all(parent_of(pid) == job.pid for pid in workers)
+    targets = ([job.pid] + (workers if name == "SIGKILL" else [])) if led else [pid for pid, _ in job.members]
+    sent = []
+    for pid in targets:  # each on its own: one ended meanwhile keeps none of the others from theirs
+        try:
             os.kill(pid, getattr(signal, name))
-    except ProcessLookupError:
+            sent.append(pid)
+        except ProcessLookupError:
+            pass
+        except PermissionError:
+            return [("not allowed to signal PID {}".format(pid), WARN)], bool(sent)
+    if not sent:
         return [("{} has already ended".format(job.name), "")], False
-    except PermissionError:
-        return [("not allowed to signal PID {}".format(job.pid), WARN)], False
-    return [("sent {} to {} (PID {})".format(name, job.launcher or job.name, job.pid), "")], True
+    if led or len(sent) == 1:
+        to = "{} (PID {})".format(job.launcher if led else job.name, job.pid if led else sent[0])
+    else:
+        to = "the {} processes of {}".format(len(sent), job.name)
+    return [("sent {} to {}".format(name, to), "")], True
 
 
 # ── new releases ─────────────────────────────────────────────────────────────
@@ -1083,8 +1115,8 @@ def info(gpu, height):
                   [("{} / {} GiB".format(num(s.mem_used, "{:.1f}"), total), "")])
     to_gpu, to_cpu = link("CPU -> GPU", s.rx), link("GPU -> CPU", s.tx)
     # The rule (None) between MEM and the PCIe traffic only appears when there is room.
-    if height >= 5:
-        return [gpu_row, mem_row, None, to_gpu, to_cpu] + [row([])] * (height - 5)
+    if height >= MAX_INNER_H:
+        return [gpu_row, mem_row, None, to_gpu, to_cpu]
     return [gpu_row, mem_row, to_gpu, to_cpu][:height]
 
 
@@ -1175,15 +1207,14 @@ def elapsed(started):
 
 def process_entries(processes):
     """Processes grouped by owner and conda environment, groups and processes by memory, biggest first, as
-    (tag, process): the tag "kim/torch", "" where neither is known."""
+    (tag, process): the tag its account, "kim/torch"."""
     def mem(process):
         return process.mem or 0
     groups = {}
     for process in sorted(processes, key=mem, reverse=True):
-        groups.setdefault((process.owner, process.env), []).append(process)
-    return [("/".join(part for part in (owner, env) if part), process)
-            for (owner, env), group in sorted(groups.items(), key=lambda item: sum(map(mem, item[1])), reverse=True)
-            for process in group]
+        groups.setdefault(account(process), []).append(process)
+    ordered = sorted(groups.items(), key=lambda item: sum(map(mem, item[1])), reverse=True)
+    return [(tag, process) for tag, group in ordered for process in group]
 
 
 def process_name(process, selected=frozenset()):
@@ -1296,17 +1327,17 @@ def layout(count, width, height, left="graph"):
     and scroll: shorter numbers would be the brief ones."""
     if left in CARDS:
         return 1, MIN_INNER_H if left == "brief" else MAX_INNER_H
-    most = 2 if width // 2 >= CHROME_W + INFO_W + MIN_GRAPH_W else 1  # a narrower graph is not worth it
+    most = 2 if count > 1 and width // 2 >= CHROME_W + INFO_W + MIN_GRAPH_W else 1  # narrower is not worth it
     cols = next((c for c in range(1, most + 1) if math.ceil(count / c) * (MAX_INNER_H + 2) <= height), most)
     rows = max(1, math.ceil(count / cols))
     return cols, max(MIN_INNER_H, min(MAX_INNER_H, height // rows - 2))
 
 
-def render(gpus, width, height, selected=frozenset(), shape=None, left="graph", scroll=None):
-    """The GPU boxes, in `shape` = (columns, inner height) or else the layout that fits: exactly `height`
-    lines of exactly `width` cells. `left`: see panel; the processes moved on as `scroll` has it for each
-    GPU (its index: (lines, cells))."""
-    cols, inner = shape or layout(len(gpus), width, height, left)
+def render(gpus, width, height, shape, selected=frozenset(), left="graph", scroll=None):
+    """The GPU boxes, in `shape` = (columns, inner height) (see layout): exactly `height` lines of exactly
+    `width` cells. `left`: see panel; the processes moved on as `scroll` has it for each GPU (its index:
+    (lines, cells))."""
+    cols, inner = shape
     box_w = CARD_W if left in CARDS else width // cols
     rows = math.ceil(len(gpus) / cols)
     lines = []
@@ -1326,8 +1357,7 @@ COLUMNS = [
     ("process", 22, lambda j: [(j.name + ("  {} workers".format(len(j.members)) if len(j.members) > 1 else ""),
                                 THEME.accent)], lambda j: j.name.lower()),
     ("GPUs", 8, lambda j: [(ranges(j.gpus), "")], lambda j: j.gpus),
-    (">util", 5, lambda j: share(j.util, 100) if j.util is not None else [("-", "")],
-     lambda j: -1 if j.util is None else j.util),
+    (">util", 5, lambda j: share(j.util, 100), lambda j: -1 if j.util is None else j.util),
     (">memory", 7, lambda j: [("{:.1f}G".format(j.mem), "")], lambda j: j.mem),
     (">time", 7, lambda j: [(elapsed(j.started) if j.started is not None else "-", "")],
      lambda j: -(j.started or 0)),
@@ -1524,17 +1554,18 @@ class View:
         column, descending = self.sort
         self.jobs = sorted(jobs(gpus), key=lambda job: (SORTS[column](job), job.pid), reverse=descending)
         self.picked &= {job.pid for job in self.jobs}  # those that ended go
-        if not self.picked:
-            self.job, self.only, self.asking = None, False, None
-        elif self.job not in self.picked:
-            self.job = next(job.pid for job in self.jobs if job.pid in self.picked)
         picked = self.selected()
+        if self.job not in self.picked:  # the one in focus ended: the next
+            self.job = picked[0].pid if picked else None
+        self.only = self.only and bool(picked)
+        if not any(job.mine for job in picked):  # ours ended while asked about: nothing left to stop
+            self.asking = None
         focus = next(job for job in picked if job.pid == self.job) if picked else None
         self.remind()
         self.indices = [g.index for g in gpus]
         used = {index for job in picked for index in job.gpus}
         shown = [g for g in gpus if (g.index in used if self.only else g.index not in self.hidden)]
-        rows = min(len(self.jobs) + 2, max(4, (height - 2) // 2)) if self.listing else 0
+        rows = min(len(self.jobs) + 2, max(4, (height - 2) // 2), max(0, height - 2)) if self.listing else 0
         body = self.boxes(shown, width, height - 2 - rows)
         self.list_rows = range(1 + len(body), 1 + len(body) + rows)
         if rows:
@@ -1549,6 +1580,9 @@ class View:
 
     def boxes(self, gpus, width, height):
         """The GPU boxes in `height` lines; when not all fit, the rows from gpu_top on and a line on that."""
+        self.areas, self.graphs, self.panels = [], [], []
+        if height <= 0:  # a window so short that the list takes it all
+            return []
         cols, inner = layout(len(gpus), width, height, self.left)
         rows = math.ceil(len(gpus) / cols)
         note, count = [], len(gpus)
@@ -1565,19 +1599,21 @@ class View:
             self.gpu_top, self.gpu_page = 0, rows
         box_w = CARD_W if self.left in CARDS else width // cols
         room = max(0, box_w - CHROME_W - INFO_W)
-        self.areas, self.graphs = [], []
-        self.panels = [(range(1 + k // cols * (inner + 2), 1 + (k // cols + 1) * (inner + 2)),
+
+        def drawn(start, stop):  # screen rows start..stop, but no further than the boxes go: a window too
+            return range(start, min(stop, 1 + height))  # short for a whole one shows part of it
+        self.panels = [(drawn(1 + k // cols * (inner + 2), 1 + (k // cols + 1) * (inner + 2)),
                         range(k % cols * box_w, (k % cols + 1) * box_w), g.index) for k, g in enumerate(gpus)]
         for k, g in enumerate(gpus if self.left in ("graph", "processes") else []):
             y, x = 2 + k // cols * (inner + 2), k % cols * box_w + 2  # 2: the top line and the box's edge
             if self.left == "graph":
-                self.graphs.append((range(y, y + inner), range(x, x + room), g))
+                self.graphs.append((drawn(y, y + inner), range(x, x + room), g))
                 continue
             most = listing_extent(g.now.processes, room, inner)  # the processes' offsets in range
             top, shift = self.scroll.get(g.index, (0, 0))
             self.scroll[g.index] = min(max(top, 0), most[0]), min(max(shift, 0), most[1])
-            self.areas.append((range(y, y + inner), range(x, x + room), g.index))
-        return render(gpus, width, height, self.picked, (cols, inner), self.left, self.scroll) + note
+            self.areas.append((drawn(y, y + inner), range(x, x + room), g.index))
+        return render(gpus, width, height, (cols, inner), self.picked, self.left, self.scroll) + note
 
     def hovered(self):
         """(GPU, graph rows, graph columns, the column pointed at, how many samples back from the newest that
@@ -1729,7 +1765,7 @@ class View:
                 if row in self.list_rows:
                     self.shift = max(0, self.shift + 8 * step)
             elif row in self.list_rows:
-                if col >= COMMAND_AT and self.target(row, col) == self.job:
+                if col >= COMMAND_AT and self.job is not None and self.target(row, col) == self.job:
                     self.shift = max(0, self.shift + 8 * step)
                 else:
                     self.top, self.follow = self.top + 3 * step, False
@@ -1806,7 +1842,7 @@ class View:
             self.theme = THEMES[(THEMES.index(self.theme) + (-1 if value[0] == "C" else 1)) % len(THEMES)]
             shows = "" if self.shows == "truecolor" else ", in 256 colors: all this terminal shows"
             self.note = ([("theme: " + self.theme.name + shows, "")], time.monotonic() + 3)
-        elif key.isdigit() and int(key) in self.indices:
+        elif key.isdecimal() and int(key) in self.indices:  # not isdigit: ² is a digit, but no number
             self.handle(("gpu", int(key)))
         elif self.listing and key in ("s", "r"):  # the next column, or the other way round
             names, (column, descending) = list(SORTS), self.sort
@@ -1858,15 +1894,20 @@ ASCII = str.maketrans({"─": "-", "│": "|", "├": "+", "┤": "+", "╭": "+
                        "▁": "_", "▂": "_", "▃": "_", "▄": "=", "▅": "=", "▆": "#", "▇": "#", "█": "#",
                        "▀": " ",  # the graph's full cells: their background alone, a solid block
                        "°": " ", "·": "-", "…": "~", "↑": "^", "↓": "v", "▲": "^", "▼": "v"})
+# Control characters, which would act on the terminal rather than show: anyone's command line can carry them
+# (ESC, BEL, a new line), and with them clear the screens of all who watch, or set their window titles. A "?"
+# each, a cell, as they are counted.
+SHOWN = {code: "?" for code in itertools.chain(range(0x20), range(0x7f, 0xa0))}
+ASCII.update(SHOWN)
 
 
 def paint(line, mode="truecolor", ascii=False, gray=False):
     """One line as the terminal gets it, from plain to plain: in color `mode` (with `gray`, grays only; see
-    restyle), with `ascii` in ASCII, a style code only where the style changes."""
+    restyle), with `ascii` in ASCII, control characters as "?" (SHOWN), a style code only where the style
+    changes."""
     out, current = [], ""
     for text, style, *_ in line:
-        if ascii:
-            text = text.translate(ASCII)
+        text = text.translate(ASCII if ascii else SHOWN)
         if mode != "truecolor" or gray:
             style = restyle(style, mode, gray)
         if style != current:
@@ -1902,12 +1943,16 @@ class Settings:
         self.path, self.client = os.path.join(base, "nvmon", "settings.json"), client()
 
     def _read(self):
+        """The file's settings; {} when there is no file, None when it is not JSON nvmon can keep to (edited
+        by hand, say), and so not to be written over."""
         try:
             with open(self.path, encoding="utf-8") as f:
                 data = json.load(f)
-        except (OSError, ValueError):
+        except FileNotFoundError:
             return {}
-        return data if isinstance(data, dict) else {}
+        except (OSError, ValueError):
+            return None
+        return data if isinstance(data, dict) else None
 
     def load(self, host):
         """This client's settings as View.restore takes them, the GPUs hidden those on `host`; none when they
@@ -1917,16 +1962,19 @@ class Settings:
             kept = {"left": mine["left"], "theme": mine["theme"], "sort": (mine["sort"][0], bool(mine["sort"][1])),
                     "hidden": set(map(int, mine["hidden"].get(host, [])))}
             return kept if kept["left"] in LEFTS and kept["sort"][0] in SORTS else {}
-        except (KeyError, IndexError, TypeError, ValueError, AttributeError):
+        except (KeyError, IndexError, TypeError, ValueError, AttributeError, OverflowError):  # Overflow: Infinity
             return {}
 
     def save(self, kept, indices, host):
         """Keep `kept` (View.kept) for this client; for GPUs that are not `indices` (nvmon -g), and on other
-        hosts, what was kept for them. Everyone else's settings stay as the file has them now."""
+        hosts, what was kept for them. Everyone else's settings stay as the file has them now; a file nvmon
+        cannot read stays as it is."""
         data = self._read()
+        if data is None:
+            return
         try:
             hidden = {name: set(map(int, gpus)) for name, gpus in data[self.client]["hidden"].items()}
-        except (KeyError, TypeError, ValueError, AttributeError):
+        except (KeyError, TypeError, ValueError, AttributeError, OverflowError):
             hidden = {}
         hidden[host] = hidden.get(host, set()) - set(indices) | kept["hidden"]
         data[self.client] = {"left": kept["left"], "theme": kept["theme"], "sort": list(kept["sort"]),
@@ -1952,6 +2000,10 @@ INPUT = re.compile(rb"\x1b\[<(?P<button>\d+);(?P<x>\d+);(?P<y>\d+)(?P<act>[Mm])"
                    rb"|(?P<report>\x1bP[^\x1b]*\x1b\\)"                           # a late answer to Screen.probe
                    rb"|(?P<text>[\xc2-\xf4][\x80-\xbf]+)"                          # a letter beyond ASCII, as UTF-8
                    rb"|(?P<char>.)", re.DOTALL)                                 # any other key; a lone ESC is Esc
+# What INPUT would take for keys if the rest of it were there: input that ends in the start of an escape
+# sequence, or of a letter's UTF-8 (see Screen.read).
+CUT = re.compile(rb"\x1b(?:\[[<?>0-9;]*|\[M.{0,2}|O|P[^\x1b]*\x1b?)?\Z"
+                 rb"|(?:[\xc2-\xdf]|[\xe0-\xef][\x80-\xbf]?|[\xf0-\xf4][\x80-\xbf]{0,2})\Z", re.DOTALL)
 
 
 def events(data):
@@ -1972,7 +2024,7 @@ def events(data):
                 out.append(("hwheel" if sideways else "wheel", 1 if button & 1 else -1, y - 1, x - 1))
             elif button & 32:  # a move, a button held or not
                 out.append(("move", y - 1, x - 1))
-            elif press and button & 3 == 0:  # left button down
+            elif press and button & ~(4 | 8 | 16) == 0:  # left button down, Shift, Alt or Ctrl held at most
                 out.append(("click", y - 1, x - 1))
         elif m.group("report"):
             continue
@@ -2016,7 +2068,11 @@ class Screen:
         self._write("\x1b[?1049h\x1b[?25l\x1b[?7l" + ("\x1b[?1000h\x1b[?1003h\x1b[?1006h" if self._mouse else ""))
         # Windows Terminal and the console of Windows 10 on show 24-bit color and draw lines one cell wide;
         # not asked there, as the console would answer nothing on color, and so get 256 colors.
-        self.wide, self.truecolor = self.probe() if self._keys and os.name != "nt" else (False, os.name == "nt")
+        try:
+            self.wide, self.truecolor = self.probe() if self._keys and os.name != "nt" else (False, os.name == "nt")
+        except BaseException:  # Ctrl+C while waiting for the answers: the terminal as it was all the same
+            self.__exit__()
+            raise
         return self
 
     def probe(self):
@@ -2057,6 +2113,14 @@ class Screen:
             time.sleep(max(0, seconds))
             return []
         data = incoming(seconds)
+        # A read can end inside a sequence, as it takes 1024 bytes at most (a slow ssh link delivers in
+        # bursts). The rest is on its way: wait for it, up to 0.05 s (an Esc key waits as long), or the halves
+        # come in as keys, a pointer's move ESC [<35;120;40M as Esc, [, <, 3, 5... which hide GPUs.
+        while data and CUT.search(data):
+            more = incoming(0.05)
+            if not more:
+                break
+            data += more
         if data is None:  # stdin closed: nothing more will come
             self._keys = False
         return events(data or b"")
@@ -2140,8 +2204,7 @@ def raw_keys():
     if os.name == "nt":
         # On: ENABLE_VIRTUAL_TERMINAL_INPUT, keys and the mouse as escape sequences, as elsewhere. Off:
         # ENABLE_PROCESSED_INPUT, so that Ctrl+C comes as a key (CONTROL_KEYS): as a signal, it would only
-        # stop nvmon once console_input's wait is over, up to an interval later; ENABLE_LINE_INPUT and
-        # ENABLE_ECHO_INPUT.
+        # stop nvmon once console_input's wait is over; ENABLE_LINE_INPUT and ENABLE_ECHO_INPUT.
         return console_mode(sys.stdin, 0x0200, 0x0001 | 0x0002 | 0x0004)
     import termios
     import tty
@@ -2223,7 +2286,7 @@ def main():
             # peek = (GPUs, round): when more GPUs' processes are to show their utilization, as after a click on
             # a job, the screen takes the newest numbers as soon as those GPUs have been read, not at the next
             # frame; or once that round of polls is over, for a GPU that cannot tell (with MIG, say).
-            frame_at, poll_at, redraw, peek = time.monotonic(), None, True, None
+            frame_at, poll_at, redraw, peek, size = time.monotonic(), None, True, None, None
             while True:
                 now = time.monotonic()
                 if now >= frame_at:  # a new frame: the newest numbers, one more graph column each
@@ -2246,14 +2309,16 @@ def main():
                         peek, redraw = None, True
                     else:
                         poller.refresh()  # after the round running, should it have passed those GPUs
-                if redraw:
-                    width, height = os.get_terminal_size()
+                if redraw or tuple(os.get_terminal_size()) != size:  # a window resized redraws too
+                    width, height = size = tuple(os.get_terminal_size())
                     screen.draw(view.screen(gpus, width, height,
                                             header(width, args.interval, driver, poller.waiting()), update.newer),
-                                view.shows, view.theme.gray, (width, height))
+                                view.shows, view.theme.gray, size)
                 # Keys and clicks redraw at once, the pointer when it goes to another graph column; the
-                # numbers move on at the next frame.
-                events = screen.read(0.01 if peek is not None else (poll_at or frame_at) - time.monotonic())
+                # numbers move on at the next frame. A quarter second at most, to see a resized window soon
+                # with a long interval too.
+                wait = 0.01 if peek is not None else (poll_at or frame_at) - time.monotonic()
+                events = screen.read(min(wait, 0.25))
                 pointed = view.pointed()
                 going = all(map(view.handle, events))
                 if view.kept() != kept:  # a setting changed: keep it for next time

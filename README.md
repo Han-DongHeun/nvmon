@@ -128,7 +128,8 @@ The view, theme, list order and hidden GPUs, for each computer you connect from,
   Japanese): nvmon notices and draws in ASCII. No 24-bit color reported: 256 colors.
 - Boxes still broken: use a font with one-cell line characters (D2Coding, Cascadia Mono, JetBrains Mono,
   DejaVu Sans Mono) and UTF-8.
-- Windows: use Windows Terminal. There is no `t` / `k`.
+- Windows: use Windows Terminal. `k` ends a process at once; there is no `t`, as Windows has nothing like
+  SIGTERM.
 - nvmon asks PyPI once at start for a newer release; `NVMON_NO_UPDATE_CHECK=1` turns that off.
 
 ## License

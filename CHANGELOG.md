@@ -6,6 +6,8 @@ What changes for you in each release. The same notes appear on the
 ## 0.3.5
 
 - The mouse works on Windows as well: point at a graph, click, scroll with the wheel.
+- On Windows, processes show their account, yours underlined, and run time, and `k` ends your own, at
+  once, after a `y`. There is no `t`: Windows has nothing like SIGTERM.
 - Moving the mouse over a slow ssh link no longer hides GPUs, closes the list or quits: a pointer's move
   that came in two pieces was read as Esc and digit keys.
 - A command line with control characters in it, anyone's, shows them as `?` rather than sending them to

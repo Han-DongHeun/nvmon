@@ -349,7 +349,7 @@ class Process(NamedTuple):
     name: str                     # script name for Python, else the executable
     command: str                  # the command line from `name` on, e.g. "train.py --lr 3e-4"
     mem: Optional[float]          # GPU memory, GiB
-    owner: Optional[str]          # account; None where unknown (Windows)
+    owner: Optional[str]          # account; None where unknown
     mine: bool                    # ours: its account underlined, and only ours can be stopped
     env: Optional[str]            # conda environment
     started: Optional[float]      # start time, seconds since the epoch
@@ -651,10 +651,61 @@ def versions(nv):
 
 
 def process_facts(pid):
-    """(owner, whether it is ours, conda environment, start time) of `pid` from /proc; Nones, and not ours,
-    where unknown (e.g. Windows)."""
+    """(owner, whether it is ours, conda environment, start time) of `pid`, from /proc or Windows; Nones,
+    and not ours, where unknown."""
+    if os.name == "nt":
+        sid = windows_sid(pid)
+        return sid and sid_name(sid), ours(pid), None, start_time(pid)
     uid = uid_of(pid)
-    return account_name(uid), uid is not None and uid == os.getuid(), conda_env(pid), start_time(pid)
+    return account_name(uid), ours(pid), conda_env(pid), start_time(pid)
+
+
+def ours(pid):
+    """Whether `pid` runs as our account; False where unknown."""
+    if os.name == "nt":
+        sid = windows_sid(pid)
+        return sid is not None and sid == windows_sid(os.getpid())
+    uid = uid_of(pid)
+    return uid is not None and uid == os.getuid()
+
+
+def windows_process(pid):
+    """A handle to query `pid` with, on Windows; None where that is not allowed (the system's processes, or
+    another account's). To be closed (CloseHandle)."""
+    kernel32 = ctypes.windll.kernel32
+    kernel32.OpenProcess.restype = c_void_p
+    handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    return c_void_p(handle) if handle else None
+
+
+def windows_sid(pid):
+    """The security identifier (SID) of the account running `pid`, on Windows, as bytes; None where unknown."""
+    kernel32, advapi32 = ctypes.windll.kernel32, ctypes.windll.advapi32
+    process = windows_process(pid)
+    if process is None:
+        return None
+    token, info, size = c_void_p(), ctypes.create_string_buffer(256), ctypes.c_ulong()
+    try:
+        if not advapi32.OpenProcessToken(process, 0x0008, byref(token)):  # TOKEN_QUERY
+            return None
+        found = advapi32.GetTokenInformation(token, 1, info, len(info), byref(size))  # TokenUser
+        kernel32.CloseHandle(token)
+        if not found:
+            return None
+        sid = c_void_p.from_buffer(info)  # TOKEN_USER starts with the SID's address, within `info`
+        return ctypes.string_at(sid.value, advapi32.GetLengthSid(sid))
+    finally:
+        kernel32.CloseHandle(process)
+
+
+@lru_cache(maxsize=None)
+def sid_name(sid):
+    """The account name of `sid` (windows_sid); looked up once each, as it may ask a domain controller."""
+    name, domain = ctypes.create_unicode_buffer(256), ctypes.create_unicode_buffer(256)
+    sizes, kind = (ctypes.c_ulong(256), ctypes.c_ulong(256)), ctypes.c_ulong()
+    found = ctypes.windll.advapi32.LookupAccountSidW(None, sid, name, byref(sizes[0]), domain, byref(sizes[1]),
+                                                     byref(kind))
+    return name.value if found else None
 
 
 def conda_env(pid):
@@ -702,7 +753,15 @@ def boot_time():
 
 
 def start_time(pid):
-    """When `pid` started, in seconds since the epoch."""
+    """When `pid` started, in seconds since the epoch; None where unknown."""
+    if os.name == "nt":
+        process = windows_process(pid)
+        if process is None:
+            return None
+        created, exited, kernel, user = (c_ulonglong() for _ in range(4))  # FILETIMEs: 100 ns since 1601
+        found = ctypes.windll.kernel32.GetProcessTimes(process, *map(byref, (created, exited, kernel, user)))
+        ctypes.windll.kernel32.CloseHandle(process)
+        return created.value / 1e7 - 11644473600 if found else None
     ticks = stat_field(pid, 22)
     return None if ticks is None or boot_time() is None else boot_time() + ticks / os.sysconf("SC_CLK_TCK")
 
@@ -746,7 +805,10 @@ def launcher_of(pid):
 
 
 def holds_gpu(pid):
-    """True when `pid` has an NVIDIA device open, as a GPU process in our PID namespace does."""
+    """True when `pid` has an NVIDIA device open, as a GPU process in our PID namespace does. Windows does not
+    tell, nor has it PID namespaces: True there, the start time telling it is the same process."""
+    if os.name == "nt":
+        return True
     try:
         fds = os.listdir("/proc/{}/fd".format(pid))
     except OSError:
@@ -873,36 +935,38 @@ def about_all(jobs):
 
 
 def stop(job, name):
-    """Send signal `name` ("SIGTERM" or "SIGKILL") to `job`, once /proc confirms its PIDs still are the
-    processes we saw: started when we saw them, holding a GPU open (inside a container, NVML can report
-    PIDs of the host), and ours. While its launcher still leads them (their parent, ours), SIGTERM goes to
-    the launcher, which then ends its workers, and SIGKILL, which it cannot pass on, to each worker as well;
-    with no launcher, or one gone (its workers left to PID 1), to each process. Returns (a note on what
-    happened, whether any was sent). Linux only (see View.handle)."""
+    """Send signal `name` ("SIGTERM" or "SIGKILL") to `job`, once /proc or Windows confirms its PIDs still
+    are the processes we saw: started when we saw them, holding a GPU open (inside a container, NVML can
+    report PIDs of the host), and ours. While its launcher still leads them (their parent, ours), SIGTERM
+    goes to the launcher, which then ends its workers, and SIGKILL, which it cannot pass on, to each worker
+    as well; with no launcher, or one gone (its workers left to PID 1), to each process. On Windows, which
+    has no SIGTERM and no launchers, SIGKILL only (see View.handle): each process is ended at once. Returns
+    (a note on what happened, whether any was sent)."""
     for pid, started in job.members:
         if start_time(pid) != started or not holds_gpu(pid):
             return [("{} has changed meanwhile: nothing sent".format(job.name), WARN)], False
-        if uid_of(pid) != os.getuid():
+        if not ours(pid):
             return [("only your own processes can be stopped", WARN)], False
     workers = [pid for pid, _ in job.members if pid != job.pid]  # the launcher may be on a GPU too
-    led = bool(job.launcher) and uid_of(job.pid) == os.getuid() and all(parent_of(pid) == job.pid for pid in workers)
+    led = bool(job.launcher) and ours(job.pid) and all(parent_of(pid) == job.pid for pid in workers)
     targets = ([job.pid] + (workers if name == "SIGKILL" else [])) if led else [pid for pid, _ in job.members]
     sent = []
     for pid in targets:  # each on its own: one ended meanwhile keeps none of the others from theirs
         try:
-            os.kill(pid, getattr(signal, name))
+            # Windows: any signal but Ctrl+C's ends the process at once (TerminateProcess)
+            os.kill(pid, signal.SIGTERM if os.name == "nt" else getattr(signal, name))
             sent.append(pid)
-        except ProcessLookupError:
-            pass
         except PermissionError:
             return [("not allowed to signal PID {}".format(pid), WARN)], bool(sent)
+        except OSError:  # ended meanwhile: no such process (on Windows, an invalid PID)
+            pass
     if not sent:
         return [("{} has already ended".format(job.name), "")], False
     if led or len(sent) == 1:
         to = "{} (PID {})".format(job.launcher if led else job.name, job.pid if led else sent[0])
     else:
         to = "the {} processes of {}".format(len(sent), job.name)
-    return [("sent {} to {}".format(name, to), "")], True
+    return [("{} {}".format("ended" if os.name == "nt" else "sent {} to".format(name), to), "")], True
 
 
 # ── new releases ─────────────────────────────────────────────────────────────
@@ -1703,8 +1767,8 @@ class View:
         note = self.note[0] if self.note and time.monotonic() < self.note[1] else None
         if picked:
             hints = [("f", "all GPUs" if self.only else "only these GPUs")]
-            ours = any(job.mine for job in picked)  # never on Windows, where whose it is is not known
-            hints += [("t", "stop"), ("k", "kill")] if ours else []
+            if any(job.mine for job in picked):
+                hints += [("k", "kill")] if os.name == "nt" else [("t", "stop"), ("k", "kill")]
             if len(picked) == 1:
                 left = [(picked[0].name, THEME.accent, picked[0].pid), ("  ", DIM)] + about(picked[0])
             else:
@@ -1720,18 +1784,20 @@ class View:
     def question(self, picked):
         """"stop train.py on GPUs 4-5: SIGTERM to its torchrun (PID 48213), which ends its 2 workers?" and the
         like; for several jobs "stop your 2 of 3 jobs on GPUs 4-5,7, SIGTERM to each: train.py, eval.py?". The
-        GPUs are those the signal reaches, whichever was clicked."""
+        GPUs are those the signal reaches, whichever was clicked. On Windows, "kill python.exe on GPU 0 (PID 4120)
+        at once?", as no signal is sent there."""
         what = "stop" if self.asking == "SIGTERM" else "kill"
         ours = [job for job in picked if job.mine]
         where = "on " + gpu_numbers(index for job in ours for index in job.gpus)
         if len(picked) > 1:
             which = "{} jobs".format(len(ours)) if len(ours) == len(picked) else "your {} of {} jobs".format(
                 len(ours), len(picked))
-            return "{} {} {}, {} to each: {}?".format(what, which, where, self.asking,
-                                                     ", ".join(job.name for job in ours))
+            how = " at once" if os.name == "nt" else ", {} to each".format(self.asking)
+            return "{} {} {}{}: {}?".format(what, which, where, how, ", ".join(job.name for job in ours))
         job = ours[0]
         if not job.launcher:
-            return "{} {} {} (PID {}) with {}?".format(what, job.name, where, job.pid, self.asking)
+            how = "at once" if os.name == "nt" else "with " + self.asking
+            return "{} {} {} (PID {}) {}?".format(what, job.name, where, job.pid, how)
         passed = ", which ends its" if self.asking == "SIGTERM" else " and to its"
         return "{} {} {}: {} to its {} (PID {}){} {} workers?".format(what, job.name, where, self.asking,
                                                                      job.launcher, job.pid, passed, len(job.members))
@@ -1864,8 +1930,8 @@ class View:
         elif self.picked and key in ("f", "enter"):
             self.only = not self.only
         elif self.picked and key in ("t", "k"):
-            if os.name == "nt":  # nor whose a process is: no /proc
-                self.note = ([("stopping processes works on Linux only", WARN)], time.monotonic() + 3)
+            if os.name == "nt" and key == "t":  # no SIGTERM there, nothing that asks a process to end
+                self.note = ([("Windows can only end a process at once: k", WARN)], time.monotonic() + 3)
             elif any(job.mine for job in self.selected()):
                 self.asking = "SIGTERM" if key == "t" else "SIGKILL"
             else:

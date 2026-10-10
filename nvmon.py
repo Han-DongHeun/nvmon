@@ -878,9 +878,7 @@ def stop(job, name):
     PIDs of the host), and ours. While its launcher still leads them (their parent, ours), SIGTERM goes to
     the launcher, which then ends its workers, and SIGKILL, which it cannot pass on, to each worker as well;
     with no launcher, or one gone (its workers left to PID 1), to each process. Returns (a note on what
-    happened, whether any was sent)."""
-    if os.name == "nt":
-        return [("stopping processes works on Linux", WARN)], False
+    happened, whether any was sent). Linux only (see View.handle)."""
     for pid, started in job.members:
         if start_time(pid) != started or not holds_gpu(pid):
             return [("{} has changed meanwhile: nothing sent".format(job.name), WARN)], False
@@ -1705,7 +1703,7 @@ class View:
         note = self.note[0] if self.note and time.monotonic() < self.note[1] else None
         if picked:
             hints = [("f", "all GPUs" if self.only else "only these GPUs")]
-            ours = any(job.mine for job in picked) and os.name != "nt"
+            ours = any(job.mine for job in picked)  # never on Windows, where whose it is is not known
             hints += [("t", "stop"), ("k", "kill")] if ours else []
             if len(picked) == 1:
                 left = [(picked[0].name, THEME.accent, picked[0].pid), ("  ", DIM)] + about(picked[0])
@@ -1866,7 +1864,9 @@ class View:
         elif self.picked and key in ("f", "enter"):
             self.only = not self.only
         elif self.picked and key in ("t", "k"):
-            if any(job.mine for job in self.selected()):
+            if os.name == "nt":  # nor whose a process is: no /proc
+                self.note = ([("stopping processes works on Linux only", WARN)], time.monotonic() + 3)
+            elif any(job.mine for job in self.selected()):
                 self.asking = "SIGTERM" if key == "t" else "SIGKILL"
             else:
                 self.note = ([("only your own processes can be stopped", WARN)], time.monotonic() + 3)

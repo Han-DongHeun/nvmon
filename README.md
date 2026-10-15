@@ -10,10 +10,17 @@ A fancy NVIDIA GPU monitor for the terminal. One Python file, no dependencies.
 uv tool install nvmon    # or: pipx install nvmon
 ```
 
-No uv? [Install it](https://docs.astral.sh/uv/getting-started/installation/), or use `pip install nvmon`
-inside whichever environment you use.
+Or into the environment you are in:
 
-Server without internet: copy `nvmon.py` over and run it with Python 3.6+.
+```bash
+pip install nvmon
+```
+
+Or no install at all: the one file, run with Python 3.6+ (on a server without internet, copy it over).
+
+```bash
+curl -LO https://github.com/Han-DongHeun/nvmon/releases/latest/download/nvmon.py && python3 nvmon.py
+```
 
 ## Start
 

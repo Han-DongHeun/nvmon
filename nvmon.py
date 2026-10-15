@@ -1458,8 +1458,11 @@ NARROW = re.compile(r"[\x20-\x7e\xa0-˿‐-⁞←-⏿─-◿]*\Z")
 
 def char_cells(char):
     """The cells a letter takes: 2 for a wide one (Hangul, Chinese, Japanese, full-width forms, most
-    emoji), 0 for a mark combining with the one before, else 1."""
-    return 2 if unicodedata.east_asian_width(char) in "WF" else 0 if unicodedata.combining(char) else 1
+    emoji); 0 for what goes onto the letter before it (marks, such as Thai vowels or a combining accent,
+    joiners, an emoji's skin tone); else 1."""
+    if unicodedata.category(char) in ("Mn", "Me", "Cf") or "\U0001f3fb" <= char <= "\U0001f3ff":
+        return 0
+    return 2 if unicodedata.east_asian_width(char) in "WF" else 1
 
 
 @lru_cache(maxsize=4096)

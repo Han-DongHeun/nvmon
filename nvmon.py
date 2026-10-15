@@ -18,6 +18,7 @@ import json
 import math
 import operator
 import os
+import platform
 import re
 import signal
 import socket
@@ -374,6 +375,8 @@ class Sample(NamedTuple):
     slowdown: Optional[tuple]     # (label, color) when the clock is held back
     processes: list               # [Process]
     process_util: Optional[dict]  # pid -> % of time its kernels ran; None unless the process list is open
+    renderer: Optional[float] = None  # % Apple GPU: busy drawing or computing
+    tiler: Optional[float] = None     # % Apple GPU: busy splitting the screen into tiles
 
 
 class ProcessUtil(ctypes.Structure):  # nvmlProcessUtilizationSample_t
@@ -518,27 +521,22 @@ class Gpu:
                 + ((launcher, self._command(launcher)[0]) if launcher else (pid, None)))
 
     def _command(self, pid):
-        """(short name, command line from it on) of `pid`. For a Python interpreter the name is the script
-        or module it runs: ("train.py", "train.py --lr 3e-4"), ("torch.distributed.run", ...)."""
-        argv = [a for a in (proc("{}/cmdline".format(pid)) or "").split("\0") if a]
-        if not argv:  # not Linux, or the process already exited
-            name = ctypes.create_string_buffer(256)
-            if self.nv.nvmlSystemGetProcessName(pid, name, 256) != NVML_SUCCESS:
+        """(short name, command line from it on) of `pid` (see short_command)."""
+        argv = argv_of(pid)
+        if not argv:  # not ours to read, not Linux or macOS, or the process already exited
+            name = self._name_of(pid)
+            if not name:
                 return str(pid), ""
-            argv = [name.value.decode("utf-8", "replace")]
-        exe, rest = os.path.basename(argv[0]), argv[1:]
-        if exe.startswith("python"):
-            value = False  # the argument before was an option that takes one, as -X faulthandler
-            for i, arg in enumerate(rest):
-                if arg == "-c":  # code, no script: the interpreter it is
-                    break
-                if arg == "-m" and i + 1 < len(rest):
-                    return rest[i + 1], " ".join(rest[i + 1:])
-                if not arg.startswith("-") and not value:
-                    name = os.path.basename(arg)
-                    return name, " ".join([name] + rest[i + 1:])
-                value = arg in ("-X", "-W", "--check-hash-based-pycs")
-        return exe, " ".join([exe] + rest)
+            argv = [name]
+        return short_command(argv)
+
+    def _name_of(self, pid):
+        """The name of `pid` as the driver knows it; None where it does not."""
+        name = ctypes.create_string_buffer(256)
+        if self.nv.nvmlSystemGetProcessName(pid, name, 256) != NVML_SUCCESS:
+            return None
+        return name.value.decode("utf-8", "replace")
+
 
     def _process_util(self):
         """{pid: % of the time its kernels ran} since the last call; None where the GPU cannot tell
@@ -708,11 +706,54 @@ def sid_name(sid):
     return name.value if found else None
 
 
+def short_command(argv):
+    """(short name, command line from it on) of a command line. For a Python interpreter the name is the
+    script or module it runs: ("train.py", "train.py --lr 3e-4"), ("torch.distributed.run", ...)."""
+    exe, rest = os.path.basename(argv[0]), argv[1:]
+    if exe.startswith("python"):
+        value = False  # the argument before was an option that takes one, as -X faulthandler
+        for i, arg in enumerate(rest):
+            if arg == "-c":  # code, no script: the interpreter it is
+                break
+            if arg == "-m" and i + 1 < len(rest):
+                return rest[i + 1], " ".join(rest[i + 1:])
+            if not arg.startswith("-") and not value:
+                name = os.path.basename(arg)
+                return name, " ".join([name] + rest[i + 1:])
+            value = arg in ("-X", "-W", "--check-hash-based-pycs")
+    return exe, " ".join([exe] + rest)
+
+
+def argv_of(pid):
+    """The command line of `pid`; [] where unknown. On macOS only our own processes' can be read."""
+    if sys.platform != "darwin":
+        return [a for a in (proc("{}/cmdline".format(pid)) or "").split("\0") if a]
+    mib, size = (c_int * 3)(1, 49, pid), ctypes.c_size_t(0)  # CTL_KERN, KERN_PROCARGS2
+    if libc().sysctl(mib, 3, None, byref(size), None, 0) != 0 or not size.value:
+        return []
+    buf = ctypes.create_string_buffer(size.value)
+    if libc().sysctl(mib, 3, buf, byref(size), None, 0) != 0:
+        return []
+    # argc, the path of what was run, NULs to align, then the arguments (and the environment after them)
+    argc, words = int.from_bytes(buf.raw[:4], "little"), [w for w in buf.raw[4:size.value].split(b"\0") if w]
+    return [w.decode("utf-8", "replace") for w in words[1:1 + argc]]
+
+
+def exe_of(pid):
+    """The path of the program `pid` runs; None where unknown."""
+    if sys.platform == "darwin":
+        path = ctypes.create_string_buffer(4096)
+        return path.value.decode("utf-8", "replace") if libc().proc_pidpath(pid, path, 4096) > 0 else None
+    try:
+        return os.readlink("/proc/{}/exe".format(pid))
+    except OSError:
+        return None
+
+
 def conda_env(pid):
     """Name of the conda environment whose Python runs `pid`; None outside conda."""
-    try:
-        exe = os.readlink("/proc/{}/exe".format(pid))
-    except OSError:
+    exe = exe_of(pid)
+    if exe is None:
         return None
     return conda_name(os.path.dirname(os.path.dirname(exe)))  # .../envs/NAME/bin/python
 
@@ -752,8 +793,53 @@ def boot_time():
     return next((int(line.split()[1]) for line in lines if line.startswith("btime")), None)
 
 
+class BsdInfo(ctypes.Structure):  # macOS: struct proc_bsdinfo, <sys/proc_info.h>
+    _fields_ = [("pbi_flags", c_uint), ("pbi_status", c_uint), ("pbi_xstatus", c_uint), ("pbi_pid", c_uint),
+                ("pbi_ppid", c_uint), ("pbi_uid", c_uint), ("pbi_gid", c_uint), ("pbi_ruid", c_uint),
+                ("pbi_rgid", c_uint), ("pbi_svuid", c_uint), ("pbi_svgid", c_uint), ("rfu_1", c_uint),
+                ("pbi_comm", ctypes.c_char * 16), ("pbi_name", ctypes.c_char * 32), ("pbi_nfiles", c_uint),
+                ("pbi_pgid", c_uint), ("pbi_pjobc", c_uint), ("e_tdev", c_uint), ("e_tpgid", c_uint),
+                ("pbi_nice", c_int), ("pbi_start_tvsec", c_ulonglong), ("pbi_start_tvusec", c_ulonglong)]
+
+
+@lru_cache(maxsize=None)
+def libc():
+    """macOS: the C library, with the process and system queries nvmon makes of it."""
+    lib = ctypes.CDLL("/usr/lib/libSystem.B.dylib")
+    lib.proc_pidinfo.argtypes = [c_int, c_int, c_ulonglong, c_void_p, c_int]
+    lib.proc_pidpath.argtypes = [c_int, c_void_p, c_uint]
+    lib.sysctl.argtypes = [c_void_p, c_uint, c_void_p, c_void_p, c_void_p, ctypes.c_size_t]
+    lib.sysctlbyname.argtypes = [ctypes.c_char_p, c_void_p, c_void_p, c_void_p, ctypes.c_size_t]
+    return lib
+
+
+class ShortBsdInfo(ctypes.Structure):  # macOS: struct proc_bsdshortinfo, which any process's may be read of
+    _fields_ = [("pbsi_pid", c_uint), ("pbsi_ppid", c_uint), ("pbsi_pgid", c_uint), ("pbsi_status", c_uint),
+                ("pbsi_comm", ctypes.c_char * 16), ("pbsi_flags", c_uint), ("pbsi_uid", c_uint), ("pbsi_gid", c_uint),
+                ("pbsi_ruid", c_uint), ("pbsi_rgid", c_uint), ("pbsi_svuid", c_uint), ("pbsi_svgid", c_uint),
+                ("pbsi_rfu", c_uint)]
+
+
+def short_info(pid):
+    """macOS: ShortBsdInfo of `pid`, its owner, parent and name, readable for others' processes too; None
+    where unknown."""
+    info = ShortBsdInfo()
+    found = libc().proc_pidinfo(pid, 13, 0, byref(info), ctypes.sizeof(info))  # 13: PROC_PIDT_SHORTBSDINFO
+    return info if found == ctypes.sizeof(info) else None
+
+
+def bsd_info(pid):
+    """macOS: BsdInfo of `pid`, its name and start time: only our own processes' (see short_info)."""
+    info = BsdInfo()
+    found = libc().proc_pidinfo(pid, 3, 0, byref(info), ctypes.sizeof(info))  # 3: PROC_PIDTBSDINFO
+    return info if found == ctypes.sizeof(info) else None
+
+
 def start_time(pid):
     """When `pid` started, in seconds since the epoch; None where unknown."""
+    if sys.platform == "darwin":
+        info = bsd_info(pid)
+        return info and info.pbi_start_tvsec + info.pbi_start_tvusec / 1e6
     if os.name == "nt":
         process = windows_process(pid)
         if process is None:
@@ -779,12 +865,18 @@ def account_name(uid):
 
 def uid_of(pid):
     """The uid of the account running `pid`; None where unknown."""
+    if sys.platform == "darwin":
+        info = short_info(pid)
+        return info and info.pbsi_uid
     lines = (proc("{}/status".format(pid)) or "").splitlines()
     return next((int(line.split()[1]) for line in lines if line.startswith("Uid:")), None)
 
 
 def parent_of(pid):
     """The PID of `pid`'s parent; None where unknown."""
+    if sys.platform == "darwin":
+        info = short_info(pid)
+        return info and info.pbsi_ppid
     return stat_field(pid, 4)
 
 
@@ -805,9 +897,9 @@ def launcher_of(pid):
 
 
 def holds_gpu(pid):
-    """True when `pid` has an NVIDIA device open, as a GPU process in our PID namespace does. Windows does not
-    tell, nor has it PID namespaces: True there, the start time telling it is the same process."""
-    if os.name == "nt":
+    """True when `pid` has an NVIDIA device open, as a GPU process in our PID namespace does. Windows and macOS
+    do not tell, nor have they PID namespaces: True there, the start time telling it is the same process."""
+    if os.name == "nt" or sys.platform == "darwin":
         return True
     try:
         fds = os.listdir("/proc/{}/fd".format(pid))
@@ -820,6 +912,339 @@ def holds_gpu(pid):
         except OSError:  # closed meanwhile
             pass
     return False
+
+
+# ── Apple silicon (macOS) ────────────────────────────────────────────────────
+# The GPU's numbers, and each process's GPU time, as its driver puts them in the I/O Registry (what `ioreg`
+# shows), read through IOKit and Core Foundation: no sudo, nothing to install.
+
+class Registry:
+    """macOS: the I/O Registry, and the Core Foundation values its entries hold, as Python ones."""
+
+    def __init__(self):
+        def sig(lib, name, restype, *argtypes):
+            fn = getattr(lib, name)
+            fn.restype, fn.argtypes = restype, list(argtypes)
+            return fn
+        io = ctypes.CDLL("/System/Library/Frameworks/IOKit.framework/IOKit")
+        cf = ctypes.CDLL("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
+        self.matching = sig(io, "IOServiceMatching", c_void_p, ctypes.c_char_p)
+        self.services = sig(io, "IOServiceGetMatchingServices", c_int, c_uint, c_void_p, ctypes.POINTER(c_uint))
+        self.next = sig(io, "IOIteratorNext", c_uint, c_uint)
+        self.release = sig(io, "IOObjectRelease", c_int, c_uint)
+        self.create_properties = sig(io, "IORegistryEntryCreateCFProperties", c_int, c_uint,
+                                     ctypes.POINTER(c_void_p), c_void_p, c_uint)
+        self.descendants = sig(io, "IORegistryEntryCreateIterator", c_int, c_uint, ctypes.c_char_p, c_uint,
+                               ctypes.POINTER(c_uint))
+        self.entry_id = sig(io, "IORegistryEntryGetRegistryEntryID", c_int, c_uint, ctypes.POINTER(c_ulonglong))
+        self.type_of = sig(cf, "CFGetTypeID", ctypes.c_ulong, c_void_p)
+        self.cf_release = sig(cf, "CFRelease", None, c_void_p)
+        self.types = {name: sig(cf, "CF{}GetTypeID".format(name), ctypes.c_ulong)()
+                      for name in ("Dictionary", "Array", "Number", "String", "Boolean")}
+        self.dict_count = sig(cf, "CFDictionaryGetCount", ctypes.c_long, c_void_p)
+        self.dict_items = sig(cf, "CFDictionaryGetKeysAndValues", None, c_void_p, ctypes.POINTER(c_void_p),
+                              ctypes.POINTER(c_void_p))
+        self.array_count = sig(cf, "CFArrayGetCount", ctypes.c_long, c_void_p)
+        self.array_item = sig(cf, "CFArrayGetValueAtIndex", c_void_p, c_void_p, ctypes.c_long)
+        self.is_float = sig(cf, "CFNumberIsFloatType", ctypes.c_bool, c_void_p)
+        self.number = sig(cf, "CFNumberGetValue", ctypes.c_bool, c_void_p, ctypes.c_long, c_void_p)
+        self.string_length = sig(cf, "CFStringGetLength", ctypes.c_long, c_void_p)
+        self.string_size = sig(cf, "CFStringGetMaximumSizeForEncoding", ctypes.c_long, ctypes.c_long, c_uint)
+        self.string = sig(cf, "CFStringGetCString", ctypes.c_bool, c_void_p, ctypes.c_char_p, ctypes.c_long, c_uint)
+        self.boolean = sig(cf, "CFBooleanGetValue", ctypes.c_bool, c_void_p)
+        self.cfstr = sig(cf, "CFStringCreateWithCString", c_void_p, c_void_p, ctypes.c_char_p, c_uint)
+        self.dict_get = sig(cf, "CFDictionaryGetValue", c_void_p, c_void_p, c_void_p)
+        self.mutable_copy = sig(cf, "CFDictionaryCreateMutableCopy", c_void_p, c_void_p, ctypes.c_long, c_void_p)
+        self.data_type = sig(cf, "CFDataGetTypeID", ctypes.c_ulong)()
+        self.data_length = sig(cf, "CFDataGetLength", ctypes.c_long, c_void_p)
+        self.data_bytes = sig(cf, "CFDataGetBytePtr", c_void_p, c_void_p)
+        self.entry_name = sig(io, "IORegistryEntryGetName", c_int, c_uint, ctypes.c_char_p)
+        self.property = sig(io, "IORegistryEntryCreateCFProperty", c_void_p, c_uint, c_void_p, c_void_p, c_uint)
+
+    def value(self, ref):
+        """A Core Foundation value as Python: dict, list, int, float, str, bool; None for any other."""
+        kind = self.type_of(ref) if ref else None
+        if kind == self.types["Dictionary"]:
+            n = self.dict_count(ref)
+            keys, values = (c_void_p * n)(), (c_void_p * n)()
+            self.dict_items(ref, keys, values)
+            return {self.value(k): self.value(v) for k, v in zip(keys, values)}
+        if kind == self.types["Array"]:
+            return [self.value(self.array_item(ref, i)) for i in range(self.array_count(ref))]
+        if kind == self.types["Number"]:
+            number = ctypes.c_double() if self.is_float(ref) else ctypes.c_int64()
+            self.number(ref, 6 if self.is_float(ref) else 4, byref(number))  # kCFNumberFloat64Type, SInt64Type
+            return number.value
+        if kind == self.types["String"]:
+            size = self.string_size(self.string_length(ref), 0x08000100) + 1  # UTF-8
+            text = ctypes.create_string_buffer(size)
+            return text.value.decode("utf-8", "replace") if self.string(ref, text, size, 0x08000100) else None
+        if kind == self.types["Boolean"]:
+            return bool(self.boolean(ref))
+        return None
+
+    def properties(self, entry):
+        """The properties of registry `entry`, as a dict."""
+        props = c_void_p()
+        if self.create_properties(entry, byref(props), None, 0) != 0 or not props.value:
+            return {}
+        try:
+            return self.value(props.value)
+        finally:
+            self.cf_release(props.value)
+
+    def gpus(self):
+        """[(entry, properties)] of the GPUs (IOAccelerator), kept for the whole run."""
+        found, it = [], c_uint()
+        if self.services(0, self.matching(b"IOAccelerator"), byref(it)) != 0:
+            return found
+        entry = self.next(it.value)
+        while entry:
+            found.append((entry, self.properties(entry)))
+            entry = self.next(it.value)
+        self.release(it.value)
+        return found
+
+    def clock_steps(self):
+        """The GPU's clock steps in MHz, lowest first, from the power manager's table (voltage-states9: pairs of
+        frequency and voltage, the first step 0, the GPU off); [] where not found."""
+        steps, it = [], c_uint()
+        if self.services(0, self.matching(b"AppleARMIODevice"), byref(it)) != 0:
+            return steps
+        entry = self.next(it.value)
+        while entry:
+            name = ctypes.create_string_buffer(128)
+            self.entry_name(entry, name)
+            if name.value == b"pmgr" and not steps:
+                key = self.cfstr(None, b"voltage-states9", 0x08000100)
+                table = self.property(entry, key, None, 0)
+                self.cf_release(key)
+                if table and self.type_of(table) == self.data_type:
+                    raw = ctypes.string_at(self.data_bytes(table), self.data_length(table))
+                    hz = [int.from_bytes(raw[i:i + 4], "little") for i in range(0, len(raw) - 7, 8)]
+                    steps = [f / 1e6 if f >= 10**7 else f / 1e3 for f in hz if f]  # Hz on M1; kHz, should a chip
+                if table:
+                    self.cf_release(table)
+            self.release(entry)
+            entry = self.next(it.value)
+        self.release(it.value)
+        return steps
+
+    def clients(self, gpu):
+        """{registry ID: (pid, its name, GPU time so far in ns)} of the connections processes hold to `gpu`."""
+        found, it = {}, c_uint()
+        if self.descendants(gpu, b"IOService", 1, byref(it)) != 0:  # 1: kIORegistryIterateRecursively
+            return found
+        entry = self.next(it.value)
+        while entry:
+            props = self.properties(entry)
+            creator = props.get("IOUserClientCreator") or ""  # "pid 569, WindowServer"
+            head, _, name = creator.partition(",")
+            if head.startswith("pid ") and head[4:].isdigit():
+                ident = c_ulonglong()
+                self.entry_id(entry, byref(ident))
+                usage = [u for u in props.get("AppUsage") or [] if isinstance(u, dict)]
+                found[ident.value] = int(head[4:]), name.strip(), sum(u.get("accumulatedGPUTime") or 0 for u in usage)
+            self.release(entry)
+            entry = self.next(it.value)
+        self.release(it.value)
+        return found
+
+
+class Report:
+    """macOS: the GPU's counters in IOReport, the ones powermetrics reads, without sudo: its power, the
+    energy used between two readings over the time between them; its clock, the time it spent at each step
+    (GPUPH: OFF, P1, P2...), each step its clock (Registry.clock_steps)."""
+    JOULES = {"mJ": 1e-3, "uJ": 1e-6, "nJ": 1e-9}
+
+    def __init__(self, registry, steps):
+        def sig(name, restype, *argtypes):
+            fn = getattr(lib, name)
+            fn.restype, fn.argtypes = restype, list(argtypes)
+            return fn
+        lib, self.registry = ctypes.CDLL("/usr/lib/libIOReport.dylib"), registry
+        copy = sig("IOReportCopyChannelsInGroup", c_void_p, c_void_p, c_void_p, c_ulonglong, c_ulonglong, c_ulonglong)
+        subscribe = sig("IOReportCreateSubscription", c_void_p, c_void_p, c_void_p, ctypes.POINTER(c_void_p),
+                        c_ulonglong, c_void_p)
+        self.samples = sig("IOReportCreateSamples", c_void_p, c_void_p, c_void_p, c_void_p)
+        self.delta = sig("IOReportCreateSamplesDelta", c_void_p, c_void_p, c_void_p, c_void_p)
+        self.channel_name = sig("IOReportChannelGetChannelName", c_void_p, c_void_p)
+        self.unit = sig("IOReportChannelGetUnitLabel", c_void_p, c_void_p)
+        self.integer = sig("IOReportSimpleGetIntegerValue", ctypes.c_int64, c_void_p, c_int)
+        self.states = sig("IOReportStateGetCount", c_int, c_void_p)
+        self.state_name = sig("IOReportStateGetNameForIndex", c_void_p, c_void_p, c_int)
+        self.residency = sig("IOReportStateGetResidency", ctypes.c_int64, c_void_p, c_int)
+        merge = sig("IOReportMergeChannels", None, c_void_p, c_void_p, c_void_p)
+
+        def text(value):
+            return registry.cfstr(None, value, 0x08000100)
+        energy = copy(text(b"Energy Model"), None, 0, 0, 0)
+        states = copy(text(b"GPU Stats"), text(b"GPU Performance States"), 0, 0, 0)
+        if states:  # a Mac without it still has its power
+            merge(energy, states, None)
+        self.channels, self.steps = registry.mutable_copy(None, 0, energy), steps
+        self.subscribed = c_void_p()
+        self.subscription = subscribe(None, self.channels, byref(self.subscribed), 0, None)
+        self.key = registry.cfstr(None, b"IOReportChannels", 0x08000100)
+        self.last = self.samples(self.subscription, self.subscribed, None), time.monotonic()
+
+    def read(self):
+        """(power in W, clock in MHz) of the GPU since the last call; None for either where unknown, the clock
+        where the GPU was off throughout."""
+        now = self.samples(self.subscription, self.subscribed, None), time.monotonic()
+        delta = self.delta(self.last[0], now[0], None)
+        joules, found, cycles, busy = 0.0, False, 0.0, 0
+        channels = self.registry.dict_get(delta, self.key) if delta else None
+        for i in range(self.registry.array_count(channels) if channels else 0):
+            channel = self.registry.array_item(channels, i)
+            name = self.registry.value(self.channel_name(channel)) or ""
+            scale = self.JOULES.get(self.registry.value(self.unit(channel)) or "")
+            if name.startswith("GPU") and scale:  # "GPU Energy"
+                joules, found = joules + self.integer(channel, 0) * scale, True
+            elif name == "GPUPH":
+                for k in range(self.states(channel)):
+                    step = self.registry.value(self.state_name(channel, k)) or ""  # "P3": the third step
+                    if step[1:].isdigit() and 0 < int(step[1:]) <= len(self.steps):
+                        time_there = self.residency(channel, k)
+                        cycles, busy = cycles + time_there * self.steps[int(step[1:]) - 1], busy + time_there
+        for ref in (delta, self.last[0]):
+            if ref:
+                self.registry.cf_release(ref)
+        seconds, self.last = now[1] - self.last[1], now
+        return (joules / seconds if found and seconds > 0 else None), (round(cycles / busy) if busy else None)
+
+
+class Thermal:
+    """macOS: the GPU's temperature, the mean of the temperature sensors whose name starts with GPU ("GPU MTR
+    Temp Sensor1"), as IOKit's HID event system gives them without sudo. A sensor in a part that is powered
+    off reads OFF exactly (seen on an M1, for the GPU's, the Neural Engine's and the camera's alike), not a
+    temperature: with the GPU off, its temperature is the chip's around it, the mean of the SoC's sensors."""
+    TEMPERATURE = 15  # kIOHIDEventTypeTemperature; its value is field TEMPERATURE << 16
+    OFF = 30.0
+
+    def __init__(self, registry):
+        def sig(lib, name, restype, *argtypes):
+            fn = getattr(lib, name)
+            fn.restype, fn.argtypes = restype, list(argtypes)
+            return fn
+        io = ctypes.CDLL("/System/Library/Frameworks/IOKit.framework/IOKit")
+        cf = ctypes.CDLL("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
+        number = sig(cf, "CFNumberCreate", c_void_p, c_void_p, ctypes.c_long, c_void_p)
+        make_dict = sig(cf, "CFDictionaryCreate", c_void_p, c_void_p, c_void_p, c_void_p, ctypes.c_long, c_void_p,
+                        c_void_p)
+        callbacks = [ctypes.addressof(ctypes.c_byte.in_dll(cf, "kCFTypeDictionary{}CallBacks".format(kind)))
+                     for kind in ("Key", "Value")]
+        create = sig(io, "IOHIDEventSystemClientCreate", c_void_p, c_void_p)
+        set_matching = sig(io, "IOHIDEventSystemClientSetMatching", c_int, c_void_p, c_void_p)
+        copy_services = sig(io, "IOHIDEventSystemClientCopyServices", c_void_p, c_void_p)
+        copy_property = sig(io, "IOHIDServiceClientCopyProperty", c_void_p, c_void_p, c_void_p)
+        self.copy_event = sig(io, "IOHIDServiceClientCopyEvent", c_void_p, c_void_p, ctypes.c_int64, ctypes.c_int32,
+                              ctypes.c_int64)
+        self.float_value = sig(io, "IOHIDEventGetFloatValue", ctypes.c_double, c_void_p, ctypes.c_int32)
+        self.registry = registry
+        page, usage = ctypes.c_int32(0xff00), ctypes.c_int32(5)  # Apple's own page: its temperature sensors
+        keys = (c_void_p * 2)(*(registry.cfstr(None, k, 0x08000100) for k in (b"PrimaryUsagePage", b"PrimaryUsage")))
+        values = (c_void_p * 2)(number(None, 3, byref(page)), number(None, 3, byref(usage)))  # 3: SInt32
+        self.client = create(None)  # kept: the sensors live as long as it does
+        set_matching(self.client, make_dict(None, keys, values, 2, *callbacks))
+        services, product = copy_services(self.client), registry.cfstr(None, b"Product", 0x08000100)
+        self.sensors, self.chip = [], []
+        for i in range(registry.array_count(services) if services else 0):
+            service = registry.array_item(services, i)
+            name = copy_property(service, product)
+            label = (registry.value(name) or "").lower()
+            if label.startswith("gpu"):
+                self.sensors.append(service)
+            elif label.startswith("soc"):  # "SOC MTR Temp Sensor0"
+                self.chip.append(service)
+            if name:
+                registry.cf_release(name)
+        self.services = services  # kept, and with it the sensors in it
+
+    def read(self):
+        """The GPU's temperature in °C now, or with the GPU off the chip's; None where no sensor answers."""
+        found = self.mean(self.sensors)
+        return found if found is not None else self.mean(self.chip)
+
+    def mean(self, sensors):
+        """The mean of `sensors` that read a temperature, in °C; None where none does."""
+        found = []
+        for service in sensors:
+            event = self.copy_event(service, self.TEMPERATURE, 0, 0)
+            if event:
+                celsius = self.float_value(event, self.TEMPERATURE << 16)
+                found += [celsius] if 0 < celsius < 150 and celsius != self.OFF else []
+                self.registry.cf_release(event)
+        return round(sum(found) / len(found)) if found else None
+
+
+RECENT = 10  # seconds: a process that used the GPU within it is listed on it
+
+
+class AppleGpu(Gpu):
+    """An Apple silicon GPU, read as Gpu reads an NVIDIA one: a process's share is its GPU time over the last
+    poll's, the processes listed those that used the GPU in the last RECENT seconds; memory is the system's,
+    which the GPU shares."""
+
+    def __init__(self, registry, index, entry, props):
+        self.registry, self.index, self.entry = registry, index, entry
+        self.name = props.get("model") or "Apple GPU"
+        self.history, self.memory = deque(maxlen=HISTORY), deque(maxlen=HISTORY)
+        self.sample = self.now = None
+        self.pcie_max_gen = self.pcie_max_width = None
+        self.has_activity = False
+        self._facts, self._names = {}, {}
+        self._seen = {}    # registry ID of a connection -> (pid, its GPU time, when)
+        self._recent = {}  # pid -> (when it last used the GPU, its share then)
+        size, length = c_ulonglong(), ctypes.c_size_t(8)
+        found = libc().sysctlbyname(b"hw.memsize", byref(size), byref(length), None, 0) == 0
+        self._total = size.value / 2**30 if found else None
+        try:
+            self._report = Report(registry, registry.clock_steps())
+        except (OSError, AttributeError):  # no IOReport, or not as nvmon knows it: no power, no clock
+            self._report = None
+        try:
+            self._thermal = Thermal(registry)
+        except (OSError, AttributeError, ValueError):  # no HID sensors as nvmon knows them: no temperature
+            self._thermal = None
+
+    def _name_of(self, pid):
+        info = bsd_info(pid)  # 32 characters; another account's process gives none, and the registry's 16 do
+        return (info and info.pbi_name.decode("utf-8", "replace")) or self._names.get(pid)
+
+    def poll(self, detail=False):
+        stats = self.registry.properties(self.entry).get("PerformanceStatistics") or {}
+        now, clients = time.monotonic(), self.registry.clients(self.entry)
+        shares = {}
+        for ident, (pid, name, gpu_time) in clients.items():
+            self._names[pid] = name
+            last = self._seen.get(ident)
+            if last and gpu_time > last[1]:
+                shares[pid] = shares.get(pid, 0) + (gpu_time - last[1]) / 1e9 / (now - last[2]) * 100
+        self._seen = {ident: (pid, gpu_time, now) for ident, (pid, _, gpu_time) in clients.items()}
+        alive = {pid for pid, _, _ in clients.values()}
+        self._recent = {pid: (now, shares[pid]) if pid in shares else seen for pid, seen in self._recent.items()
+                        if pid in alive and now - seen[0] < RECENT}
+        self._recent.update((pid, (now, share)) for pid, share in shares.items())
+        listed = sorted(self._recent, key=lambda pid: -shares.get(pid, 0))  # the busiest first
+        self._facts = {pid: self._facts.get(pid) or self._facts_of(pid) for pid in listed}
+        used = stats.get("In use system memory")
+        power, clock = self._report.read() if self._report else (None, None)
+        self.sample = Sample(
+            util=stats.get("Device Utilization %"), temp=self._thermal and self._thermal.read(), fan=None, power=power,
+            power_limit=None, clock=clock,
+            mem_used=None if used is None else used / 2**30, mem_total=self._total, tx=None, rx=None,
+            pcie_width=None, cores=None, tensor=None, slowdown=None,
+            processes=[Process(pid, *self._facts[pid][:2], None, *self._facts[pid][2:]) for pid in listed],
+            process_util={pid: shares.get(pid, 0) for pid in listed},
+            renderer=stats.get("Renderer Utilization %"), tiler=stats.get("Tiler Utilization %"))
+
+
+def apple_gpus(wanted=None):
+    """The Apple silicon GPUs whose index is in `wanted` (all when None)."""
+    registry = Registry()
+    return [AppleGpu(registry, index, entry, props) for index, (entry, props) in enumerate(registry.gpus())
+            if wanted is None or index in wanted]
 
 
 def open_gpus(nv, wanted=None):
@@ -847,7 +1272,7 @@ class Job(NamedTuple):
     members: tuple                # (pid, start time) of its GPU processes
     gpus: tuple                   # the GPUs it uses
     util: Optional[float]         # % of the time its kernels ran, over its GPUs; None when unknown
-    mem: float                    # GiB, on all of them
+    mem: Optional[float]          # GiB, on all of them; None where the driver does not tell
     started: Optional[float]
     owner: Optional[str]
     mine: bool
@@ -876,7 +1301,8 @@ def jobs(gpus):
         launcher = next((p.launcher for p in procs if p.launcher), None)
         found.append(Job(pid, main.name, launcher, tuple(sorted({p.pid: p.started for p in procs}.items())),
                          tuple(sorted({gpu.index for gpu, _ in entries})),
-                         sum(shares.values()) / len(shares) if shares else None, sum(p.mem or 0 for p in procs),
+                         sum(shares.values()) / len(shares) if shares else None,
+                         None if all(p.mem is None for p in procs) else sum(p.mem or 0 for p in procs),
                          min(starts) if starts else None, main.owner, main.mine, main.env, main.command))
     return sorted(found, key=lambda job: (job.gpus, job.pid))
 
@@ -916,7 +1342,7 @@ def about(job):
     parts.append((gpu_numbers(job.gpus), DIM))
     if job.util is not None:
         parts.append(("util ", DIM, "{:.0f}%".format(job.util), heat(job.util / 100)))
-    parts.append(("{:.1f}G".format(job.mem), DIM))
+    parts += [] if job.mem is None else [("{:.1f}G".format(job.mem), DIM)]
     if job.started is not None:
         parts.append((elapsed(job.started), DIM))
     parts.append(("{} job".format(job.launcher) if job.launcher else "PID {}".format(job.pid), DIM))
@@ -928,7 +1354,8 @@ def about(job):
 
 def about_all(jobs):
     """"GPUs 4-7 · 61.2G · 2 yours" for several jobs picked together, as segments."""
-    parts = [gpu_numbers(index for job in jobs for index in job.gpus), "{:.1f}G".format(sum(j.mem for j in jobs))]
+    parts = [gpu_numbers(index for job in jobs for index in job.gpus)]
+    parts += [] if all(j.mem is None for j in jobs) else ["{:.1f}G".format(sum(j.mem or 0 for j in jobs))]
     ours = sum(job.mine for job in jobs)
     parts += ["{} yours".format(ours)] if 0 < ours < len(jobs) else []
     return [(" · ".join(parts), DIM)]
@@ -1175,7 +1602,10 @@ def info(gpu, height):
     gpu_row = row(busy)
     mem_row = row([("MEM ", "")] + share(s.mem_used, s.mem_total),
                   [("{} / {} GiB".format(num(s.mem_used, "{:.1f}"), total), "")])
-    to_gpu, to_cpu = link("CPU -> GPU", s.rx), link("GPU -> CPU", s.tx)
+    if gpu.pcie_max_gen is None and s.renderer is not None:  # Apple silicon: what its parts are busy with
+        to_gpu, to_cpu = row([("renderer", "")], share(s.renderer, 100)), row([("tiler", "")], share(s.tiler, 100))
+    else:
+        to_gpu, to_cpu = link("CPU -> GPU", s.rx), link("GPU -> CPU", s.tx)
     # The rule (None) between MEM and the PCIe traffic only appears when there is room.
     if height >= MAX_INNER_H:
         return [gpu_row, mem_row, None, to_gpu, to_cpu]
@@ -1198,8 +1628,11 @@ def panel(gpu, width, height, selected=frozenset(), left="graph", scroll=(0, 0))
     # fan, name, power, clock, temperature, PCIe warning, slowdown warning. The GPU number stays.
     # Fixed widths keep things from shifting.
     limit = num(s.power_limit, "{:.0f}")  # power padded to the limit's width
-    label = [([("GPU {}".format(gpu.index), BOLD)], None), ([("  " + gpu.name, "")], 2),
-             ([("  │ ", DIM), ("{} / {} W".format(num(s.power, "{:.0f}").rjust(len(limit)), limit), "")], 3)]
+    label = [([("GPU {}".format(gpu.index), BOLD)], None), ([("  " + gpu.name, "")], 2)]
+    if s.power_limit is not None:
+        label += [([("  │ ", DIM), ("{} / {} W".format(num(s.power, "{:.0f}").rjust(len(limit)), limit), "")], 3)]
+    elif s.power is not None:  # Apple silicon: no limit to show it against
+        label += [([("  │ ", DIM), ("{:.1f} W".format(s.power), "")], 3)]
     parts = [] if s.slowdown is None else [([s.slowdown], 9)]
     if degraded(gpu):
         parts += [([("PCIe DEGRADED: x{} -> x{}".format(gpu.pcie_max_width, s.pcie_width), WARN)], 8)]
@@ -1420,7 +1853,8 @@ COLUMNS = [
                                 THEME.accent)], lambda j: j.name.lower()),
     ("GPUs", 8, lambda j: [(ranges(j.gpus), "")], lambda j: j.gpus),
     (">util", 5, lambda j: share(j.util, 100), lambda j: -1 if j.util is None else j.util),
-    (">memory", 7, lambda j: [("{:.1f}G".format(j.mem), "")], lambda j: j.mem),
+    (">memory", 7, lambda j: [("-" if j.mem is None else "{:.1f}G".format(j.mem), "")],
+     lambda j: -1 if j.mem is None else j.mem),
     (">time", 7, lambda j: [(elapsed(j.started) if j.started is not None else "-", "")],
      lambda j: -(j.started or 0)),
     ("command", 0, lambda j: [(j.command, DIM)], lambda j: j.command),
@@ -2343,14 +2777,16 @@ def main():
     # NVML is never shut down: exiting frees it as well, while nvmlShutdown can keep a busy driver, and so
     # the shell prompt, waiting for a second.
     try:
-        nv = load_nvml()
-        gpus = open_gpus(nv, args.gpus)
+        if sys.platform == "darwin":
+            gpus, driver = apple_gpus(args.gpus), "macOS " + platform.mac_ver()[0]
+        else:
+            nv = load_nvml()
+            gpus, driver = open_gpus(nv, args.gpus), versions(nv)
         missing = sorted((args.gpus or set()) - {g.index for g in gpus})
         if missing:
             sys.exit("nvmon: GPU {} not found or not accessible".format(", ".join(map(str, missing))))
         if not gpus:
-            sys.exit("nvmon: no accessible NVIDIA GPU")
-        driver = versions(nv)
+            sys.exit("nvmon: no accessible GPU")
         update = UpdateCheck()
         if not os.environ.get("NVMON_NO_UPDATE_CHECK"):
             update.start()

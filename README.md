@@ -16,7 +16,7 @@ Or into the environment you are in:
 pip install nvmon
 ```
 
-Or no install at all: the one file, run with Python 3.6+ (on a server without internet, copy it over).
+Or no install at all (Linux): the one file, run with Python 3.6+ (on a server without internet, copy it over).
 
 ```bash
 curl -LO https://github.com/Han-DongHeun/nvmon/releases/latest/download/nvmon.py && python3 nvmon.py

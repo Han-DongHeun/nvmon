@@ -20,6 +20,7 @@ import operator
 import os
 import platform
 import re
+import unicodedata
 import signal
 import socket
 import sys
@@ -1445,14 +1446,43 @@ def update_command():
 
 
 # ── rendering ────────────────────────────────────────────────────────────────
-# A line is a list of (text, style) segments; every character is one cell wide. A segment that can be
-# clicked carries a third item, what the click means: a job's PID, or ("key", name) and the like.
+# A line is a list of (text, style) segments, measured in the cells a terminal gives them (cells_of). A
+# segment that can be clicked carries a third item, what the click means: a job's PID, or ("key", name) and
+# the like.
 
 FADED = "\x1b[2m"            # "faint": GPUs the selected job does not use
+# Letters one cell wide for certain, nvmon's own lines among them (box drawing, blocks, · … ↑ ▲): text of
+# nothing else is as many cells as letters.
+NARROW = re.compile(r"[\x20-\x7e\xa0-˿‐-⁞←-⏿─-◿]*\Z")
+
+
+def char_cells(char):
+    """The cells a letter takes: 2 for a wide one (Hangul, Chinese, Japanese, full-width forms, most
+    emoji), 0 for a mark combining with the one before, else 1."""
+    return 2 if unicodedata.east_asian_width(char) in "WF" else 0 if unicodedata.combining(char) else 1
+
+
+@lru_cache(maxsize=4096)
+def cells_of(text):
+    """The cells `text` takes on a terminal (see char_cells)."""
+    return len(text) if NARROW.match(text) else sum(map(char_cells, text))
+
+
+def cut(text, n):
+    """`text` split after its first `n` cells; a wide letter across the cut is a space on either side."""
+    if cells_of(text) <= n:
+        return text, ""
+    used = 0
+    for i, char in enumerate(text):
+        cells = char_cells(char)
+        if used + cells > n:
+            return (text[:i] + " ", " " + text[i + 1:]) if used < n else (text[:i], text[i:])
+        used += cells
+    return text, ""
 
 
 def width_of(line):
-    return sum(len(seg[0]) for seg in line)
+    return sum(cells_of(seg[0]) for seg in line)
 
 
 def clip(line, width):
@@ -1461,8 +1491,9 @@ def clip(line, width):
     for seg in line:
         if width <= 0:
             break
-        out.append((seg[0][:width],) + seg[1:])
-        width -= len(seg[0])
+        head = cut(seg[0], width)[0]
+        out.append((head,) + seg[1:])
+        width -= cells_of(head)
     return out
 
 
@@ -1765,7 +1796,7 @@ def process_listing(processes, selected=frozenset()):
     the arguments dim: "kim/torch:  2d5h  26.1G  train.py --lr 3". The columns are as wide as the GPU's
     longest."""
     entries = process_entries(processes)
-    tag_w = max([0] + [len(tag) + 1 for tag, _ in entries])  # the longest "kim/torch:", when any has one
+    tag_w = max([0] + [cells_of(tag) + 1 for tag, _ in entries])  # the longest "kim/torch:", when any has one
     time_w = max([0] + [len(run_time(process)) for _, process in entries])
     mem_w = max([0] + [len(memory(process)) for _, process in entries])
     lines = []
@@ -1790,10 +1821,10 @@ def skip(line, cells):
     """`line` without its first `cells` cells."""
     out = []
     for seg in line:
-        if cells >= len(seg[0]):
-            cells -= len(seg[0])
+        if cells >= cells_of(seg[0]):
+            cells -= cells_of(seg[0])
             continue
-        out.append((seg[0][cells:],) + seg[1:])
+        out.append((cut(seg[0], cells)[1],) + seg[1:])
         cells = 0
     return out
 
@@ -1895,7 +1926,7 @@ def process_list(jobs, width, rows, selected, focus, top, sort, shift=0):
         chosen = job.pid in selected
         values = [cell(job) for _, _, cell, _ in COLUMNS]
         command = "…" + job.command[shift:] if job.pid == focus and shift else job.command
-        values[-1] = [(command if len(command) <= room else command[:max(0, room - 1)] + "…", DIM)]
+        values[-1] = [(command if cells_of(command) <= room else cut(command, max(0, room - 1))[0] + "…", DIM)]
         lines.append(cells([[(seg[0], THEME.selected if chosen else seg[1], job.pid) for seg in column]
                             for column in values], width, (THEME.selected if chosen else "", job.pid)))
     if not jobs:
@@ -2241,9 +2272,9 @@ class View:
         if 0 <= row < len(self.lines):
             x = 0
             for seg in self.lines[row]:
-                if x <= col < x + len(seg[0]):
+                if x <= col < x + cells_of(seg[0]):
                     return seg[2] if len(seg) > 2 else None
-                x += len(seg[0])
+                x += cells_of(seg[0])
         return None
 
     def handle(self, event):

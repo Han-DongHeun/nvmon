@@ -1899,11 +1899,10 @@ def render(gpus, width, height, shape, selected=frozenset(), left="graph", scrol
     return lines + [[(" " * width, "")]] * (height - len(lines))
 
 
-# The process list's columns: heading, width (">" when flush right), the cell for a job as segments, and the
-# key it sorts by. "command" takes whatever width is left.
+# The process list's columns: heading, width (">" when flush right), the cell for a job as segments (None for
+# the tree's, see tree), and the key it sorts by. "command" takes whatever width is left.
 COLUMNS = [
-    ("PID", 8, lambda j: [(str(j.pid), "")], lambda j: j.pid),
-    ("account/env", 14, lambda j: tagged(j), account),
+    ("account/env", 24, None, account),  # headed "account / env / PID": the accounts, their environments, PIDs
     ("process", 22, lambda j: [(j.name + ("  {} workers".format(len(j.members)) if len(j.members) > 1 else ""),
                                 THEME.accent)], lambda j: j.name.lower()),
     ("GPUs", 8, lambda j: [(ranges(j.gpus), "")], lambda j: j.gpus),
@@ -1916,13 +1915,11 @@ COLUMNS = [
 ]
 SORTS = {heading.lstrip(">"): key for heading, _, _, key in COLUMNS}
 COMMAND_AT = 1 + sum(size + 2 for _, size, _, _ in COLUMNS[:-1])  # the column where commands start
-
-
-# Sorted by account/env, the list is a tree (see tree): its first column, where PID and account/env were,
-# the accounts, their environments beneath them, and their jobs' PIDs beneath those.
-TREE_COLUMNS = [("account / env / PID", COLUMNS[0][1] + 2 + COLUMNS[1][1], None, None)] + COLUMNS[2:]
-TREE_W = TREE_COLUMNS[0][1]
+TREE_W = COLUMNS[0][1]
 OPENED, FOLDED = "▼ ", "▶ "
+# Sorted by these, the accounts and environments go by their totals (see total); by the others, a group goes
+# where its first job would.
+TOTALED = ("account/env", "GPUs", "util", "memory", "time")
 
 
 def unfolded(key, held, folds, picked):
@@ -1952,23 +1949,37 @@ def labelled(stem, name, style, count):
     return stem + name + [(" " * (TREE_W - width_of(stem + name) - len(count)), ""), (count, DIM)]
 
 
-def tree(jobs, folds, picked):
-    """The list's lines sorted by account/env, the order of `jobs` kept: (tree cell, job, key, PIDs), the
-    key (owner,) or (owner, env) on a group's line, whose job is then its total (see total), and the PIDs
-    its jobs'; on a job's None, and its own. A job with no environment hangs from its account. A folded
-    group (see unfolded) shows its line only. Its arrow folds it or opens it again (see process_list)."""
+def tree(jobs, folds, picked, sort):
+    """The list's lines, a tree: (tree cell, job, key, PIDs), the key (owner,) or (owner, env) on a group's
+    line, whose job is then its total (see total), and the PIDs its jobs'; on a job's None, and its own. A
+    job with no environment hangs from its account. The `jobs` come in the order of `sort` = (column,
+    descending), as do the groups (see TOTALED). A folded group (see unfolded) shows its line only; its
+    arrow folds it or opens it again (see process_list)."""
+    column, descending = sort
+
+    def ordered(groups, envs):  # [(name, jobs)], as their first jobs come
+        if column not in TOTALED:
+            return groups
+        return sorted(groups, key=lambda g: SORTS[column](total(g[1], g[0] if envs else None)), reverse=descending)
+
     owners = {}
     for job in jobs:
-        owners.setdefault(job.owner, {}).setdefault(job.env, []).append(job)
+        owners.setdefault(job.owner, []).append(job)
     lines = []
-    for owner, envs in owners.items():
-        held = [j for js in envs.values() for j in js]
+    for owner, held in ordered(list(owners.items()), False):
         is_open = unfolded((owner,), held, folds, picked)
         style = (UNDERLINE if any(j.mine for j in held) else "") + BOLD
         arrow = (OPENED if is_open else FOLDED, DIM, ("fold", (owner,)))
         lines.append((labelled([arrow], owner or "-", style, len(held)), total(held), (owner,),
                       tuple(j.pid for j in held)))
-        children = [(env, js) for env, js in envs.items() if env] + [(None, [j]) for j in envs.get(None, [])]
+        children, envs = [], {}  # an environment's jobs together, a job of none on its own
+        for j in held:
+            if j.env in envs:
+                envs[j.env].append(j)
+            else:
+                children.append((j.env, [j]))
+                envs.update({j.env: children[-1][1]} if j.env else {})
+        children = ordered(children, True)
         for k, (env, js) in enumerate(children if is_open else []):
             stem = "└─" if k == len(children) - 1 else "├─"
             if env is None:
@@ -1983,12 +1994,12 @@ def tree(jobs, folds, picked):
     return lines
 
 
-def cells(values, width, fill=("",), columns=COLUMNS):
-    """One list line of `width` cells from the `columns`' segments, two spaces apart; `fill` = (style, ...)
-    of the spaces, so that a selected row stays one bar and clicks anywhere: those padding a column mean
-    what its last segment does, but take nothing else of it, an underline, say."""
+def cells(values, width, fill=("",)):
+    """One list line of `width` cells from the columns' segments, two spaces apart; `fill` = (style, ...) of
+    the spaces, so that a selected row stays one bar and clicks anywhere: those padding a column mean what
+    its last segment does, but take nothing else of it, an underline, say."""
     line, used = [(" ",) + fill], 1
-    for (heading, size, _, _), segments in zip(columns, values):
+    for (heading, size, _, _), segments in zip(COLUMNS, values):
         size = size or max(0, width - used - 1)
         segments = clip(segments, size)
         padding = [(" " * (size - width_of(segments)),) + fill[:1] + (segments[-1][2:3] if segments else fill[1:])]
@@ -2000,30 +2011,27 @@ def cells(values, width, fill=("",), columns=COLUMNS):
 
 def process_list(entries, width, rows, selected, focus, top, sort, shift=0):
     """The list p opens, `rows` lines: the headings (clicking one sorts by it; `sort` = (column, descending)),
-    the `entries` (tree cell, job, key, PIDs) from index `top` on, how many more. A line means its jobs when
-    clicked, reversed when all are `selected`; the command of the one in `focus` moved `shift` characters
-    on. Sorted by account/env, the list is a tree (see tree): a group's line means all its jobs, its arrow
-    folding it or opening it again. A command too long to show ends in "…"."""
+    the `entries`, a tree (see tree), from index `top` on, how many more. A line means its jobs when
+    clicked, a group's all of its, reversed when all are `selected`, a group's arrow folding it or opening it
+    again; the command of the job in `focus` moved `shift` characters on. A command too long to show ends
+    in "…"."""
     room = max(0, width - COMMAND_AT - 1)
     column, descending = sort
-    grown = column == "account/env"
-    columns = TREE_COLUMNS if grown else COLUMNS
     head = []
-    for heading, _, _, _ in COLUMNS[1:] if grown else COLUMNS:
+    for heading, _, _, _ in COLUMNS:
         name = heading.lstrip(">")
-        label = TREE_COLUMNS[0][0] if grown and name == column else name
+        label = "account / env / PID" if name == "account/env" else name
         head.append([(label + ("▼" if descending else "▲") if name == column else label,
                       "" if name == column else DIM, ("sort", name))])
-    lines = [cells(head, width, columns=columns)]
+    lines = [cells(head, width)]
     shown = entries[top:top + rows - 2]
     for stem, job, key, pids in shown:
         chosen, means = set(pids) <= selected, job.pid if key is None else ("group", key)
-        values = [stem if cell is None else cell(job) for _, _, cell, _ in columns]
+        values = [stem if cell is None else cell(job) for _, _, cell, _ in COLUMNS]
         command = "…" + job.command[shift:] if job.pid == focus and shift else job.command
         values[-1] = [(command if cells_of(command) <= room else cut(command, max(0, room - 1))[0] + "…", DIM)]
         lines.append(cells([[(seg[0], THEME.selected if chosen else seg[1], seg[2] if len(seg) > 2 else means)
-                             for seg in column] for column in values], width, (THEME.selected if chosen else "", means),
-                           columns))
+                             for seg in column] for column in values], width, (THEME.selected if chosen else "", means)))
     if not entries:
         lines.append([(" no processes on these GPUs", DIM)])
     above, below = top, len(entries) - top - len(shown)
@@ -2219,8 +2227,7 @@ class View:
         self.indices = [g.index for g in gpus]
         used = {index for job in picked for index in job.gpus}
         shown = [g for g in gpus if (g.index in used if self.only else g.index not in self.hidden)]
-        self.entries = (tree(self.jobs, self.folds, self.picked) if column == "account/env"
-                        else [(None, job, None, (job.pid,)) for job in self.jobs])
+        self.entries = tree(self.jobs, self.folds, self.picked, self.sort)
         rows = min(len(self.entries) + 2, max(4, (height - 2) // 2), max(0, height - 2)) if self.listing else 0
         body = self.boxes(shown, width, height - 2 - rows)
         self.list_rows = range(1 + len(body), 1 + len(body) + rows)
@@ -2378,9 +2385,7 @@ class View:
                 left = [("{} jobs".format(len(picked)), THEME.accent), ("  ", DIM)] + about_all(picked)
             return spread(width, note or left, keys(*hints, ("Esc", "back")))
         if self.listing:
-            hint = "click a job, an account, an env or a heading; ▼ ▶ fold" if self.sort[0] == "account/env" else (
-                "click a job or a heading")
-            return spread(width, note or [(hint, DIM)],
+            return spread(width, note or [("click a job, an account, an env or a heading; ▼ ▶ fold", DIM)],
                           keys(("s", "sort by next"), ("r", "reverse"), ("Esc", "close")))
         if note:
             return spread(width, note, keys(("p", "processes"), ("Esc / q", "quit")))
@@ -2660,7 +2665,9 @@ class Settings:
                 kept["interval"] = max(MIN_INTERVAL, float(mine["interval"]))
                 if not math.isfinite(kept["interval"]):
                     raise ValueError(kept["interval"])
-            return kept if kept["left"] in LEFTS and kept["sort"][0] in SORTS else {}
+            if kept["sort"][0] not in SORTS:  # by a column gone (PID, before the tree): the default
+                del kept["sort"]
+            return kept if kept["left"] in LEFTS else {}
         except (KeyError, IndexError, TypeError, ValueError, AttributeError, OverflowError):  # Overflow: Infinity
             return {}
 

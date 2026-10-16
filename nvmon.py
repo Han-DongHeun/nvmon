@@ -1486,16 +1486,15 @@ def update_command():
 # the like.
 
 FADED = "\x1b[2m"            # "faint": GPUs the selected job does not use
-# Letters one cell wide for certain, nvmon's own lines among them (box drawing, blocks, · … ↑ ▲): text of
-# nothing else is as many cells as letters.
-NARROW = re.compile(r"[\x20-\x7e\xa0-˿‐-⁞←-⏿─-◿]*\Z")
 
 
 def char_cells(char):
     """The cells a letter takes: 2 for a wide one (Hangul, Chinese, Japanese, full-width forms, most
     emoji); 0 for what goes onto the letter before it (marks, such as Thai vowels or a combining accent,
-    joiners, an emoji's skin tone); else 1."""
-    if unicodedata.category(char) in ("Mn", "Me", "Cf") or "\U0001f3fb" <= char <= "\U0001f3ff":
+    joiners, an emoji's skin tone, a Hangul syllable's vowel and final consonant written as letters of their
+    own, as macOS names files); else 1, a soft hyphen too, which terminals show."""
+    if (unicodedata.category(char) in ("Mn", "Me", "Cf") and char != "\xad" or "\U0001f3fb" <= char <= "\U0001f3ff"
+            or "\u1160" <= char <= "\u11ff" or "\ud7b0" <= char <= "\ud7ff"):
         return 0
     return 2 if unicodedata.east_asian_width(char) in "WF" else 1
 
@@ -1503,7 +1502,7 @@ def char_cells(char):
 @lru_cache(maxsize=4096)
 def cells_of(text):
     """The cells `text` takes on a terminal (see char_cells)."""
-    return len(text) if NARROW.match(text) else sum(map(char_cells, text))
+    return sum(map(char_cells, text))
 
 
 def cut(text, n):

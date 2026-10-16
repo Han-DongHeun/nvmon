@@ -1918,12 +1918,74 @@ SORTS = {heading.lstrip(">"): key for heading, _, _, key in COLUMNS}
 COMMAND_AT = 1 + sum(size + 2 for _, size, _, _ in COLUMNS[:-1])  # the column where commands start
 
 
-def cells(values, width, fill=("",)):
-    """One list line of `width` cells from the columns' segments, two spaces apart; `fill` = (style, ...) of
-    the spaces, so that a selected row stays one bar and clicks anywhere: those padding a column mean what
-    its last segment does, but take nothing else of it, an underline, say."""
+# Sorted by account/env, the list is a tree (see tree): its first column, where PID and account/env were,
+# the accounts, their environments beneath them, and their jobs' PIDs beneath those.
+TREE_COLUMNS = [("account / env / PID", COLUMNS[0][1] + 2 + COLUMNS[1][1], None, None)] + COLUMNS[2:]
+TREE_W = TREE_COLUMNS[0][1]
+OPENED, FOLDED = "▼ ", "▶ "
+
+
+def unfolded(key, held, folds, picked):
+    """Whether the account or environment `key`, (owner,) or (owner, env), holding the jobs `held`, is open:
+    as `folds` has it, else an account when ours and an environment always; and while a job of it is
+    `picked`, so that none of those is out of sight."""
+    return folds.get(key, len(key) > 1 or any(j.mine for j in held)) or any(j.pid in picked for j in held)
+
+
+def total(jobs, env=None):
+    """The jobs as one, for a line of the tree: the GPUs they use, their mean utilization, the memory they
+    take, the longest run time."""
+    utils = [j.util for j in jobs if j.util is not None]
+    starts = [j.started for j in jobs if j.started is not None]
+    return Job(None, "", None, (), tuple(sorted({i for j in jobs for i in j.gpus})),
+               sum(utils) / len(utils) if utils else None,
+               None if all(j.mem is None for j in jobs) else sum(j.mem or 0 for j in jobs),
+               min(starts) if starts else None, jobs[0].owner, any(j.mine for j in jobs), env, "")
+
+
+def labelled(stem, name, style, count):
+    """A group's cell of the tree: `stem` (lines and arrow), the name, as much as fits, and how many jobs it
+    holds flush right: "▼ kim          (9)"."""
+    count = "({})".format(count)
+    name = clip([(name, style)], TREE_W - width_of(stem) - len(count) - 1)
+    return stem + name + [(" " * (TREE_W - width_of(stem + name) - len(count)), ""), (count, DIM)]
+
+
+def tree(jobs, folds, picked):
+    """The list's lines sorted by account/env, the order of `jobs` kept: (tree cell, job, key), the key
+    (owner,) or (owner, env) on a group's line, whose job is then its total (see total); None on a job's.
+    A job with no environment hangs from its account. A folded group (see unfolded) shows its line only."""
+    owners = {}
+    for job in jobs:
+        owners.setdefault(job.owner, {}).setdefault(job.env, []).append(job)
+    lines = []
+    for owner, envs in owners.items():
+        held = [j for js in envs.values() for j in js]
+        is_open = unfolded((owner,), held, folds, picked)
+        style = (UNDERLINE if any(j.mine for j in held) else "") + BOLD
+        lines.append((labelled([(OPENED if is_open else FOLDED, DIM)], owner or "-", style, len(held)), total(held),
+                      (owner,)))
+        children = [(env, js) for env, js in envs.items() if env] + [(None, [j]) for j in envs.get(None, [])]
+        for k, (env, js) in enumerate(children if is_open else []):
+            stem = [("└─" if k == len(children) - 1 else "├─", FAINT)]
+            if env is None:
+                lines.append((stem + [(" " + str(js[0].pid), DIM)], js[0], None))
+                continue
+            env_open = unfolded((owner, env), js, folds, picked)
+            lines.append((labelled(stem + [(OPENED if env_open else FOLDED, DIM)], env, "", len(js)), total(js, env),
+                          (owner, env)))
+            down = "  " if k == len(children) - 1 else "│ "  # the account's line, on past this group or not
+            lines += [([(down + ("└─ " if i == len(js) - 1 else "├─ "), FAINT), (str(job.pid), DIM)], job, None)
+                      for i, job in enumerate(js if env_open else [])]
+    return lines
+
+
+def cells(values, width, fill=("",), columns=COLUMNS):
+    """One list line of `width` cells from the `columns`' segments, two spaces apart; `fill` = (style, ...)
+    of the spaces, so that a selected row stays one bar and clicks anywhere: those padding a column mean
+    what its last segment does, but take nothing else of it, an underline, say."""
     line, used = [(" ",) + fill], 1
-    for (heading, size, _, _), segments in zip(COLUMNS, values):
+    for (heading, size, _, _), segments in zip(columns, values):
         size = size or max(0, width - used - 1)
         segments = clip(segments, size)
         padding = [(" " * (size - width_of(segments)),) + fill[:1] + (segments[-1][2:3] if segments else fill[1:])]
@@ -1933,29 +1995,34 @@ def cells(values, width, fill=("",)):
     return line
 
 
-def process_list(jobs, width, rows, selected, focus, top, sort, shift=0):
+def process_list(entries, width, rows, selected, focus, top, sort, shift=0):
     """The list p opens, `rows` lines: the headings (clicking one sorts by it; `sort` = (column, descending)),
-    the jobs from index `top` on (clicking one means it; the `selected` ones reversed, the command of the one
-    in `focus` moved `shift` characters on), how many more. A command too long to show ends in "…"."""
+    the `entries` (tree cell, job, key) from index `top` on, how many more. A job's line means the job when
+    clicked (the `selected` ones reversed, the command of the one in `focus` moved `shift` characters on);
+    sorted by account/env, the list is a tree (see tree), a group's line folding it or opening it again. A
+    command too long to show ends in "…"."""
     room = max(0, width - COMMAND_AT - 1)
     column, descending = sort
+    grown = column == "account/env"
+    columns = TREE_COLUMNS if grown else COLUMNS
     head = []
-    for heading, _, _, _ in COLUMNS:
+    for heading, _, _, _ in COLUMNS[1:] if grown else COLUMNS:
         name = heading.lstrip(">")
-        head.append([(name + ("▼" if descending else "▲") if name == column else name,
+        label = TREE_COLUMNS[0][0] if grown and name == column else name
+        head.append([(label + ("▼" if descending else "▲") if name == column else label,
                       "" if name == column else DIM, ("sort", name))])
-    lines = [cells(head, width)]
-    shown = jobs[top:top + rows - 2]
-    for job in shown:
-        chosen = job.pid in selected
-        values = [cell(job) for _, _, cell, _ in COLUMNS]
+    lines = [cells(head, width, columns=columns)]
+    shown = entries[top:top + rows - 2]
+    for stem, job, key in shown:
+        chosen, means = job.pid in selected, job.pid if key is None else ("fold", key)
+        values = [stem if cell is None else cell(job) for _, _, cell, _ in columns]
         command = "…" + job.command[shift:] if job.pid == focus and shift else job.command
         values[-1] = [(command if cells_of(command) <= room else cut(command, max(0, room - 1))[0] + "…", DIM)]
-        lines.append(cells([[(seg[0], THEME.selected if chosen else seg[1], job.pid) for seg in column]
-                            for column in values], width, (THEME.selected if chosen else "", job.pid)))
-    if not jobs:
+        lines.append(cells([[(seg[0], THEME.selected if chosen else seg[1], means) for seg in column]
+                            for column in values], width, (THEME.selected if chosen else "", means), columns))
+    if not entries:
         lines.append([(" no processes on these GPUs", DIM)])
-    above, below = top, len(jobs) - top - len(shown)
+    above, below = top, len(entries) - top - len(shown)
     more = ", ".join(n for n in ("{} more above".format(above) if above else "",
                                  "{} more below".format(below) if below else "") if n)
     lines.append(spread(width, [], [(more + " · wheel or ↑↓ to scroll", DIM)]) if more else [])
@@ -2080,6 +2147,8 @@ class View:
         self.note = None                  # (segments, until): what the last stop did
         self.sent = None                  # (PIDs, when) of a SIGTERM, to point at k if a job lives on
         self.lines, self.jobs = [], []    # the last screen drawn, and the jobs on it
+        self.entries = []                 # the list's lines, (tree cell, job, key): see process_list
+        self.folds = {}                   # (owner,) or (owner, env): open, as last clicked (see unfolded)
         self.gpu_top, self.gpu_page = 0, 1  # the first row of boxes shown, and how many rows fit
         self.list_rows = range(0)         # the screen rows the list takes, when it is open
         self.shift, self.shifted = 0, None  # how far the selected job's command is scrolled, and whose
@@ -2145,7 +2214,9 @@ class View:
         self.indices = [g.index for g in gpus]
         used = {index for job in picked for index in job.gpus}
         shown = [g for g in gpus if (g.index in used if self.only else g.index not in self.hidden)]
-        rows = min(len(self.jobs) + 2, max(4, (height - 2) // 2), max(0, height - 2)) if self.listing else 0
+        self.entries = (tree(self.jobs, self.folds, self.picked) if column == "account/env"
+                        else [(None, job, None) for job in self.jobs])
+        rows = min(len(self.entries) + 2, max(4, (height - 2) // 2), max(0, height - 2)) if self.listing else 0
         body = self.boxes(shown, width, height - 2 - rows)
         self.list_rows = range(1 + len(body), 1 + len(body) + rows)
         if rows:
@@ -2153,8 +2224,8 @@ class View:
                 self.shift, self.shifted = 0, self.job
             room = max(0, width - COMMAND_AT - 1)
             self.shift = max(0, min(self.shift, len(focus.command) + 1 - room)) if focus else 0
-            body += process_list(self.jobs, width, rows, self.picked, self.job, self.scrolled(rows - 2), self.sort,
-                                 self.shift)
+            body += process_list(self.entries, width, rows, self.picked, self.job, self.scrolled(rows - 2),
+                                 self.sort, self.shift)
         self.lines = self.hover([top_line] + body + [self.bottom_line(width, picked, newer, gpus)])
         return self.lines
 
@@ -2262,10 +2333,14 @@ class View:
         if not living or time.monotonic() - when > 5:
             self.sent = None
 
+    def shown(self):
+        """The PIDs of the jobs the list shows, in its order: none of a folded group's."""
+        return [job.pid for _, job, key in self.entries if key is None]
+
     def scrolled(self, room):
-        """The list's first job, kept in range and, after the selection moved, on the selected job."""
-        order = [job.pid for job in self.jobs]
-        if self.follow and self.job in order:
+        """The list's first line, kept in range and, after the selection moved, on the selected job."""
+        order = [job.pid if key is None else None for _, job, key in self.entries]
+        if self.follow and self.job is not None and self.job in order:
             i = order.index(self.job)
             self.top = min(max(self.top, i - room + 1), i)
         self.top = max(0, min(self.top, len(order) - room))
@@ -2293,7 +2368,9 @@ class View:
                 left = [("{} jobs".format(len(picked)), THEME.accent), ("  ", DIM)] + about_all(picked)
             return spread(width, note or left, keys(*hints, ("Esc", "back")))
         if self.listing:
-            return spread(width, note or [("click a job or a heading", DIM)],
+            hint = "click a job or a heading" + (", or an account or env to fold it" if self.sort[0] == "account/env"
+                                                 else "")
+            return spread(width, note or [(hint, DIM)],
                           keys(("s", "sort by next"), ("r", "reverse"), ("Esc", "close")))
         if note:
             return spread(width, note, keys(("p", "processes"), ("Esc / q", "quit")))
@@ -2367,6 +2444,14 @@ class View:
                 self.hidden.discard(index)
             elif len(self.hidden) + 1 < len(self.indices):
                 self.hidden.add(index)
+            return True
+        if kind == "fold":  # an account's or an environment's line clicked: folded, or open again
+            key = value[0]
+            held = [job for job in self.jobs if (job.owner, job.env)[:len(key)] == key]
+            folding = unfolded(key, held, self.folds, self.picked)
+            self.folds[key] = not folding
+            if folding:  # its picked jobs go with it, out of sight
+                self.picked -= {job.pid for job in held}
             return True
         if kind == "sort":  # a heading clicked: sort by it; again, the other way round
             column, descending = self.sort
@@ -2449,8 +2534,8 @@ class View:
         elif key in ("left", "right") and self.left == "processes":  # every GPU's processes, sideways
             step = 8 if key == "right" else -8
             self.scroll = {index: (top, shift + step) for index, (top, shift) in self.scroll.items()}
-        elif key in MOVES and self.jobs:
-            order = [job.pid for job in self.jobs]
+        elif key in MOVES and self.shown():
+            order = self.shown()
             i = order.index(self.job) if self.job in order else (-1 if MOVES[key] > 0 else len(order))
             self.pick([order[min(max(i + MOVES[key], 0), len(order) - 1)]])
             self.follow = True
@@ -2486,7 +2571,8 @@ class View:
 ASCII = str.maketrans({"─": "-", "│": "|", "├": "+", "┤": "+", "╭": "+", "╮": "+", "╰": "+", "╯": "+",
                        "▁": "_", "▂": "_", "▃": "_", "▄": "=", "▅": "=", "▆": "#", "▇": "#", "█": "#",
                        "▀": " ",  # the graph's full cells: their background alone, a solid block
-                       "°": " ", "·": "-", "…": "~", "↑": "^", "↓": "v", "▲": "^", "▼": "v"})
+                       "°": " ", "·": "-", "…": "~", "↑": "^", "↓": "v", "▲": "^", "▼": "v",
+                       "└": "+", "▶": ">"})
 # Control characters, which would act on the terminal rather than show: anyone's command line can carry them
 # (ESC, BEL, a new line), and with them clear the screens of all who watch, or set their window titles. A "?"
 # each, a cell, as they are counted.

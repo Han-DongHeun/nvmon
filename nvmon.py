@@ -1301,10 +1301,13 @@ class Job(NamedTuple):
     mine: bool
     env: Optional[str]
     command: str                  # its biggest process's command line
+    workers: tuple = ()           # with several processes, each as a Job (see jobs)
 
 
 def jobs(gpus):
-    """The jobs on `gpus`, in the order of the GPUs they use."""
+    """The jobs on `gpus`, in the order of the GPUs they use. A job of several processes has each as a worker:
+    a Job of its GPUs, share, memory and start, with the job's PID, as picking one picks the job (which is
+    what a stop goes to, see stop), and no name or command, the job's."""
     parts = {}
     for gpu in gpus:
         for p in gpu.now.processes:
@@ -1314,19 +1317,29 @@ def jobs(gpus):
         procs = [p for _, p in entries]
         main = max(procs, key=lambda p: p.mem or 0)
         starts = [p.started for p in procs if p.started is not None]
-        # Its share of each of its GPUs, averaged: a DDP job reads like one of its GPUs.
-        shares = {}
+        # Its share of each of its GPUs, averaged: a DDP job reads like one of its GPUs. And each process's.
+        shares, each = {}, {}
         for gpu, p in entries:
-            if gpu.now.process_util is not None:
-                shares[gpu.index] = shares.get(gpu.index, 0) + gpu.now.process_util.get(p.pid, 0)
+            share = None if gpu.now.process_util is None else gpu.now.process_util.get(p.pid, 0)
+            if share is not None:
+                shares[gpu.index] = shares.get(gpu.index, 0) + share
+            each.setdefault(p.pid, []).append((gpu.index, p, share))
         # The launcher's name from any of them: a launcher on a GPU itself has none of its own. The members by
         # PID, once each though seen on several GPUs, which may have read it at different times.
         launcher = next((p.launcher for p in procs if p.launcher), None)
+        workers = []
+        for seen in each.values() if len(each) > 1 else ():
+            p, known = seen[0][1], [(index, share) for index, _, share in seen if share is not None]
+            workers.append(Job(pid, "", None, ((p.pid, p.started),), tuple(sorted(index for index, _, _ in seen)),
+                               sum(s for _, s in known) / len(known) if known else None, tuple(sorted(known)),
+                               None if all(q.mem is None for _, q, _ in seen) else sum(q.mem or 0 for _, q, _ in seen),
+                               p.started, p.owner, p.mine, p.env, ""))
         found.append(Job(pid, main.name, launcher, tuple(sorted({p.pid: p.started for p in procs}.items())),
                          tuple(sorted({gpu.index for gpu, _ in entries})),
                          sum(shares.values()) / len(shares) if shares else None, tuple(sorted(shares.items())),
                          None if all(p.mem is None for p in procs) else sum(p.mem or 0 for p in procs),
-                         min(starts) if starts else None, main.owner, main.mine, main.env, main.command))
+                         min(starts) if starts else None, main.owner, main.mine, main.env, main.command,
+                         tuple(sorted(workers, key=lambda w: (w.gpus, w.members)))))
     return sorted(found, key=lambda job: (job.gpus, job.pid))
 
 
@@ -1924,11 +1937,13 @@ TOTALED = ("account/env", "GPUs", "util", "memory", "time")
 
 
 def unfolded(key, held, folds, picked):
-    """Whether the account or environment `key`, (owner,) or (owner, env), holding the jobs `held`, is open:
-    as `folds` has it, else an account when ours and an environment always; and while some of its jobs but
-    not all are `picked`, so that none picked is out of sight (all, and its own line shows them)."""
+    """Whether the account, environment or job `key`, (owner,), (owner, env) or (owner, env, PID), holding
+    the jobs `held`, is open: as `folds` has it, else an account when ours, an environment always, a job's
+    workers not; and while some of its jobs but not all are `picked`, so that none picked is out of sight
+    (all, and its own line shows them)."""
     here = {j.pid for j in held} & picked
-    return folds.get(key, len(key) > 1 or any(j.mine for j in held)) or 0 < len(here) < len(held)
+    default = len(key) == 2 or len(key) == 1 and any(j.mine for j in held)
+    return folds.get(key, default) or 0 < len(here) < len(held)
 
 
 def total(jobs, env=None):
@@ -1956,10 +1971,24 @@ def labelled(stem, name, style, count):
 def tree(jobs, folds, picked, sort):
     """The list's lines, a tree: (tree cell, job, key, PIDs, folded), the key (owner,) or (owner, env) on a
     group's line, whose job is then its total (see total), the PIDs its jobs', and whether it is folded; on a
-    job's None, its own, and None. A job with no environment hangs from its account. The `jobs` come in the order of `sort` = (column,
-    descending), as do the groups (see TOTALED). A folded group (see unfolded) shows its line only; its
-    arrow folds it or opens it again (see process_list)."""
+    job's or a worker's (see jobs) None, the job's PID, and None. A job with no environment hangs from its
+    account. The `jobs` come in the order of `sort` = (column, descending), as do the groups (see TOTALED).
+    A folded group or job (see unfolded) shows its line only; its arrow folds it or opens it again (see
+    process_list)."""
     column, descending = sort
+
+    def job_lines(down, last, job):  # its line, the lines down to it `down`; open, its workers' beneath
+        branch = "└" if last else "├"
+        if not job.workers:
+            return [([(down + branch + "─ ", FAINT), (str(job.pid), DIM)], job, None, (job.pid,), None)]
+        key = (job.owner, job.env, job.pid)
+        is_open, fold = unfolded(key, [job], folds, picked), ("fold", key)
+        lines = [([(down + branch, FAINT, fold), (OPENED if is_open else FOLDED, DIM, fold), (str(job.pid), DIM)],
+                  job, None, (job.pid,), None)]
+        below = down + ("  " if last else "│ ")
+        return lines + [([(below + ("└─ " if i == len(job.workers) - 1 else "├─ "), FAINT),
+                          (str(worker.members[0][0]), DIM)], worker, None, (job.pid,), None)
+                        for i, worker in enumerate(job.workers if is_open else [])]
 
     def ordered(groups, envs):  # [(name, jobs)], as their first jobs come
         if column not in TOTALED:
@@ -1987,15 +2016,15 @@ def tree(jobs, folds, picked, sort):
         for k, (env, js) in enumerate(children if is_open else []):
             stem = "└─" if k == len(children) - 1 else "├─"
             if env is None:
-                lines.append(([(stem, FAINT), (" " + str(js[0].pid), DIM)], js[0], None, (js[0].pid,), None))
+                lines += job_lines("", k == len(children) - 1, js[0])
                 continue
             env_open, fold = unfolded((owner, env), js, folds, picked), ("fold", (owner, env))
             arrow = [(stem, FAINT, fold), (OPENED if env_open else FOLDED, DIM, fold)]
             lines.append((labelled(arrow, env, "", len(js)), total(js, env), (owner, env), tuple(j.pid for j in js),
                           not env_open))
             down = "  " if k == len(children) - 1 else "│ "  # the account's line, on past this group or not
-            lines += [([(down + ("└─ " if i == len(js) - 1 else "├─ "), FAINT), (str(job.pid), DIM)], job, None,
-                       (job.pid,), None) for i, job in enumerate(js if env_open else [])]
+            for i, job in enumerate(js if env_open else []):
+                lines += job_lines(down, i == len(js) - 1, job)
     return lines
 
 
@@ -2356,8 +2385,8 @@ class View:
             self.sent = None
 
     def held(self, key):
-        """The jobs of the account or environment `key`: (owner,) or (owner, env)."""
-        return [job for job in self.jobs if (job.owner, job.env)[:len(key)] == key]
+        """The jobs of the account, environment or job `key`: (owner,), (owner, env) or (owner, env, PID)."""
+        return [job for job in self.jobs if (job.owner, job.env, job.pid)[:len(key)] == key]
 
     def at(self):
         """The index in the list of the line picked by: the group's, else the job's in focus; or None."""
@@ -2564,10 +2593,14 @@ class View:
         elif key in ("left", "right") and self.left == "processes":  # every GPU's processes, sideways
             step = 8 if key == "right" else -8
             self.scroll = {index: (top, shift + step) for index, (top, shift) in self.scroll.items()}
-        elif key in MOVES and self.entries:  # the lines, a group's among them, picking all its jobs
-            i = self.at()
-            i = (-1 if MOVES[key] > 0 else len(self.entries)) if i is None else i
-            _, _, group, pids, _ = self.entries[min(max(i + MOVES[key], 0), len(self.entries) - 1)]
+        elif key in MOVES and self.entries:  # the lines, a group's among them, picking all its jobs; a job's
+            i, step = self.at(), MOVES[key]       # workers' lines pick the job, as its line does: passed by
+            i = (-1 if step > 0 else len(self.entries)) if i is None else i
+            j = min(max(i + step, 0), len(self.entries) - 1)
+            same = 0 <= i < len(self.entries) and self.entries[i][2:4]
+            while same and self.entries[j][2:4] == same and 0 <= j + (step > 0) * 2 - 1 < len(self.entries):
+                j += (step > 0) * 2 - 1
+            _, _, group, pids, _ = self.entries[j]
             self.pick(pids, group)
             self.follow = True
         elif self.picked and key in ("f", "enter"):

@@ -919,22 +919,30 @@ def holds_gpu(pid):
 # The GPU's numbers, and each process's GPU time, as its driver puts them in the I/O Registry (what `ioreg`
 # shows), read through IOKit and Core Foundation: no sudo, nothing to install.
 
+def bind(lib, name, restype, *argtypes):
+    """The C function `name` of `lib`, told what it takes and gives."""
+    fn = getattr(lib, name)
+    fn.restype, fn.argtypes = restype, list(argtypes)
+    return fn
+
+
+def apple_silicon():
+    """macOS: whether this Mac's chip is Apple's (true under Rosetta too, unlike platform.machine)."""
+    found, length = c_int(0), ctypes.c_size_t(4)
+    return libc().sysctlbyname(b"hw.optional.arm64", byref(found), byref(length), None, 0) == 0 and found.value == 1
+
+
 class Registry:
     """macOS: the I/O Registry, and the Core Foundation values its entries hold, as Python ones."""
 
     def __init__(self):
-        def sig(lib, name, restype, *argtypes):
-            fn = getattr(lib, name)
-            fn.restype, fn.argtypes = restype, list(argtypes)
-            return fn
-        io = ctypes.CDLL("/System/Library/Frameworks/IOKit.framework/IOKit")
-        cf = ctypes.CDLL("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
+        sig = bind
+        self.io = io = ctypes.CDLL("/System/Library/Frameworks/IOKit.framework/IOKit")
+        self.cf = cf = ctypes.CDLL("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
         self.matching = sig(io, "IOServiceMatching", c_void_p, ctypes.c_char_p)
         self.services = sig(io, "IOServiceGetMatchingServices", c_int, c_uint, c_void_p, ctypes.POINTER(c_uint))
         self.next = sig(io, "IOIteratorNext", c_uint, c_uint)
         self.release = sig(io, "IOObjectRelease", c_int, c_uint)
-        self.create_properties = sig(io, "IORegistryEntryCreateCFProperties", c_int, c_uint,
-                                     ctypes.POINTER(c_void_p), c_void_p, c_uint)
         self.descendants = sig(io, "IORegistryEntryCreateIterator", c_int, c_uint, ctypes.c_char_p, c_uint,
                                ctypes.POINTER(c_uint))
         self.entry_id = sig(io, "IORegistryEntryGetRegistryEntryID", c_int, c_uint, ctypes.POINTER(c_ulonglong))
@@ -961,6 +969,7 @@ class Registry:
         self.data_bytes = sig(cf, "CFDataGetBytePtr", c_void_p, c_void_p)
         self.entry_name = sig(io, "IORegistryEntryGetName", c_int, c_uint, ctypes.c_char_p)
         self.property = sig(io, "IORegistryEntryCreateCFProperty", c_void_p, c_uint, c_void_p, c_void_p, c_uint)
+        self._keys = {}
 
     def value(self, ref):
         """A Core Foundation value as Python: dict, list, int, float, str, bool; None for any other."""
@@ -984,24 +993,32 @@ class Registry:
             return bool(self.boolean(ref))
         return None
 
-    def properties(self, entry):
-        """The properties of registry `entry`, as a dict."""
-        props = c_void_p()
-        if self.create_properties(entry, byref(props), None, 0) != 0 or not props.value:
-            return {}
+    def key(self, text):
+        """`text` as a Core Foundation string, made once: the keys nvmon asks for over and over."""
+        made = self._keys.get(text)
+        if made is None:
+            made = self._keys[text] = self.cfstr(None, text.encode(), 0x08000100)
+        return made
+
+    def get(self, entry, key):
+        """The property `key` of registry `entry`, as Python (see value); None where it has none. One key
+        read, not the entry's every property: a GPU's hold a legend of its counters many times its numbers."""
+        ref = self.property(entry, self.key(key), None, 0)
+        if not ref:
+            return None
         try:
-            return self.value(props.value)
+            return self.value(ref)
         finally:
-            self.cf_release(props.value)
+            self.cf_release(ref)
 
     def gpus(self):
-        """[(entry, properties)] of the GPUs (IOAccelerator), kept for the whole run."""
+        """The registry entries of the GPUs (IOAccelerator), kept for the whole run."""
         found, it = [], c_uint()
         if self.services(0, self.matching(b"IOAccelerator"), byref(it)) != 0:
             return found
         entry = self.next(it.value)
         while entry:
-            found.append((entry, self.properties(entry)))
+            found.append(entry)
             entry = self.next(it.value)
         self.release(it.value)
         return found
@@ -1017,9 +1034,7 @@ class Registry:
             name = ctypes.create_string_buffer(128)
             self.entry_name(entry, name)
             if name.value == b"pmgr" and not steps:
-                key = self.cfstr(None, b"voltage-states9", 0x08000100)
-                table = self.property(entry, key, None, 0)
-                self.cf_release(key)
+                table = self.property(entry, self.key("voltage-states9"), None, 0)
                 if table and self.type_of(table) == self.data_type:
                     raw = ctypes.string_at(self.data_bytes(table), self.data_length(table))
                     hz = [int.from_bytes(raw[i:i + 4], "little") for i in range(0, len(raw) - 7, 8)]
@@ -1038,13 +1053,12 @@ class Registry:
             return found
         entry = self.next(it.value)
         while entry:
-            props = self.properties(entry)
-            creator = props.get("IOUserClientCreator") or ""  # "pid 569, WindowServer"
+            creator = self.get(entry, "IOUserClientCreator") or ""  # "pid 569, WindowServer"
             head, _, name = creator.partition(",")
             if head.startswith("pid ") and head[4:].isdigit():
                 ident = c_ulonglong()
                 self.entry_id(entry, byref(ident))
-                usage = [u for u in props.get("AppUsage") or [] if isinstance(u, dict)]
+                usage = [u for u in self.get(entry, "AppUsage") or [] if isinstance(u, dict)]
                 found[ident.value] = int(head[4:]), name.strip(), sum(u.get("accumulatedGPUTime") or 0 for u in usage)
             self.release(entry)
             entry = self.next(it.value)
@@ -1059,11 +1073,10 @@ class Report:
     JOULES = {"mJ": 1e-3, "uJ": 1e-6, "nJ": 1e-9}
 
     def __init__(self, registry, steps):
-        def sig(name, restype, *argtypes):
-            fn = getattr(lib, name)
-            fn.restype, fn.argtypes = restype, list(argtypes)
-            return fn
         lib, self.registry = ctypes.CDLL("/usr/lib/libIOReport.dylib"), registry
+
+        def sig(name, restype, *argtypes):
+            return bind(lib, name, restype, *argtypes)
         copy = sig("IOReportCopyChannelsInGroup", c_void_p, c_void_p, c_void_p, c_ulonglong, c_ulonglong, c_ulonglong)
         subscribe = sig("IOReportCreateSubscription", c_void_p, c_void_p, c_void_p, ctypes.POINTER(c_void_p),
                         c_ulonglong, c_void_p)
@@ -1077,17 +1090,16 @@ class Report:
         self.residency = sig("IOReportStateGetResidency", ctypes.c_int64, c_void_p, c_int)
         merge = sig("IOReportMergeChannels", None, c_void_p, c_void_p, c_void_p)
 
-        def text(value):
-            return registry.cfstr(None, value, 0x08000100)
-        energy = copy(text(b"Energy Model"), None, 0, 0, 0)
-        states = copy(text(b"GPU Stats"), text(b"GPU Performance States"), 0, 0, 0)
+        energy = copy(registry.key("Energy Model"), None, 0, 0, 0)
+        states = copy(registry.key("GPU Stats"), registry.key("GPU Performance States"), 0, 0, 0)
         if states:  # a Mac without it still has its power
             merge(energy, states, None)
         self.channels, self.steps = registry.mutable_copy(None, 0, energy), steps
         self.subscribed = c_void_p()
         self.subscription = subscribe(None, self.channels, byref(self.subscribed), 0, None)
-        self.key = registry.cfstr(None, b"IOReportChannels", 0x08000100)
+        self.key = registry.key("IOReportChannels")
         self.last = self.samples(self.subscription, self.subscribed, None), time.monotonic()
+        self.wanted = None  # [(index, "energy" with its scale or "clock")] in a sample's channels, see read
 
     def read(self):
         """(power in W, clock in MHz) of the GPU since the last call; None for either where unknown, the clock
@@ -1096,13 +1108,22 @@ class Report:
         delta = self.delta(self.last[0], now[0], None)
         joules, found, cycles, busy = 0.0, False, 0.0, 0
         channels = self.registry.dict_get(delta, self.key) if delta else None
-        for i in range(self.registry.array_count(channels) if channels else 0):
+        count = self.registry.array_count(channels) if channels else 0
+        if self.wanted is None and count:  # the channels keep their order: which to read, worked out once
+            self.wanted = []
+            for i in range(count):
+                channel = self.registry.array_item(channels, i)
+                name = self.registry.value(self.channel_name(channel)) or ""
+                scale = self.JOULES.get(self.registry.value(self.unit(channel)) or "")
+                if name.startswith("GPU") and scale:  # "GPU Energy"
+                    self.wanted.append((i, scale))
+                elif name == "GPUPH":
+                    self.wanted.append((i, None))
+        for i, scale in self.wanted if count else ():
             channel = self.registry.array_item(channels, i)
-            name = self.registry.value(self.channel_name(channel)) or ""
-            scale = self.JOULES.get(self.registry.value(self.unit(channel)) or "")
-            if name.startswith("GPU") and scale:  # "GPU Energy"
+            if scale:
                 joules, found = joules + self.integer(channel, 0) * scale, True
-            elif name == "GPUPH":
+            else:
                 for k in range(self.states(channel)):
                     step = self.registry.value(self.state_name(channel, k)) or ""  # "P3": the third step
                     if step[1:].isdigit() and 0 < int(step[1:]) <= len(self.steps):
@@ -1124,12 +1145,7 @@ class Thermal:
     OFF = 30.0
 
     def __init__(self, registry):
-        def sig(lib, name, restype, *argtypes):
-            fn = getattr(lib, name)
-            fn.restype, fn.argtypes = restype, list(argtypes)
-            return fn
-        io = ctypes.CDLL("/System/Library/Frameworks/IOKit.framework/IOKit")
-        cf = ctypes.CDLL("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
+        sig, io, cf = bind, registry.io, registry.cf
         number = sig(cf, "CFNumberCreate", c_void_p, c_void_p, ctypes.c_long, c_void_p)
         make_dict = sig(cf, "CFDictionaryCreate", c_void_p, c_void_p, c_void_p, c_void_p, ctypes.c_long, c_void_p,
                         c_void_p)
@@ -1144,11 +1160,11 @@ class Thermal:
         self.float_value = sig(io, "IOHIDEventGetFloatValue", ctypes.c_double, c_void_p, ctypes.c_int32)
         self.registry = registry
         page, usage = ctypes.c_int32(0xff00), ctypes.c_int32(5)  # Apple's own page: its temperature sensors
-        keys = (c_void_p * 2)(*(registry.cfstr(None, k, 0x08000100) for k in (b"PrimaryUsagePage", b"PrimaryUsage")))
+        keys = (c_void_p * 2)(registry.key("PrimaryUsagePage"), registry.key("PrimaryUsage"))
         values = (c_void_p * 2)(number(None, 3, byref(page)), number(None, 3, byref(usage)))  # 3: SInt32
         self.client = create(None)  # kept: the sensors live as long as it does
         set_matching(self.client, make_dict(None, keys, values, 2, *callbacks))
-        services, product = copy_services(self.client), registry.cfstr(None, b"Product", 0x08000100)
+        services, product = copy_services(self.client), registry.key("Product")
         self.sensors, self.chip = [], []
         for i in range(registry.array_count(services) if services else 0):
             service = registry.array_item(services, i)
@@ -1187,9 +1203,9 @@ class AppleGpu(Gpu):
     poll's, the processes listed those that used the GPU in the last RECENT seconds; memory is the system's,
     which the GPU shares."""
 
-    def __init__(self, registry, index, entry, props):
+    def __init__(self, registry, index, entry):
         self.registry, self.index, self.entry = registry, index, entry
-        self.name = props.get("model") or "Apple GPU"
+        self.name = registry.get(entry, "model") or "Apple GPU"  # "Apple M1"
         self.history, self.memory = deque(maxlen=HISTORY), deque(maxlen=HISTORY)
         self.sample = self.now = None
         self.pcie_max_gen = self.pcie_max_width = None
@@ -1214,7 +1230,7 @@ class AppleGpu(Gpu):
         return (info and info.pbi_name.decode("utf-8", "replace")) or self._names.get(pid)
 
     def poll(self, detail=False):
-        stats = self.registry.properties(self.entry).get("PerformanceStatistics") or {}
+        stats = self.registry.get(self.entry, "PerformanceStatistics") or {}
         now, clients = time.monotonic(), self.registry.clients(self.entry)
         shares = {}
         for ident, (pid, name, gpu_time) in clients.items():
@@ -1242,9 +1258,12 @@ class AppleGpu(Gpu):
 
 
 def apple_gpus(wanted=None):
-    """The Apple silicon GPUs whose index is in `wanted` (all when None)."""
+    """The Apple silicon GPUs whose index is in `wanted` (all when None); none on an Intel Mac, whose GPU
+    keeps its numbers otherwise."""
+    if not apple_silicon():
+        return []
     registry = Registry()
-    return [AppleGpu(registry, index, entry, props) for index, (entry, props) in enumerate(registry.gpus())
+    return [AppleGpu(registry, index, entry) for index, entry in enumerate(registry.gpus())
             if wanted is None or index in wanted]
 
 

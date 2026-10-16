@@ -1969,34 +1969,35 @@ def spread(width, left, right):
     return clip(pad(clip(left, room - 1), room) + right, width)
 
 
+REFRESH = (("refresh", -1), ("refresh", 0), ("refresh", 1))  # what clicks on the refresh and its buttons mean
+
+
 def refresh(interval, lit):
-    """The top line's "refresh 0.5s", clickable; `lit`, with its - and + buttons."""
-    seconds = "{:g}s".format(interval)
-    if not lit:
-        return [("refresh ", DIM, ("refresh", 0)), (seconds, "", ("refresh", 0))]
-    return [("refresh ", DIM, ("refresh", 0)), (" - ", CHIP, ("refresh", -1)), (" " + seconds + " ", "", ("refresh", 0)),
-            (" + ", CHIP, ("refresh", 1))]
+    """The top line's "refresh 0.5s", clickable, with room on either side of the number for its - and +
+    buttons, drawn there when `lit`: nothing moves as they come and go. The number takes four cells, 0.5s
+    as 1s and 10s, so that nothing moves as it changes either."""
+    blank = ("   ", "", ("refresh", 0))
+    minus, plus = ((" - ", CHIP, ("refresh", -1)), (" + ", CHIP, ("refresh", 1))) if lit else (blank, blank)
+    return [("refresh", DIM, ("refresh", 0)), minus, ("{:>4}".format("{:g}s".format(interval)), "", ("refresh", 0)),
+            plus]
 
 
 def refresh_pointed(width, interval, pointer):
-    """Whether `pointer` is over the refresh of a top line `width` wide: anywhere the buttons would be."""
+    """Whether `pointer` is over the refresh of a top line `width` wide, its buttons' room included."""
     return pointer is not None and pointer[0] == 0 and pointer[1] >= width - width_of(refresh(interval, True))
 
 
 def header(width, interval, driver, waiting=0, pointer=None):
     """Top line: name, version, host, local time | driver (or how long it has kept us waiting), refresh. With
-    the `pointer` over the refresh, its - and + buttons; the CUDA version makes room for them, whole. Where
-    the buttons are counts as over it, so that they stay while the pointer is on them."""
+    the `pointer` over the refresh, its - and + buttons, in room kept for them (see refresh)."""
     now = time.time()
     stamp = time.strftime("%Y-%m-%d %a %H:%M:%S", time.localtime(now)) + ".{:02d}".format(int(now % 1 * 100))
     left = [("nvmon", BOLD), (" " + __version__, DIM), ("  " + socket.gethostname(), ""), ("  " + stamp, "")]
-    pointed = refresh_pointed(width, interval, pointer)
-    right = refresh(interval, pointed)
-    shown = driver.split("  ")[0] if pointed else driver  # "driver 580.173.02  CUDA 13.0"
+    right = refresh(interval, refresh_pointed(width, interval, pointer))
     if waiting >= 1:  # the numbers below are that old: something is keeping the driver busy, or it hangs
         right = [("driver: no answer for {:.0f}s   ".format(waiting), WARN)] + right
-    elif shown and width_of(left) + 2 + len(shown) + 3 + width_of(right) <= width:  # dropped when narrow
-        right = [(shown + "   ", DIM)] + right
+    elif driver and width_of(left) + 2 + len(driver) + 3 + width_of(right) <= width:  # dropped when narrow
+        right = [(driver + "   ", DIM)] + right
     return spread(width, left, right)
 
 
@@ -2339,7 +2340,7 @@ class View:
             if value[0]:
                 self.retime(value[0])
             return True
-        if kind == "wheel" and (self.target(*value[1:]) or ("",))[0] == "refresh":  # up: -, down: +
+        if kind == "wheel" and self.target(*value[1:]) in REFRESH:  # up: -, down: +
             self.retime(value[0])
             return True
         if kind in ("wheel", "hwheel"):  # over a GPU's processes, they scroll, either way;

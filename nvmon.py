@@ -1972,7 +1972,7 @@ def tree(jobs, folds, picked, sort):
     line, whose job is then its total (see total), and the PIDs its jobs'; on a job's or a worker's (see
     jobs) None, and the job's PID. A job with no environment hangs from its account. The `jobs` come in the order of `sort` = (column, descending), as do the groups (see TOTALED).
     A folded group or job (see unfolded) shows its line only; its arrow folds it or opens it again (see
-    process_list)."""
+    process_list). And the jobs in the order the tree has them, folded or not."""
     column, descending = sort
 
     def job_lines(down, last, job):  # its line, the lines down to it `down`; open, its workers' beneath
@@ -1981,8 +1981,8 @@ def tree(jobs, folds, picked, sort):
             return [([(down + branch + "─ ", FAINT), (str(job.pid), DIM)], job, None, (job.pid,))]
         key = (job.owner, job.env, job.pid)
         is_open, fold = unfolded(key, [job], folds, picked), ("fold", key)
-        lines = [([(down + branch, FAINT, fold), (OPENED if is_open else FOLDED, DIM, fold), (str(job.pid), DIM)],
-                  job, None, (job.pid,))]
+        lines = [([(down, FAINT), (branch, FAINT, fold), (OPENED if is_open else FOLDED, DIM, fold),
+                   (str(job.pid), DIM)], job, None, (job.pid,))]
         below = down + ("  " if last else "│ ")
         return lines + [([(below + ("└─ " if i == len(job.workers) - 1 else "├─ "), FAINT),
                           (str(worker.members[0][0]), DIM)], worker, None, (job.pid,))
@@ -1996,7 +1996,7 @@ def tree(jobs, folds, picked, sort):
     owners = {}
     for job in jobs:
         owners.setdefault(job.owner, []).append(job)
-    lines = []
+    lines, order = [], []
     for owner, held in ordered(list(owners.items()), False):
         is_open = unfolded((owner,), held, folds, picked)
         style = (UNDERLINE if any(j.mine for j in held) else "") + BOLD
@@ -2011,6 +2011,7 @@ def tree(jobs, folds, picked, sort):
                 children.append((j.env, [j]))
                 envs.update({j.env: children[-1][1]} if j.env else {})
         children = ordered(children, True)
+        order += [j for _, js in children for j in js]
         for k, (env, js) in enumerate(children if is_open else []):
             stem = "└─" if k == len(children) - 1 else "├─"
             if env is None:
@@ -2022,17 +2023,20 @@ def tree(jobs, folds, picked, sort):
             down = "  " if k == len(children) - 1 else "│ "  # the account's line, on past this group or not
             for i, job in enumerate(js if env_open else []):
                 lines += job_lines(down, i == len(js) - 1, job)
-    return lines
+    return lines, order
 
 
 def cells(values, width, fill=("",)):
-    """One list line of `width` cells from the columns' segments, two spaces apart; `fill` = (style, ...) of
-    the spaces, so that a selected row stays one bar and clicks anywhere: those padding a column mean what
-    its last segment does, but take nothing else of it, an underline, say."""
+    """One list line of `width` cells from the columns' segments, two spaces apart, a column too narrow for
+    its own ending in "…"; `fill` = (style, ...) of the spaces, so that a selected row stays one bar and
+    clicks anywhere: those padding a column mean what its last segment does, but take nothing else of it,
+    an underline, say."""
     line, used = [(" ",) + fill], 1
     for (heading, size, _, _), segments in zip(COLUMNS, values):
         size = size or max(0, width - used - 1)
-        segments = clip(segments, size)
+        if width_of(segments) > size:  # its last cell "…", as the segment cut there looks and means
+            kept = clip(segments, size - 1)
+            segments = kept + [("…",) + (kept or segments)[-1][1:]] if size else []
         padding = [(" " * (size - width_of(segments)),) + fill[:1] + (segments[-1][2:3] if segments else fill[1:])]
         line += padding + segments if heading.startswith(">") else segments + padding
         line.append((" " if heading == "command" else "  ",) + fill)
@@ -2044,9 +2048,8 @@ def process_list(entries, width, rows, selected, focus, top, sort, shift=0):
     """The list p opens, `rows` lines: the headings (clicking one sorts by it; `sort` = (column, descending)),
     the `entries`, a tree (see tree), from index `top` on, how many more. A line means its jobs when
     clicked, a group's all of its, reversed when all are `selected`, a group's arrow folding it or opening it
-    again; the command of the job in `focus` moved `shift` characters on. A command too long to show ends
-    in "…"."""
-    room = max(0, width - COMMAND_AT - 1)
+    again; the command of the job in `focus` moved `shift` cells on, on its own line (its workers' have
+    none)."""
     column, descending = sort
     head = []
     for heading, _, _, _ in COLUMNS:
@@ -2059,8 +2062,8 @@ def process_list(entries, width, rows, selected, focus, top, sort, shift=0):
     for stem, job, key, pids in shown:
         chosen, means = set(pids) <= selected, job.pid if key is None else ("group", key)
         values = [stem if cell is None else cell(job) for _, _, cell, _ in COLUMNS]
-        command = "…" + job.command[shift:] if job.pid == focus and shift else job.command
-        values[-1] = [(command if cells_of(command) <= room else cut(command, max(0, room - 1))[0] + "…", DIM)]
+        if shift and job.pid == focus and job.command:
+            values[-1] = [("…" + cut(job.command, shift)[1], DIM)]
         lines.append(cells([[(seg[0], THEME.selected if chosen else seg[1], seg[2] if len(seg) > 2 else means)
                              for seg in column] for column in values], width, (THEME.selected if chosen else "", means)))
     if not entries:
@@ -2189,7 +2192,7 @@ class View:
         self.asking = None                # "SIGTERM" or "SIGKILL" awaiting y or n
         self.note = None                  # (segments, until): what the last stop did
         self.sent = None                  # (PIDs, when) of a SIGTERM, to point at k if a job lives on
-        self.lines, self.jobs = [], []    # the last screen drawn, and the jobs on it
+        self.lines, self.jobs = [], []    # the last screen drawn, and the jobs on it, in the list's order
         self.entries = []                 # the list's lines, (tree cell, job, key, PIDs): see process_list
         self.group = None                 # the account or environment whose jobs are picked, by its line
         self.folds = {}                   # (owner,), (owner, env), (owner, env, PID): open, as last clicked
@@ -2247,9 +2250,11 @@ class View:
         column, descending = self.sort
         self.jobs = sorted(jobs(gpus), key=lambda job: (SORTS[column](job), job.pid), reverse=descending)
         self.picked &= {job.pid for job in self.jobs}  # those that ended go
+        self.entries, self.jobs = tree(self.jobs, self.folds, self.picked, self.sort)
         picked = self.selected()
         if self.job not in self.picked:  # the one in focus ended: the next
             self.job = picked[0].pid if picked else None
+        self.group = self.group if picked else None  # none left of it, ended or let go as its account folded
         self.only = self.only and bool(picked)
         if not any(job.mine for job in picked):  # ours ended while asked about: nothing left to stop
             self.asking = None
@@ -2258,15 +2263,14 @@ class View:
         self.indices = [g.index for g in gpus]
         used = {index for job in picked for index in job.gpus}
         shown = [g for g in gpus if (g.index in used if self.only else g.index not in self.hidden)]
-        self.entries = tree(self.jobs, self.folds, self.picked, self.sort)
         rows = min(len(self.entries) + 2, max(4, (height - 2) // 2), max(0, height - 2)) if self.listing else 0
         body = self.boxes(shown, width, height - 2 - rows)
         self.list_rows = range(1 + len(body), 1 + len(body) + rows)
         if rows:
             if self.shifted != self.job:
                 self.shift, self.shifted = 0, self.job
-            room = max(0, width - COMMAND_AT - 1)
-            self.shift = max(0, min(self.shift, len(focus.command) + 1 - room)) if focus else 0
+            room, wide = max(0, width - COMMAND_AT - 1), cells_of(focus.command) if focus else 0
+            self.shift = min(self.shift, wide + 1 - room) if wide > room else 0  # in cells, up to its end
             body += process_list(self.entries, width, rows, self.picked, self.job, self.scrolled(rows - 2),
                                  self.sort, self.shift)
         self.lines = self.hover([top_line] + body + [self.bottom_line(width, picked, newer, gpus)])
@@ -2381,10 +2385,15 @@ class View:
         return [job for job in self.jobs if (job.owner, job.env, job.pid)[:len(key)] == key]
 
     def at(self):
-        """The index in the list of the line picked by: the group's, else the job's in focus; or None."""
-        return next((i for want in (lambda key, job: key == self.group is not None,
-                                    lambda key, job: key is None and job.pid == self.job)
-                     for i, (_, job, key, _) in enumerate(self.entries) if want(key, job)), None)
+        """The index in the list of the line picked by: the group's, else the job's in focus, else, folded
+        away, the line of the innermost group shown that holds it; or None."""
+        holder = None
+        for i, (_, job, key, pids) in enumerate(self.entries):
+            if key == self.group is not None or key is None and job.pid == self.job:
+                return i
+            if key is not None and self.job in pids:
+                holder = i
+        return holder
 
     def scrolled(self, room):
         """The list's first line, kept in range and, after the selection moved, on the line picked by."""
@@ -2477,7 +2486,9 @@ class View:
                 if row in self.list_rows:
                     self.shift = max(0, self.shift + 8 * step)
             elif row in self.list_rows:
-                if col >= COMMAND_AT and self.job is not None and self.target(row, col) == self.job:
+                i = row - self.list_rows.start - 1 + self.top  # the line there: the job's own has its command
+                if (col >= COMMAND_AT and self.job is not None and self.target(row, col) == self.job
+                        and 0 <= i < len(self.entries) and self.entries[i][1].command):
                     self.shift = max(0, self.shift + 8 * step)
                 else:
                     self.top, self.follow = self.top + 3 * step, False
@@ -2594,7 +2605,8 @@ class View:
                 j += (step > 0) * 2 - 1
             _, _, group, pids = self.entries[j]
             self.pick(pids, group)
-            self.follow = True
+            self.opened = self.opened or not self.listing  # the list opens with it, as for a click
+            self.listing = self.follow = True
         elif self.picked and key in ("f", "enter"):
             self.only = not self.only
         elif self.picked and key in ("t", "k"):

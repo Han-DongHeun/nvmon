@@ -2002,22 +2002,6 @@ def tree(jobs, folds, picked, sort):
 UTIL_AT = [heading for heading, _, _, _ in COLUMNS].index(">util")
 
 
-def faded(t):
-    """heat(t) halfway to gray: a number that is there, but quiet."""
-    r, g, b = (round(0.45 * int(c) + 0.55 * 120) for c in COLOR_24.match(heat(t)).groups()[1:])
-    return _rgb((r, g, b))
-
-
-def spread_over(shares):
-    """A group's share of each of its GPUs, "0▆ 96%  1▂ 26%", in quiet colors (see faded)."""
-    out = []
-    for index, share in shares:
-        t = share / 100
-        out += [("  ", "")] * bool(out) + [(str(index), ""), (BLOCKS[min(8, max(1, math.ceil(8 * t)))], faded(t)),
-                                           ("{:>4}".format("{:.0f}%".format(share)), faded(t))]
-    return out
-
-
 def cells(values, width, fill=("",)):
     """One list line of `width` cells from the columns' segments, two spaces apart; `fill` = (style, ...) of
     the spaces, so that a selected row stays one bar and clicks anywhere: those padding a column mean what
@@ -2038,8 +2022,7 @@ def process_list(entries, width, rows, selected, focus, top, sort, shift=0):
     the `entries`, a tree (see tree), from index `top` on, how many more. A line means its jobs when
     clicked, a group's all of its, reversed when all are `selected`, a group's arrow folding it or opening it
     again; the command of the job in `focus` moved `shift` characters on. A command too long to show ends
-    in "…". A folded group's line has its share of each GPU where a command would be (see spread_over); an
-    open one's neither that nor its util, the lines beneath saying it better."""
+    in "…". An open group's line has no util, the lines beneath saying it better."""
     room = max(0, width - COMMAND_AT - 1)
     column, descending = sort
     head = []
@@ -2053,12 +2036,10 @@ def process_list(entries, width, rows, selected, focus, top, sort, shift=0):
     for stem, job, key, pids, folded in shown:
         chosen, means = set(pids) <= selected, job.pid if key is None else ("group", key)
         values = [stem if cell is None else cell(job) for _, _, cell, _ in COLUMNS]
-        if key is not None:
-            values[UTIL_AT] = values[UTIL_AT] if folded else []
-            values[-1] = spread_over(job.shares) if folded else []
-        else:
-            command = "…" + job.command[shift:] if job.pid == focus and shift else job.command
-            values[-1] = [(command if cells_of(command) <= room else cut(command, max(0, room - 1))[0] + "…", DIM)]
+        if key is not None and not folded:
+            values[UTIL_AT] = []
+        command = "…" + job.command[shift:] if job.pid == focus and shift else job.command
+        values[-1] = [(command if cells_of(command) <= room else cut(command, max(0, room - 1))[0] + "…", DIM)]
         lines.append(cells([[(seg[0], THEME.selected if chosen else seg[1], seg[2] if len(seg) > 2 else means)
                              for seg in column] for column in values], width, (THEME.selected if chosen else "", means)))
     if not entries:

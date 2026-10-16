@@ -1613,16 +1613,19 @@ def graph(history, width, height, two_tone=True):
 # The pointer over a graph (View.hover): a guide up the empty part of its column, and a chip with that moment.
 GUIDE = _rgb((150, 150, 150))
 CHIP = "\x1b[48;2;235;235;235m" + _rgb((24, 24, 27))
-COLOR_24 = re.compile(r"(\x1b\[[34]8;2;)(\d+);(\d+);(\d+)m")
 
 
 def lit(style):
     """`style` lit up, for the graph column under the pointer: its colors halfway to white; on PAPER, where
-    restyle turns lightness around, halfway to black."""
+    restyle turns lightness around, halfway to black. A palette color (bands, in 256 colors) too, by its
+    RGB: restyle turns the result back into the palette's nearest."""
     paper = ON_PAPER if style.startswith(ON_PAPER) else ""
     to = 0 if paper else 255
-    return paper + COLOR_24.sub(lambda m: m.group(1) + ";".join(
-        str((int(v) + to) // 2) for v in m.group(2, 3, 4)) + "m", style[len(paper):])
+
+    def lighter(m):
+        rgb = _palette_rgb(int(m.group(5))) if m.group(5) else map(int, m.group(2, 3, 4))
+        return "\x1b[{}8;2;{};{};{}m".format(m.group(1), *((v + to) // 2 for v in rgb))
+    return paper + COLOR_ARG.sub(lighter, style[len(paper):])
 
 
 def ago(seconds):

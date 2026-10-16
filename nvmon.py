@@ -1969,10 +1969,9 @@ def labelled(stem, name, style, count):
 
 
 def tree(jobs, folds, picked, sort):
-    """The list's lines, a tree: (tree cell, job, key, PIDs, folded), the key (owner,) or (owner, env) on a
-    group's line, whose job is then its total (see total), the PIDs its jobs', and whether it is folded; on a
-    job's or a worker's (see jobs) None, the job's PID, and None. A job with no environment hangs from its
-    account. The `jobs` come in the order of `sort` = (column, descending), as do the groups (see TOTALED).
+    """The list's lines, a tree: (tree cell, job, key, PIDs), the key (owner,) or (owner, env) on a group's
+    line, whose job is then its total (see total), and the PIDs its jobs'; on a job's or a worker's (see
+    jobs) None, and the job's PID. A job with no environment hangs from its account. The `jobs` come in the order of `sort` = (column, descending), as do the groups (see TOTALED).
     A folded group or job (see unfolded) shows its line only; its arrow folds it or opens it again (see
     process_list)."""
     column, descending = sort
@@ -1980,14 +1979,14 @@ def tree(jobs, folds, picked, sort):
     def job_lines(down, last, job):  # its line, the lines down to it `down`; open, its workers' beneath
         branch = "└" if last else "├"
         if not job.workers:
-            return [([(down + branch + "─ ", FAINT), (str(job.pid), DIM)], job, None, (job.pid,), None)]
+            return [([(down + branch + "─ ", FAINT), (str(job.pid), DIM)], job, None, (job.pid,))]
         key = (job.owner, job.env, job.pid)
         is_open, fold = unfolded(key, [job], folds, picked), ("fold", key)
         lines = [([(down + branch, FAINT, fold), (OPENED if is_open else FOLDED, DIM, fold), (str(job.pid), DIM)],
-                  job, None, (job.pid,), None)]
+                  job, None, (job.pid,))]
         below = down + ("  " if last else "│ ")
         return lines + [([(below + ("└─ " if i == len(job.workers) - 1 else "├─ "), FAINT),
-                          (str(worker.members[0][0]), DIM)], worker, None, (job.pid,), None)
+                          (str(worker.members[0][0]), DIM)], worker, None, (job.pid,))
                         for i, worker in enumerate(job.workers if is_open else [])]
 
     def ordered(groups, envs):  # [(name, jobs)], as their first jobs come
@@ -2004,7 +2003,7 @@ def tree(jobs, folds, picked, sort):
         style = (UNDERLINE if any(j.mine for j in held) else "") + BOLD
         arrow = (OPENED if is_open else FOLDED, DIM, ("fold", (owner,)))
         lines.append((labelled([arrow], owner or "-", style, len(held)), total(held), (owner,),
-                      tuple(j.pid for j in held), not is_open))
+                      tuple(j.pid for j in held)))
         children, envs = [], {}  # an environment's jobs together, a job of none on its own
         for j in held:
             if j.env in envs:
@@ -2020,15 +2019,11 @@ def tree(jobs, folds, picked, sort):
                 continue
             env_open, fold = unfolded((owner, env), js, folds, picked), ("fold", (owner, env))
             arrow = [(stem, FAINT, fold), (OPENED if env_open else FOLDED, DIM, fold)]
-            lines.append((labelled(arrow, env, "", len(js)), total(js, env), (owner, env), tuple(j.pid for j in js),
-                          not env_open))
+            lines.append((labelled(arrow, env, "", len(js)), total(js, env), (owner, env), tuple(j.pid for j in js)))
             down = "  " if k == len(children) - 1 else "│ "  # the account's line, on past this group or not
             for i, job in enumerate(js if env_open else []):
                 lines += job_lines(down, i == len(js) - 1, job)
     return lines
-
-
-UTIL_AT = [heading for heading, _, _, _ in COLUMNS].index(">util")
 
 
 def cells(values, width, fill=("",)):
@@ -2051,7 +2046,7 @@ def process_list(entries, width, rows, selected, focus, top, sort, shift=0):
     the `entries`, a tree (see tree), from index `top` on, how many more. A line means its jobs when
     clicked, a group's all of its, reversed when all are `selected`, a group's arrow folding it or opening it
     again; the command of the job in `focus` moved `shift` characters on. A command too long to show ends
-    in "…". An open group's line has no util, the lines beneath saying it better."""
+    in "…"."""
     room = max(0, width - COMMAND_AT - 1)
     column, descending = sort
     head = []
@@ -2062,11 +2057,9 @@ def process_list(entries, width, rows, selected, focus, top, sort, shift=0):
                       "" if name == column else DIM, ("sort", name))])
     lines = [cells(head, width)]
     shown = entries[top:top + rows - 2]
-    for stem, job, key, pids, folded in shown:
+    for stem, job, key, pids in shown:
         chosen, means = set(pids) <= selected, job.pid if key is None else ("group", key)
         values = [stem if cell is None else cell(job) for _, _, cell, _ in COLUMNS]
-        if key is not None and not folded:
-            values[UTIL_AT] = []
         command = "…" + job.command[shift:] if job.pid == focus and shift else job.command
         values[-1] = [(command if cells_of(command) <= room else cut(command, max(0, room - 1))[0] + "…", DIM)]
         lines.append(cells([[(seg[0], THEME.selected if chosen else seg[1], seg[2] if len(seg) > 2 else means)
@@ -2200,7 +2193,7 @@ class View:
         self.lines, self.jobs = [], []    # the last screen drawn, and the jobs on it
         self.entries = []                 # the list's lines, (tree cell, job, key, PIDs): see process_list
         self.group = None                 # the account or environment whose jobs are picked, by its line
-        self.folds = {}                   # (owner,) or (owner, env): open, as last clicked (see unfolded)
+        self.folds = {}                   # (owner,), (owner, env), (owner, env, PID): open, as last clicked
         self.gpu_top, self.gpu_page = 0, 1  # the first row of boxes shown, and how many rows fit
         self.list_rows = range(0)         # the screen rows the list takes, when it is open
         self.shift, self.shifted = 0, None  # how far the selected job's command is scrolled, and whose
@@ -2392,7 +2385,7 @@ class View:
         """The index in the list of the line picked by: the group's, else the job's in focus; or None."""
         return next((i for want in (lambda key, job: key == self.group is not None,
                                     lambda key, job: key is None and job.pid == self.job)
-                     for i, (_, job, key, _, _) in enumerate(self.entries) if want(key, job)), None)
+                     for i, (_, job, key, _) in enumerate(self.entries) if want(key, job)), None)
 
     def scrolled(self, room):
         """The list's first line, kept in range and, after the selection moved, on the line picked by."""
@@ -2600,7 +2593,7 @@ class View:
             same = 0 <= i < len(self.entries) and self.entries[i][2:4]
             while same and self.entries[j][2:4] == same and 0 <= j + (step > 0) * 2 - 1 < len(self.entries):
                 j += (step > 0) * 2 - 1
-            _, _, group, pids, _ = self.entries[j]
+            _, _, group, pids = self.entries[j]
             self.pick(pids, group)
             self.follow = True
         elif self.picked and key in ("f", "enter"):

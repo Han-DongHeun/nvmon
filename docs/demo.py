@@ -91,6 +91,7 @@ class Scripted(nvmon.Gpu):
     def __init__(self, index, kind, procs, hot=False, **shape):
         self.index, self.name = index, "H100 80GB HBM3"
         self.history, self.memory = deque(maxlen=nvmon.HISTORY), deque(maxlen=nvmon.HISTORY)
+        self.times = deque(maxlen=nvmon.HISTORY)
         self.sample = self.now = None
         self.pcie_max_gen, self.pcie_max_width, self.has_activity = 5, 16, True
         self.utils = kind(random.Random(index), **shape)

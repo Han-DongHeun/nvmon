@@ -395,6 +395,7 @@ class Gpu:
         self.name = name[len("NVIDIA "):] if name.startswith("NVIDIA ") else name
         self.history = deque(maxlen=HISTORY)  # utilization, one a frame: the graph
         self.memory = deque(maxlen=HISTORY)   # and the memory in use then (GiB), for the chip (View.hover)
+        self.times = deque(maxlen=HISTORY)    # and when (time.time()), as the interval may change meanwhile
         self.sample = None  # the newest reading, written by poll()
         self.now = None     # the reading on screen, taken from `sample` by frame()
         self.pcie_max_gen = self._uint("nvmlDeviceGetMaxPcieLinkGeneration")
@@ -595,6 +596,7 @@ class Gpu:
         self.now = self.sample
         self.history.append(self.now.util or 0)
         self.memory.append(self.now.mem_used)
+        self.times.append(time.time())
 
 
 class Poller(threading.Thread):
@@ -1206,7 +1208,7 @@ class AppleGpu(Gpu):
     def __init__(self, registry, index, entry):
         self.registry, self.index, self.entry = registry, index, entry
         self.name = registry.get(entry, "model") or "Apple GPU"  # "Apple M1"
-        self.history, self.memory = deque(maxlen=HISTORY), deque(maxlen=HISTORY)
+        self.history, self.memory, self.times = deque(maxlen=HISTORY), deque(maxlen=HISTORY), deque(maxlen=HISTORY)
         self.sample = self.now = None
         self.pcie_max_gen = self.pcie_max_width = None
         self.has_activity = False
@@ -1967,16 +1969,34 @@ def spread(width, left, right):
     return clip(pad(clip(left, room - 1), room) + right, width)
 
 
-def header(width, interval, driver, waiting=0):
-    """Top line: name, version, host, local time | driver (or how long it has kept us waiting), refresh."""
+def refresh(interval, lit):
+    """The top line's "refresh 0.5s", clickable; `lit`, with its - and + buttons."""
+    seconds = "{:g}s".format(interval)
+    if not lit:
+        return [("refresh ", DIM, ("refresh", 0)), (seconds, "", ("refresh", 0))]
+    return [("refresh ", DIM, ("refresh", 0)), (" - ", CHIP, ("refresh", -1)), (" " + seconds + " ", "", ("refresh", 0)),
+            (" + ", CHIP, ("refresh", 1))]
+
+
+def refresh_pointed(width, interval, pointer):
+    """Whether `pointer` is over the refresh of a top line `width` wide: anywhere the buttons would be."""
+    return pointer is not None and pointer[0] == 0 and pointer[1] >= width - width_of(refresh(interval, True))
+
+
+def header(width, interval, driver, waiting=0, pointer=None):
+    """Top line: name, version, host, local time | driver (or how long it has kept us waiting), refresh. With
+    the `pointer` over the refresh, its - and + buttons; the CUDA version makes room for them, whole. Where
+    the buttons are counts as over it, so that they stay while the pointer is on them."""
     now = time.time()
     stamp = time.strftime("%Y-%m-%d %a %H:%M:%S", time.localtime(now)) + ".{:02d}".format(int(now % 1 * 100))
     left = [("nvmon", BOLD), (" " + __version__, DIM), ("  " + socket.gethostname(), ""), ("  " + stamp, "")]
-    right = [("refresh ", DIM), ("{:g}s".format(interval), "")]
+    pointed = refresh_pointed(width, interval, pointer)
+    right = refresh(interval, pointed)
+    shown = driver.split("  ")[0] if pointed else driver  # "driver 580.173.02  CUDA 13.0"
     if waiting >= 1:  # the numbers below are that old: something is keeping the driver busy, or it hangs
         right = [("driver: no answer for {:.0f}s   ".format(waiting), WARN)] + right
-    elif driver and width_of(left) + 2 + len(driver) + 3 + width_of(right) <= width:  # dropped when narrow
-        right = [(driver + "   ", DIM)] + right
+    elif shown and width_of(left) + 2 + len(shown) + 3 + width_of(right) <= width:  # dropped when narrow
+        right = [(shown + "   ", DIM)] + right
     return spread(width, left, right)
 
 
@@ -2069,9 +2089,12 @@ class View:
         self.panels = []                  # (rows, columns, GPU index) where the boxes are on screen
         self.pointer = None               # (row, column) of the mouse pointer, as the terminal last said
         self.interval = DEFAULT_INTERVAL  # seconds from one graph column to the next
+        self.chosen = None                # the interval set with - and + (or last time), kept for the next run
 
     def restore(self, saved, indices):
         """Take up what an earlier run kept (Settings.load); of the GPUs `indices`, one always stays shown."""
+        self.chosen = saved.get("interval")
+        self.interval = self.chosen or self.interval
         self.left = saved.get("left", self.left)
         self.theme = next((kept for kept in THEMES if kept.name == saved.get("theme")), self.theme)
         self.sort = saved.get("sort", self.sort)
@@ -2080,7 +2103,14 @@ class View:
 
     def kept(self):
         """What is kept for the next run: see Settings."""
-        return {"left": self.left, "theme": self.theme.name, "sort": self.sort, "hidden": set(self.hidden)}
+        return {"left": self.left, "theme": self.theme.name, "sort": self.sort, "hidden": set(self.hidden),
+                "interval": self.chosen}
+
+    def retime(self, step):
+        """The interval a step (-1, +1) on (see stepped), kept for the next run; and a note on how else."""
+        self.interval = self.chosen = stepped(self.interval, step)
+        self.note = ([("refresh: {:g}s   ".format(self.interval), ""), ("- + keys, the wheel, or the buttons", DIM)],
+                     time.monotonic() + 3)
 
     def pick(self, pids):
         """Pick the jobs `pids`, in the list's order, the first in focus; none lets all go, and closes the
@@ -2191,7 +2221,7 @@ class View:
         gpu, rows, cols, col, back = hovered
         mem = gpu.memory[-1 - back]
         parts = ["{}%".format(gpu.history[-1 - back]), None if mem is None else "{:.1f}G".format(mem),
-                 ago(back * self.interval)]
+                 ago(gpu.times[-1] - gpu.times[-1 - back])]
         # As much as fits on the pointer's right, or else its left: all, without the memory, the utilization alone.
         chips = [" {} ".format(" · ".join(filter(None, shown))) for shown in (parts, parts[::2], parts[:1])]
         place = next(((chip, start) for chip in chips for start in (col + 2, col - 1 - len(chip))
@@ -2305,6 +2335,13 @@ class View:
         if kind == "move":
             self.pointer = value
             return True
+        if kind == "refresh":  # its - or + clicked
+            if value[0]:
+                self.retime(value[0])
+            return True
+        if kind == "wheel" and (self.target(*value[1:]) or ("",))[0] == "refresh":  # up: -, down: +
+            self.retime(value[0])
+            return True
         if kind in ("wheel", "hwheel"):  # over a GPU's processes, they scroll, either way;
             step, row, col = value     # over the list, the list, or the picked job's command sideways;
             area = next((index for rows, cols, index in self.areas  # anywhere else, the GPU boxes
@@ -2393,6 +2430,8 @@ class View:
             self.theme = THEMES[(THEMES.index(self.theme) + (-1 if value[0] == "C" else 1)) % len(THEMES)]
             shows = "" if self.shows == "truecolor" else ", in 256 colors: all this terminal shows"
             self.note = ([("theme: " + self.theme.name + shows, "")], time.monotonic() + 3)
+        elif key in ("-", "+", "=", "_"):  # = and _ being + and - without Shift
+            self.retime(1 if key in "+=" else -1)
         elif key.isdecimal() and int(key) in self.indices:  # not isdigit: ² is a digit, but no number
             self.handle(("gpu", int(key)))
         elif self.listing and key in ("s", "r"):  # the next column, or the other way round
@@ -2514,6 +2553,10 @@ class Settings:
             mine = self._read()[self.client]
             kept = {"left": mine["left"], "theme": mine["theme"], "sort": (mine["sort"][0], bool(mine["sort"][1])),
                     "hidden": set(map(int, mine["hidden"].get(host, [])))}
+            if mine.get("interval") is not None:
+                kept["interval"] = max(MIN_INTERVAL, float(mine["interval"]))
+                if not math.isfinite(kept["interval"]):
+                    raise ValueError(kept["interval"])
             return kept if kept["left"] in LEFTS and kept["sort"][0] in SORTS else {}
         except (KeyError, IndexError, TypeError, ValueError, AttributeError, OverflowError):  # Overflow: Infinity
             return {}
@@ -2532,6 +2575,8 @@ class Settings:
         hidden[host] = hidden.get(host, set()) - set(indices) | kept["hidden"]
         data[self.client] = {"left": kept["left"], "theme": kept["theme"], "sort": list(kept["sort"]),
                              "hidden": {name: sorted(gpus) for name, gpus in hidden.items() if gpus}}
+        if kept.get("interval") is not None:
+            data[self.client]["interval"] = kept["interval"]
         temp = "{}.{}".format(self.path, os.getpid())
         try:
             os.makedirs(os.path.dirname(self.path), exist_ok=True)
@@ -2797,6 +2842,15 @@ def gpu_list(spec):
 
 
 DEFAULT_INTERVAL, MIN_INTERVAL = 0.5, 0.1  # seconds
+# What - and + step through: tenths of a second up to 1, then halves up to 5, then seconds up to 10.
+STEPS = [i / 10 for i in range(1, 10)] + [1 + i / 2 for i in range(9)] + [6, 7, 8, 9, 10]
+
+
+def stepped(seconds, step):
+    """The interval one step (-1 or +1) from `seconds` along STEPS; one beyond them (-i 30) steps into them."""
+    if step > 0:
+        return next((s for s in STEPS if s > seconds + 1e-9), seconds)
+    return next((s for s in reversed(STEPS) if s < seconds - 1e-9), seconds)
 
 
 def interval(text):
@@ -2818,8 +2872,8 @@ def main():
                "off. Colors are 24-bit where the terminal says it shows them, else 256. The view, the theme, the "
                "list's order and hidden GPUs are kept for each computer you connect from, in "
                "~/.config/nvmon/settings.json. " + REPO)
-    parser.add_argument("-i", "--interval", type=interval, default=DEFAULT_INTERVAL, metavar="SEC",
-                        help="seconds between updates, at least 0.1 (default: 0.5)")
+    parser.add_argument("-i", "--interval", type=interval, metavar="SEC",
+                        help="seconds between updates, at least 0.1 (default: 0.5, or as last set with - and +)")
     parser.add_argument("-g", "--gpus", type=gpu_list, metavar="LIST",
                         help="only these GPUs, e.g. 0,2,4-7 (default: all)")
     parser.add_argument("-V", "--version", action="version", version="nvmon {} {}".format(__version__, REPO))
@@ -2849,7 +2903,7 @@ def main():
         host, settings, indices = socket.gethostname(), Settings(), [g.index for g in gpus]
         poller, view = Poller(gpus), View()
         view.restore(settings.load(host), indices)
-        view.interval = args.interval
+        view.interval = args.interval or view.interval  # -i for this run only: not kept
         kept = view.kept()
         with Screen() as screen:
             view.shows = color_mode(screen.truecolor)
@@ -2862,11 +2916,11 @@ def main():
                 if now >= frame_at:  # a new frame: the newest numbers, one more graph column each
                     for g in gpus:
                         g.frame()
-                    frame_at = max(frame_at + args.interval, now)  # a late frame restarts the schedule
+                    frame_at = max(frame_at + view.interval, now)  # a late frame restarts the schedule
                     # The polls for the next frame start ahead of it: half a tick, at most 0.5 s (a busy
                     # driver was seen to take 0.4 s). Should the driver answer later still, that frame keeps
                     # the last numbers but comes on time.
-                    poll_at, redraw = frame_at - min(args.interval / 2, 0.5), True
+                    poll_at, redraw = frame_at - min(view.interval / 2, 0.5), True
                 if poll_at is not None and now >= poll_at:
                     poller.refresh()
                     poll_at = None
@@ -2882,21 +2936,27 @@ def main():
                 if redraw or tuple(os.get_terminal_size()) != size:  # a window resized redraws too
                     width, height = size = tuple(os.get_terminal_size())
                     screen.draw(view.screen(gpus, width, height,
-                                            header(width, args.interval, driver, poller.waiting()), update.newer),
+                                            header(width, view.interval, driver, poller.waiting(), view.pointer),
+                                            update.newer),
                                 view.shows, view.theme.gray, size)
                 # Keys and clicks redraw at once, the pointer when it goes to another graph column; the
                 # numbers move on at the next frame. A quarter second at most, to see a resized window soon
                 # with a long interval too.
                 wait = 0.01 if peek is not None else (poll_at or frame_at) - time.monotonic()
                 events = screen.read(min(wait, 0.25))
-                pointed = view.pointed()
+                pointed, before = view.pointed(), view.interval
+                was_lit = refresh_pointed(size[0], view.interval, view.pointer)
                 going = all(map(view.handle, events))
+                if view.interval != before:  # sooner: the next frame at the new interval from now, at the latest
+                    frame_at = min(frame_at, time.monotonic() + view.interval)
+                    poll_at = None if poll_at is None else min(poll_at, frame_at)
                 if view.kept() != kept:  # a setting changed: keep it for next time
                     kept = view.kept()
                     settings.save(kept, indices, host)
                 if not going:
                     break
-                redraw = any(e[0] != "move" for e in events) or view.pointed() != pointed
+                lit = refresh_pointed(size[0], view.interval, view.pointer)  # the buttons come and go with it
+                redraw = any(e[0] != "move" for e in events) or view.pointed() != pointed or lit != was_lit
                 detail = view.detail(gpus)
                 if detail - poller.detail:  # at the latest the next round, or the one after the round running
                     busy = not poller.done.is_set()

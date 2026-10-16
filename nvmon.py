@@ -1904,8 +1904,8 @@ def render(gpus, width, height, shape, selected=frozenset(), left="graph", scrol
 # the tree's, see tree), and the key it sorts by. "command" takes whatever width is left.
 COLUMNS = [
     ("account/env", 24, None, account),  # headed "account / env / PID": the accounts, their environments, PIDs
-    ("process", 22, lambda j: [(j.name + ("  {} workers".format(len(j.members)) if len(j.members) > 1 else ""),
-                                THEME.accent)], lambda j: j.name.lower()),
+    ("process", 22, lambda j: [(j.name, THEME.accent)] + [(" · {} workers".format(len(j.members)), DIM)] * (
+        len(j.members) > 1), lambda j: j.name.lower()),
     ("GPUs", 8, lambda j: [(ranges(j.gpus), "")], lambda j: j.gpus),
     (">util", 5, lambda j: share(j.util, 100), lambda j: -1 if j.util is None else j.util),
     (">memory", 7, lambda j: [("-" if j.mem is None else "{:.1f}G".format(j.mem), "")],

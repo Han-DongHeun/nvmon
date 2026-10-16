@@ -1799,23 +1799,20 @@ def memory(process):
 def process_label(processes, room, selected=frozenset()):
     """The processes (process_entries) on one line: "migi: train.py 2h13m 15.1G · eval.py 5m 0.5G   kim/torch:
     a.py 1d4h 9.0G". As many whole entries as fit in `room` cells, then "+N" for the rest."""
-    entries, last = [], None
-    for tag, process in process_entries(processes):
-        gap = [] if not entries else [(" · ", DIM)] if tag == last else [("   ", "")]
-        details = " ".join(part for part in (run_time(process), memory(process)) if part != "-")
-        entries.append(gap + (tagged(process) + [(": ", DIM)] if tag and tag != last else [])
-                       + [process_name(process, selected)] + ([(" " + details, DIM, process.job)] if details else []))
-        last = tag
-
     def more(n):
         return [("  +{}".format(n), DIM)] if n else []
-    label = []
-    for i, entry in enumerate(entries):
+    entries, label, last = process_entries(processes), [], None
+    for i, (tag, process) in enumerate(entries):
+        gap = [] if not label else [(" · ", DIM)] if tag == last else [("   ", "")]
+        details = " ".join(part for part in (run_time(process), memory(process)) if part != "-")
+        entry = (gap + (tagged(process) + [(": ", DIM)] if tag and tag != last else [])
+                 + [process_name(process, selected)] + ([(" " + details, DIM, process.job)] if details else []))
         rest = len(entries) - i - 1
         if width_of(label + entry + more(rest)) > room:
             # The first entry is always shown, cut if need be; later ones collapse into the count.
             return clip(entry, room - width_of(more(rest))) + more(rest) if not label else label + more(rest + 1)
         label += entry
+        last = tag
     return label
 
 
@@ -2634,7 +2631,7 @@ ASCII = str.maketrans({"─": "-", "│": "|", "├": "+", "┤": "+", "╭": "+
                        "└": "+", "▶": ">"})
 # Control characters, which would act on the terminal rather than show: anyone's command line can carry them
 # (ESC, BEL, a new line), and with them clear the screens of all who watch, or set their window titles. A "?"
-# each, a cell, as they are counted.
+# each, a cell, as they are counted. Printable text (str.isprintable, quick) has none: nvmon's own goes as it is.
 SHOWN = {code: "?" for code in itertools.chain(range(0x20), range(0x7f, 0xa0))}
 ASCII.update(SHOWN)
 
@@ -2645,7 +2642,8 @@ def paint(line, mode="truecolor", ascii=False, gray=False):
     changes."""
     out, current = [], ""
     for text, style, *_ in line:
-        text = text.translate(ASCII if ascii else SHOWN)
+        if ascii or not text.isprintable():
+            text = text.translate(ASCII if ascii else SHOWN)
         if mode != "truecolor" or gray:
             style = restyle(style, mode, gray)
         if style != current:

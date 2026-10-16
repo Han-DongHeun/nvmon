@@ -1973,23 +1973,23 @@ REFRESH = (("refresh", -1), ("refresh", 0), ("refresh", 1))  # what clicks on th
 
 
 def refresh(interval, lit):
-    """The top line's "refresh 0.5s", clickable, with room on either side of the number for its - and +
-    buttons, drawn there when `lit`: nothing moves as they come and go. The number takes four cells, 0.5s
-    as 1s and 10s, so that nothing moves as it changes either."""
-    blank = ("   ", "", ("refresh", 0))
-    minus, plus = ((" - ", CHIP, ("refresh", -1)), (" + ", CHIP, ("refresh", 1))) if lit else (blank, blank)
-    return [("refresh", DIM, ("refresh", 0)), minus, ("{:>4}".format("{:g}s".format(interval)), "", ("refresh", 0)),
-            plus]
+    """The top line's "refresh 0.5s", clickable; `lit`, its - and + buttons in place of the word. The number
+    takes four cells either way (1s as 0.5s), so that nothing moves as the buttons come and go, or as it
+    changes."""
+    seconds = "{:g}s".format(interval)
+    if not lit:
+        return [("refresh ", DIM, REFRESH[1]), ("{:<4}".format(seconds), "", REFRESH[1])]
+    return [(" - ", CHIP, REFRESH[0]), (" {:>4} ".format(seconds), "", REFRESH[1]), (" + ", CHIP, REFRESH[2])]
 
 
 def refresh_pointed(width, interval, pointer):
-    """Whether `pointer` is over the refresh of a top line `width` wide, its buttons' room included."""
+    """Whether `pointer` is over the refresh of a top line `width` wide, where its buttons are drawn."""
     return pointer is not None and pointer[0] == 0 and pointer[1] >= width - width_of(refresh(interval, True))
 
 
 def header(width, interval, driver, waiting=0, pointer=None):
     """Top line: name, version, host, local time | driver (or how long it has kept us waiting), refresh. With
-    the `pointer` over the refresh, its - and + buttons, in room kept for them (see refresh)."""
+    the `pointer` over the refresh, its - and + buttons in its place (see refresh)."""
     now = time.time()
     stamp = time.strftime("%Y-%m-%d %a %H:%M:%S", time.localtime(now)) + ".{:02d}".format(int(now % 1 * 100))
     left = [("nvmon", BOLD), (" " + __version__, DIM), ("  " + socket.gethostname(), ""), ("  " + stamp, "")]

@@ -1294,6 +1294,7 @@ class Job(NamedTuple):
     members: tuple                # (pid, start time) of its GPU processes
     gpus: tuple                   # the GPUs it uses
     util: Optional[float]         # % of the time its kernels ran, over its GPUs; None when unknown
+    shares: tuple                 # (GPU, that %) for each of its GPUs where known
     mem: Optional[float]          # GiB, on all of them; None where the driver does not tell
     started: Optional[float]
     owner: Optional[str]
@@ -1323,7 +1324,7 @@ def jobs(gpus):
         launcher = next((p.launcher for p in procs if p.launcher), None)
         found.append(Job(pid, main.name, launcher, tuple(sorted({p.pid: p.started for p in procs}.items())),
                          tuple(sorted({gpu.index for gpu, _ in entries})),
-                         sum(shares.values()) / len(shares) if shares else None,
+                         sum(shares.values()) / len(shares) if shares else None, tuple(sorted(shares.items())),
                          None if all(p.mem is None for p in procs) else sum(p.mem or 0 for p in procs),
                          min(starts) if starts else None, main.owner, main.mine, main.env, main.command))
     return sorted(found, key=lambda job: (job.gpus, job.pid))
@@ -1931,12 +1932,15 @@ def unfolded(key, held, folds, picked):
 
 
 def total(jobs, env=None):
-    """The jobs as one, for a line of the tree: the GPUs they use, their mean utilization, the memory they
-    take, the longest run time."""
-    utils = [j.util for j in jobs if j.util is not None]
+    """The jobs as one, for a line of the tree, as a job's own processes make one (see jobs): the GPUs they
+    use, their share of each, summed, and its mean over them; the memory they take, the longest run time."""
+    shares = {}
+    for job in jobs:
+        for index, share in job.shares:
+            shares[index] = shares.get(index, 0) + share
     starts = [j.started for j in jobs if j.started is not None]
     return Job(None, "", None, (), tuple(sorted({i for j in jobs for i in j.gpus})),
-               sum(utils) / len(utils) if utils else None,
+               sum(shares.values()) / len(shares) if shares else None, tuple(sorted(shares.items())),
                None if all(j.mem is None for j in jobs) else sum(j.mem or 0 for j in jobs),
                min(starts) if starts else None, jobs[0].owner, any(j.mine for j in jobs), env, "")
 
@@ -1950,9 +1954,9 @@ def labelled(stem, name, style, count):
 
 
 def tree(jobs, folds, picked, sort):
-    """The list's lines, a tree: (tree cell, job, key, PIDs), the key (owner,) or (owner, env) on a group's
-    line, whose job is then its total (see total), and the PIDs its jobs'; on a job's None, and its own. A
-    job with no environment hangs from its account. The `jobs` come in the order of `sort` = (column,
+    """The list's lines, a tree: (tree cell, job, key, PIDs, folded), the key (owner,) or (owner, env) on a
+    group's line, whose job is then its total (see total), the PIDs its jobs', and whether it is folded; on a
+    job's None, its own, and None. A job with no environment hangs from its account. The `jobs` come in the order of `sort` = (column,
     descending), as do the groups (see TOTALED). A folded group (see unfolded) shows its line only; its
     arrow folds it or opens it again (see process_list)."""
     column, descending = sort
@@ -1971,7 +1975,7 @@ def tree(jobs, folds, picked, sort):
         style = (UNDERLINE if any(j.mine for j in held) else "") + BOLD
         arrow = (OPENED if is_open else FOLDED, DIM, ("fold", (owner,)))
         lines.append((labelled([arrow], owner or "-", style, len(held)), total(held), (owner,),
-                      tuple(j.pid for j in held)))
+                      tuple(j.pid for j in held), not is_open))
         children, envs = [], {}  # an environment's jobs together, a job of none on its own
         for j in held:
             if j.env in envs:
@@ -1983,15 +1987,35 @@ def tree(jobs, folds, picked, sort):
         for k, (env, js) in enumerate(children if is_open else []):
             stem = "└─" if k == len(children) - 1 else "├─"
             if env is None:
-                lines.append(([(stem, FAINT), (" " + str(js[0].pid), DIM)], js[0], None, (js[0].pid,)))
+                lines.append(([(stem, FAINT), (" " + str(js[0].pid), DIM)], js[0], None, (js[0].pid,), None))
                 continue
             env_open, fold = unfolded((owner, env), js, folds, picked), ("fold", (owner, env))
             arrow = [(stem, FAINT, fold), (OPENED if env_open else FOLDED, DIM, fold)]
-            lines.append((labelled(arrow, env, "", len(js)), total(js, env), (owner, env), tuple(j.pid for j in js)))
+            lines.append((labelled(arrow, env, "", len(js)), total(js, env), (owner, env), tuple(j.pid for j in js),
+                          not env_open))
             down = "  " if k == len(children) - 1 else "│ "  # the account's line, on past this group or not
             lines += [([(down + ("└─ " if i == len(js) - 1 else "├─ "), FAINT), (str(job.pid), DIM)], job, None,
-                       (job.pid,)) for i, job in enumerate(js if env_open else [])]
+                       (job.pid,), None) for i, job in enumerate(js if env_open else [])]
     return lines
+
+
+UTIL_AT = [heading for heading, _, _, _ in COLUMNS].index(">util")
+
+
+def faded(t):
+    """heat(t) halfway to gray: a number that is there, but quiet."""
+    r, g, b = (round(0.45 * int(c) + 0.55 * 120) for c in COLOR_24.match(heat(t)).groups()[1:])
+    return _rgb((r, g, b))
+
+
+def spread_over(shares):
+    """A group's share of each of its GPUs, "0▆ 96%  1▂ 26%", in quiet colors (see faded)."""
+    out = []
+    for index, share in shares:
+        t = share / 100
+        out += [("  ", "")] * bool(out) + [(str(index), ""), (BLOCKS[min(8, max(1, math.ceil(8 * t)))], faded(t)),
+                                           ("{:>4}".format("{:.0f}%".format(share)), faded(t))]
+    return out
 
 
 def cells(values, width, fill=("",)):
@@ -2014,7 +2038,8 @@ def process_list(entries, width, rows, selected, focus, top, sort, shift=0):
     the `entries`, a tree (see tree), from index `top` on, how many more. A line means its jobs when
     clicked, a group's all of its, reversed when all are `selected`, a group's arrow folding it or opening it
     again; the command of the job in `focus` moved `shift` characters on. A command too long to show ends
-    in "…"."""
+    in "…". A folded group's line has its share of each GPU where a command would be (see spread_over); an
+    open one's neither that nor its util, the lines beneath saying it better."""
     room = max(0, width - COMMAND_AT - 1)
     column, descending = sort
     head = []
@@ -2025,11 +2050,15 @@ def process_list(entries, width, rows, selected, focus, top, sort, shift=0):
                       "" if name == column else DIM, ("sort", name))])
     lines = [cells(head, width)]
     shown = entries[top:top + rows - 2]
-    for stem, job, key, pids in shown:
+    for stem, job, key, pids, folded in shown:
         chosen, means = set(pids) <= selected, job.pid if key is None else ("group", key)
         values = [stem if cell is None else cell(job) for _, _, cell, _ in COLUMNS]
-        command = "…" + job.command[shift:] if job.pid == focus and shift else job.command
-        values[-1] = [(command if cells_of(command) <= room else cut(command, max(0, room - 1))[0] + "…", DIM)]
+        if key is not None:
+            values[UTIL_AT] = values[UTIL_AT] if folded else []
+            values[-1] = spread_over(job.shares) if folded else []
+        else:
+            command = "…" + job.command[shift:] if job.pid == focus and shift else job.command
+            values[-1] = [(command if cells_of(command) <= room else cut(command, max(0, room - 1))[0] + "…", DIM)]
         lines.append(cells([[(seg[0], THEME.selected if chosen else seg[1], seg[2] if len(seg) > 2 else means)
                              for seg in column] for column in values], width, (THEME.selected if chosen else "", means)))
     if not entries:
@@ -2353,7 +2382,7 @@ class View:
         """The index in the list of the line picked by: the group's, else the job's in focus; or None."""
         return next((i for want in (lambda key, job: key == self.group is not None,
                                     lambda key, job: key is None and job.pid == self.job)
-                     for i, (_, job, key, _) in enumerate(self.entries) if want(key, job)), None)
+                     for i, (_, job, key, _, _) in enumerate(self.entries) if want(key, job)), None)
 
     def scrolled(self, room):
         """The list's first line, kept in range and, after the selection moved, on the line picked by."""
@@ -2557,7 +2586,7 @@ class View:
         elif key in MOVES and self.entries:  # the lines, a group's among them, picking all its jobs
             i = self.at()
             i = (-1 if MOVES[key] > 0 else len(self.entries)) if i is None else i
-            _, _, group, pids = self.entries[min(max(i + MOVES[key], 0), len(self.entries) - 1)]
+            _, _, group, pids, _ = self.entries[min(max(i + MOVES[key], 0), len(self.entries) - 1)]
             self.pick(pids, group)
             self.follow = True
         elif self.picked and key in ("f", "enter"):

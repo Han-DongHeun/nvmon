@@ -1333,7 +1333,7 @@ class AppleGpu(Gpu):
             mem_used=None if used is None else used / 2**30, mem_total=self._total, tx=None, rx=None,
             pcie_width=None, cores=None, tensor=None, slowdown=None,
             processes=[Process(pid, *self._facts[pid][:2], None, *self._facts[pid][2:]) for pid in listed],
-            process_util={pid: shares.get(pid, 0) for pid in listed},
+            process_util={pid: min(100, shares.get(pid, 0)) for pid in listed},  # its connections may overlap
             renderer=stats.get("Renderer Utilization %"), tiler=stats.get("Tiler Utilization %"))
 
 
@@ -1395,12 +1395,14 @@ def jobs(gpus):
         procs = [p for _, p in entries]
         main = max(procs, key=lambda p: p.mem or 0)
         starts = [p.started for p in procs if p.started is not None]
-        # Its share of each of its GPUs, averaged: a DDP job reads like one of its GPUs. And each process's.
+        # Its share of each of its GPUs, averaged: a DDP job reads like one of its GPUs. And each process's. The
+        # driver measures each process on its own, so that its processes on one GPU may add up past 100 %:
+        # the GPU's share is that at most.
         shares, each = {}, {}
         for gpu, p in entries:
             share = None if gpu.now.process_util is None else gpu.now.process_util.get(p.pid, 0)
             if share is not None:
-                shares[gpu.index] = shares.get(gpu.index, 0) + share
+                shares[gpu.index] = min(100, shares.get(gpu.index, 0) + share)
             each.setdefault(p.pid, []).append((gpu.index, p, share))
         # The launcher's name from any of them: a launcher on a GPU itself has none of its own. The members by
         # PID, once each though seen on several GPUs, which may have read it at different times.
@@ -2025,11 +2027,12 @@ def unfolded(key, held, folds, picked):
 
 def total(jobs, env=None):
     """The jobs as one, for a line of the tree, as a job's own processes make one (see jobs): the GPUs they
-    use, their share of each, summed, and its mean over them; the memory they take, the longest run time."""
+    use, their share of each, summed (100 % at most, as a job's), and its mean over them; the memory they
+    take, the longest run time."""
     shares = {}
     for job in jobs:
         for index, share in job.shares:
-            shares[index] = shares.get(index, 0) + share
+            shares[index] = min(100, shares.get(index, 0) + share)
     starts = [j.started for j in jobs if j.started is not None]
     return Job(None, "", None, (), tuple(sorted({i for j in jobs for i in j.gpus})),
                sum(shares.values()) / len(shares) if shares else None, tuple(sorted(shares.items())),

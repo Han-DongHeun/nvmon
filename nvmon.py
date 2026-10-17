@@ -401,6 +401,7 @@ class Gpu:
         self.pcie_max_gen = self._uint("nvmlDeviceGetMaxPcieLinkGeneration")
         self.pcie_max_width = self._uint("nvmlDeviceGetMaxPcieLinkWidth")
         self._gpm = self._gpm_samples()
+        self._gpm_at, self._kept = time.monotonic(), (None,) * len(GPM_METRICS)  # the baseline's time; see _activity
         self.has_activity = self._gpm is not None
         self._facts = {}  # pid -> what _facts_of says: fixed for a process's life, so read once
         self._listed, self._listed_mem = [], None  # process list, and the memory in use when it was read
@@ -457,21 +458,27 @@ class Gpu:
         return samples  # [previous, current], kept for the whole run
 
     def _activity(self):
-        """GPM_METRICS values between this poll and the previous one (Nones without GPM)."""
-        none = (None,) * len(GPM_METRICS)
-        if self._gpm is None or not self._ok("nvmlGpmSampleGet", self._gpm[1]):
-            return none
+        """GPM_METRICS values between this poll and the previous one (Nones without GPM). Two samples less than
+        MIN_INTERVAL apart read 0 however busy the GPU, as its counters move about every 0.1 s: a poll that soon
+        after the last sample (the first poll, a round more after a click) gets the values last read, Nones
+        before any."""
+        if self._gpm is None or time.monotonic() - self._gpm_at < MIN_INTERVAL:
+            return self._kept
+        self._kept = (None,) * len(GPM_METRICS)
+        if not self._ok("nvmlGpmSampleGet", self._gpm[1]):
+            return self._kept
+        self._gpm_at = time.monotonic()
         previous, current = self._gpm
         self._gpm.reverse()  # this sample is the baseline for the next poll
         query = GpmMetricsGet(version=1, numMetrics=len(GPM_METRICS), sample1=previous, sample2=current)
         for metric, metric_id in zip(query.metrics, GPM_METRICS):
             metric.metricId = metric_id
-        if self.nv.nvmlGpmMetricsGet(byref(query)) != NVML_SUCCESS:
-            return none
-        return tuple(None if m.nvmlReturn != NVML_SUCCESS else m.value for m in query.metrics)
+        if self.nv.nvmlGpmMetricsGet(byref(query)) == NVML_SUCCESS:
+            self._kept = tuple(None if m.nvmlReturn != NVML_SUCCESS else m.value for m in query.metrics)
+        return self._kept
 
     def _pcie(self, counter):
-        """PCIe bytes/s; this query samples a counter for 20 ms, so it is only a fallback for GPM."""
+        """PCIe bytes/s; this query samples a counter for 20 ms, so it is asked only of a GPU without GPM."""
         kb = self._uint("nvmlDeviceGetPcieThroughput", counter)
         return None if kb is None else kb * 1024
 
@@ -584,8 +591,8 @@ class Gpu:
             clock=self._uint("nvmlDeviceGetClockInfo", NVML_CLOCK_GRAPHICS),
             mem_used=None if used is None else used / 2**30,
             mem_total=None if total is None else total / 2**30,
-            tx=self._pcie(NVML_PCIE_UTIL_TX_BYTES) if gpm_tx is None else gpm_tx * 2**20,
-            rx=self._pcie(NVML_PCIE_UTIL_RX_BYTES) if gpm_rx is None else gpm_rx * 2**20,
+            tx=self._pcie(NVML_PCIE_UTIL_TX_BYTES) if self._gpm is None else gpm_tx and gpm_tx * 2**20,
+            rx=self._pcie(NVML_PCIE_UTIL_RX_BYTES) if self._gpm is None else gpm_rx and gpm_rx * 2**20,
             pcie_width=self._uint("nvmlDeviceGetCurrPcieLinkWidth"),
             cores=cores,
             tensor=tensor,

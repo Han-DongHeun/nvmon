@@ -2117,7 +2117,9 @@ def header(width, interval, driver, waiting=0, pointer=None):
 # Keys by what the terminal sends: a control character, or how an escape sequence ends ("ESC [ A" is up).
 # Apart, so that a typed "C" is a C, not the right arrow.
 CONTROL_KEYS = {"\r": "enter", "\n": "enter", "\t": "tab", "\x1b": "esc",
-                "\x03": "q"}  # Ctrl+C, a key on Windows (raw_keys); elsewhere the terminal makes it a signal
+                "\x03": "q",         # Ctrl+C, a key on Windows (raw_keys); elsewhere the terminal makes it a signal
+                "\x1a": "suspend",   # Ctrl+Z, a key everywhere (raw_keys): see Screen.suspend
+                "\x0c": "redraw"}    # Ctrl+L: every line anew, over whatever else wrote to the terminal
 SEQUENCE_KEYS = {"A": "up", "B": "down", "C": "right", "D": "left", "H": "home", "F": "end", "Z": "backtab",
                  "1~": "home", "4~": "end", "5~": "pgup", "6~": "pgdn"}
 HINT_KEYS = {"Esc": "esc", "Esc / q": "q"}  # what clicking a key hint presses
@@ -2224,8 +2226,11 @@ class View:
                 "interval": self.chosen}
 
     def retime(self, step):
-        """The interval a step (-1, +1) on (see stepped), kept for the next run; and a note on how else."""
-        self.interval = self.chosen = stepped(self.interval, step)
+        """The interval a step (-1, +1) on (see stepped), kept for the next run if it moved (at either end of
+        the steps, -i stays this run's only); and a note on how else."""
+        new = stepped(self.interval, step)
+        if new != self.interval:
+            self.interval = self.chosen = new
         self.note = ([("refresh: {:g}s   ".format(self.interval), ""), ("- + keys, the wheel, or the buttons", DIM)],
                      time.monotonic() + 3)
 
@@ -2273,7 +2278,8 @@ class View:
             self.shift = min(self.shift, wide + 1 - room) if wide > room else 0  # in cells, up to its end
             body += process_list(self.entries, width, rows, self.picked, self.job, self.scrolled(rows - 2),
                                  self.sort, self.shift)
-        self.lines = self.hover([top_line] + body + [self.bottom_line(width, picked, newer, gpus)])
+        # A window one line high: the bottom line alone, with its questions and keys.
+        self.lines = self.hover([top_line] + body + [self.bottom_line(width, picked, newer, gpus)])[-height:]
         return self.lines
 
     def boxes(self, gpus, width, height):
@@ -2327,9 +2333,9 @@ class View:
         return None
 
     def pointed(self):
-        """(GPU index, column) of the graph column under the pointer, or None: what the chip is about."""
-        hovered = self.hovered()
-        return hovered and (hovered[0].index, hovered[3])
+        """The pointer's (row, column) while it is over a graph column with a sample, else None: where the
+        chip is, and what about."""
+        return self.pointer if self.hovered() else None
 
     def hover(self, lines):
         """`lines` with the column under the pointer lit up, and beside the pointer a chip with that moment:
@@ -2380,6 +2386,13 @@ class View:
         if not living or time.monotonic() - when > 5:
             self.sent = None
 
+    def expired(self):
+        """Whether the note has just run out: it goes, and the bottom line is as before it."""
+        if self.note and time.monotonic() >= self.note[1]:
+            self.note = None
+            return True
+        return False
+
     def held(self, key):
         """The jobs of the account, environment or job `key`: (owner,), (owner, env) or (owner, env, PID)."""
         return [job for job in self.jobs if (job.owner, job.env, job.pid)[:len(key)] == key]
@@ -2414,7 +2427,8 @@ class View:
     def bottom_line(self, width, picked, newer, gpus):
         if self.asking:
             return spread(width, [(self.question(picked), WARN)], keys(("y", "yes"), ("n", "no")))
-        note = self.note[0] if self.note and time.monotonic() < self.note[1] else None
+        self.expired()
+        note = self.note and self.note[0]
         if picked:
             hints = [("f", "all GPUs" if self.only else "only these GPUs")]
             if any(job.mine for job in picked):
@@ -2753,12 +2767,13 @@ class Settings:
 INPUT = re.compile(rb"\x1b\[<(?P<button>\d+);(?P<x>\d+);(?P<y>\d+)(?P<act>[Mm])"  # mouse, SGR encoding
                    rb"|\x1b\[M(?P<old>...)"                                     # mouse, the old encoding
                    rb"|\x1b[\[O](?P<args>[?>0-9;]*)(?P<end>[A-Za-z~])"           # arrows, Home, PgUp and such
-                   rb"|(?P<report>\x1bP[^\x1b]*\x1b\\)"                           # a late answer to Screen.probe
+                   rb"|(?P<skip>\x1bP[^\x1b]*\x1b\\"                             # no key: a late answer to Screen.probe
+                   rb"|\x1b\[\[[A-E])"                                           # or F1-F5 of the Linux console
                    rb"|(?P<text>[\xc2-\xf4][\x80-\xbf]+)"                          # a letter beyond ASCII, as UTF-8
                    rb"|(?P<char>.)", re.DOTALL)                                 # any other key; a lone ESC is Esc
 # What INPUT would take for keys if the rest of it were there: input that ends in the start of an escape
 # sequence, or of a letter's UTF-8 (see Screen.read).
-CUT = re.compile(rb"\x1b(?:\[[<?>0-9;]*|\[M.{0,2}|O|P[^\x1b]*\x1b?)?\Z"
+CUT = re.compile(rb"\x1b(?:\[\[|\[[<?>0-9;]*|\[M.{0,2}|O|P[^\x1b]*\x1b?)?\Z"
                  rb"|(?:[\xc2-\xdf]|[\xe0-\xef][\x80-\xbf]?|[\xf0-\xf4][\x80-\xbf]{0,2})\Z", re.DOTALL)
 
 
@@ -2782,7 +2797,7 @@ def events(data):
                 out.append(("move", y - 1, x - 1))
             elif press and button & ~(4 | 8 | 16) == 0:  # left button down, Shift, Alt or Ctrl held at most
                 out.append(("click", y - 1, x - 1))
-        elif m.group("report"):
+        elif m.group("skip"):
             continue
         elif m.group("end"):
             args, end = m.group("args").decode(), m.group("end").decode()
@@ -2809,34 +2824,41 @@ TRUECOLOR_ANSWERS = re.compile(
     # DA2: xterm.js (Tabby, VS Code; it answers DECRQSS with 0m whatever is set), Windows Terminal and
     # Alacritty, Konsole, VTE, kitty, WezTerm, iTerm2, tmux
     rb"|\x1b\[>(?:0;276;0|0;\d+;1|[01];115;0|6[15];\d+;1|1;4\d{3};\d+|1;277;0|64;2500;0|84;0;0)c")
+DA1_ANSWER = re.compile(rb"\x1b\[\?[0-9;]*c")  # what a terminal answers to "\x1b[c": DA1, primary attributes
 
 
 class Screen:
     """Alternate screen, hidden cursor, no auto-wrap, unbuffered keys, mouse clicks, wheel and moves; all
-    restored on exit."""
+    restored on exit, and while Ctrl+Z has nvmon stopped."""
 
     def __enter__(self):
         self._keys = self._mouse = sys.stdin.isatty()  # keys stop if stdin closes; the mouse goes off on exit
         self._restore = [enable_vt(), raw_keys() if self._keys else (lambda: None)]
-        self._painted, self._size = [], None  # the lines last sent, and the window they were sent to
-        # 1000 + 1003 + 1006: clicks, the wheel and every move of the pointer come in as SGR-encoded sequences
-        # (Shift+drag still selects text). A terminal without 1003 sends clicks and the wheel all the same.
-        self._write("\x1b[?1049h\x1b[?25l\x1b[?7l" + ("\x1b[?1000h\x1b[?1003h\x1b[?1006h" if self._mouse else ""))
+        self._fence = False  # whether the terminal answers DA1, see __exit__
+        self._open()
         # Windows Terminal and the console of Windows 10 on show 24-bit color and draw lines one cell wide;
         # not asked there, as the console would answer nothing on color, and so get 256 colors.
         try:
-            self.wide, self.truecolor = self.probe() if self._keys and os.name != "nt" else (False, os.name == "nt")
+            self.wide, self.truecolor, self._fence = (self.probe() if self._keys and os.name != "nt"
+                                                      else (False, os.name == "nt", False))
         except BaseException:  # Ctrl+C while waiting for the answers: the terminal as it was all the same
             self.__exit__()
             raise
         return self
 
+    def _open(self):
+        """The terminal as nvmon has it; the next draw sends every line."""
+        self._painted, self._size = [], None  # the lines last sent, and the window they were sent to
+        # 1000 + 1003 + 1006: clicks, the wheel and every move of the pointer come in as SGR-encoded sequences
+        # (Shift+drag still selects text). A terminal without 1003 sends clicks and the wheel all the same.
+        self._write("\x1b[?1049h\x1b[?25l\x1b[?7l" + ("\x1b[?1000h\x1b[?1003h\x1b[?1006h" if self._mouse else ""))
+
     def probe(self):
-        """(wide, truecolor), as the terminal answers: whether it draws a line character two cells wide, and
-        whether it shows 24-bit color (TRUECOLOR_ANSWERS). Every terminal answers the last question, DA1, so
-        that answer ends the wait, a round trip even over ssh; the answer on the color was seen to come after
-        it (Windows Terminal over Windows's ssh), so for that a quarter second more. No answer within a second
-        means neither."""
+        """(wide, truecolor, fence), as the terminal answers: whether it draws a line character two cells wide,
+        whether it shows 24-bit color (TRUECOLOR_ANSWERS), whether it answered DA1 (see __exit__). Every
+        terminal answers the last question, DA1, so that answer ends the wait, a round trip even over ssh; the
+        answer on the color was seen to come after it (Windows Terminal over Windows's ssh), so for that a
+        quarter second more. No answer within a second means none."""
         self._write("\x1b[H─\x1b[6n"                  # where the cursor is after one line character
                     "\x1b[>c\x1b[>0q"                 # DA2 and XTVERSION: which terminal this is
                     "\x1bP+q524742;5463\x1b\\"        # XTGETTCAP: whether its terminfo has RGB or Tc
@@ -2845,7 +2867,7 @@ class Screen:
         data, end = b"", time.monotonic() + 1
         answered = False  # DA1 is in
         while True:
-            if not answered and re.search(rb"\x1b\[\?[0-9;]*c", data):
+            if not answered and DA1_ANSWER.search(data):
                 answered, end = True, min(end, time.monotonic() + 0.25)  # a quarter second more for DECRQSS
             if answered and re.search(rb"\x1bP[01]\$r[^\x1b]*\x1b\\", data):
                 break
@@ -2855,16 +2877,39 @@ class Screen:
                 break
             data += more
         cursor = re.search(rb"\x1b\[\d+;(\d+)R", data)
-        return bool(cursor) and int(cursor.group(1)) > 2, bool(TRUECOLOR_ANSWERS.search(data))
+        return bool(cursor) and int(cursor.group(1)) > 2, bool(TRUECOLOR_ANSWERS.search(data)), answered
 
     def __exit__(self, *exc):
         mouse = "\x1b[?1006l\x1b[?1003l\x1b[?1000l" if self._mouse else ""
-        self._write(RESET + mouse + "\x1b[?7h\x1b[?25h\x1b[?1049l")
-        for undo in self._restore:
-            undo()
+        # The pointer's moves, and a button let go, that the terminal sent before it read the mouse off may still
+        # be on their way (a round trip over ssh), for the shell to take as typed; they come ahead of the answer
+        # to DA1: read up to it and dropped, where the terminal answered it at start.
+        fence = self._keys and self._fence
+        self._write(RESET + mouse + "\x1b[?7h\x1b[?25h\x1b[?1049l" + ("\x1b[c" if fence else ""))
+        try:
+            data, end = b"", time.monotonic() + 1
+            while fence and not DA1_ANSWER.search(data):
+                more = incoming(end - time.monotonic())
+                if not more:
+                    break
+                data += more
+        finally:  # Ctrl+C while waiting: the terminal as it was all the same
+            for undo in self._restore:
+                undo()
+
+    def suspend(self):
+        """Ctrl+Z: the terminal as it was, and nvmon stopped till fg; then nvmon's again, every line anew.
+        Stopped with the rest of its process group, as the terminal does it (uvx, say, waits on nvmon: stopped
+        alone, nvmon would leave the shell waiting on it); where no shell could go on with it, it goes on at
+        once, which SIGSTOP would not."""
+        self.__exit__()
+        os.kill(0, signal.SIGTSTP)
+        raw_keys()  # the terminal as it was at start stays the one to go back to
+        self._open()
 
     def read(self, seconds):
-        """Key and mouse events as soon as there are some; [] once `seconds` pass without any."""
+        """Key and mouse events as soon as there are some; [] once `seconds` pass without any. Ctrl+Z
+        suspends here; after it, and after Ctrl+L, the next draw sends every line."""
         if not self._keys:
             time.sleep(max(0, seconds))
             return []
@@ -2879,7 +2924,12 @@ class Screen:
             data += more
         if data is None:  # stdin closed: nothing more will come
             self._keys = False
-        return events(data or b"")
+        out = events(data or b"")
+        if ("key", "suspend") in out and os.name != "nt":  # Windows has no stopping a program so
+            self.suspend()
+        if ("key", "redraw") in out:  # over whatever else wrote to the terminal: a job in the background, wall
+            self._painted = []
+        return out
 
     def draw(self, lines, mode, gray, size):
         """The screen `lines`, in a window of `size`: only the lines that changed since the last time, so that
@@ -2894,9 +2944,14 @@ class Screen:
 
     @staticmethod
     def _write(text):
-        # Raw UTF-8 bytes: works even where Python picked an ASCII stdout (LANG=C on 3.6).
-        sys.stdout.buffer.write(text.encode("utf-8"))
-        sys.stdout.buffer.flush()
+        # Raw UTF-8 bytes: works even where Python picked an ASCII stdout (LANG=C on 3.6); a name the OS gave
+        # undecoded (an account, an env, as 3.6 does under LANG=C) as a ?, one cell, as cells_of counts it.
+        # 4096 characters at a time: a Windows console under Python before 3.11.7 and 3.12.1 halves a longer
+        # write till it fits, in the middle of a letter as well, which it then shows as two or three U+FFFD.
+        out = sys.stdout.buffer
+        for start in range(0, len(text), 4096):
+            out.write(text[start:start + 4096].encode("utf-8", "replace"))
+        out.flush()
 
 
 def incoming(seconds):
@@ -2941,7 +2996,9 @@ def console_input(seconds):
     kernel32, handle = ctypes.windll.kernel32, c_void_p(msvcrt.get_osfhandle(sys.stdin.fileno()))
     records, count, end = (KeyEventRecord * 1024)(), ctypes.c_ulong(), time.monotonic() + seconds
     while True:
-        signaled = kernel32.WaitForSingleObject(handle, max(0, int((end - time.monotonic()) * 1000)))
+        # Milliseconds rounded up, as select does: rounded down, the last one would not wait at all, and main's
+        # loop would spin through it.
+        signaled = kernel32.WaitForSingleObject(handle, max(0, math.ceil((end - time.monotonic()) * 1000)))
         if signaled == 0x102:  # WAIT_TIMEOUT
             return b""
         if signaled != 0 or not kernel32.ReadConsoleInputW(handle, records, len(records), byref(count)):
@@ -2982,7 +3039,18 @@ def raw_keys():
     fd = sys.stdin.fileno()
     saved = termios.tcgetattr(fd)
     tty.setcbreak(fd)  # Ctrl+C keeps working: cbreak leaves signal keys alone
+    # but for Ctrl+Z, which comes as a key: Screen.suspend puts the terminal back before nvmon stops
+    mode = termios.tcgetattr(fd)
+    mode[6][termios.VSUSP] = bytes([os.fpathconf(fd, "PC_VDISABLE")])
+    termios.tcsetattr(fd, termios.TCSANOW, mode)
     return lambda: termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+
+
+def window():
+    """The terminal's (columns, lines), 80 x 24 for a side it leaves at 0 (a serial console never sized);
+    OSError where the output is not a terminal."""
+    columns, lines = os.get_terminal_size()
+    return columns or 80, lines or 24
 
 
 def gpu_list(spec):
@@ -3036,7 +3104,9 @@ def main():
                         help="only these GPUs, e.g. 0,2,4-7 (default: all)")
     parser.add_argument("-V", "--version", action="version", version="nvmon {} {}".format(__version__, REPO))
     args = parser.parse_args()
-    if not sys.stdout.isatty():
+    try:  # rather than isatty: Windows's NUL passes for a terminal, but has no size
+        window()
+    except OSError:
         sys.exit("nvmon: output is not a terminal (over ssh, use: ssh -t HOST nvmon)")
 
     # NVML is never shut down: exiting frees it as well, while nvmlShutdown can keep a busy driver, and so
@@ -3074,11 +3144,14 @@ def main():
                 if now >= frame_at:  # a new frame: the newest numbers, one more graph column each
                     for g in gpus:
                         g.frame()
-                    frame_at = max(frame_at + view.interval, now)  # a late frame restarts the schedule
                     # The polls for the next frame start ahead of it: half a tick, at most 0.5 s (a busy
                     # driver was seen to take 0.4 s). Should the driver answer later still, that frame keeps
-                    # the last numbers but comes on time.
-                    poll_at, redraw = frame_at - min(view.interval / 2, 0.5), True
+                    # the last numbers but comes on time. A frame so late that the next would come before its
+                    # polls had their time (after Ctrl+Z, a write held up) starts the schedule anew, its polls
+                    # at once, rather than the next frame at once with the same numbers.
+                    lead = min(view.interval / 2, 0.5)
+                    frame_at = max(frame_at + view.interval, now + lead)
+                    poll_at, redraw = frame_at - lead, True
                 if poll_at is not None and now >= poll_at:
                     poller.refresh()
                     poll_at = None
@@ -3091,15 +3164,16 @@ def main():
                         peek, redraw = None, True
                     else:
                         poller.refresh()  # after the round running, should it have passed those GPUs
-                if redraw or tuple(os.get_terminal_size()) != size:  # a window resized redraws too
-                    width, height = size = tuple(os.get_terminal_size())
+                width, height = window()
+                if redraw or (width, height) != size:  # a window resized redraws too
+                    size = width, height
                     screen.draw(view.screen(gpus, width, height,
                                             header(width, view.interval, driver, poller.waiting(), view.pointer),
                                             update.newer),
                                 view.shows, view.theme.gray, size)
-                # Keys and clicks redraw at once, the pointer when it goes to another graph column; the
-                # numbers move on at the next frame. A quarter second at most, to see a resized window soon
-                # with a long interval too.
+                # Keys and clicks redraw at once, the pointer when it moves over a graph (the chip goes with
+                # it), a note when it runs out; the numbers move on at the next frame. A quarter second at
+                # most, to see a resized window, or a note gone, soon with a long interval too.
                 wait = 0.01 if peek is not None else (poll_at or frame_at) - time.monotonic()
                 events = screen.read(min(wait, 0.25))
                 pointed, before = view.pointed(), view.interval
@@ -3114,7 +3188,8 @@ def main():
                 if not going:
                     break
                 lit = refresh_pointed(size[0], view.interval, view.pointer)  # the buttons come and go with it
-                redraw = any(e[0] != "move" for e in events) or view.pointed() != pointed or lit != was_lit
+                redraw = (any(e[0] != "move" for e in events) or view.pointed() != pointed or lit != was_lit
+                          or view.expired())
                 detail = view.detail(gpus)
                 if detail - poller.detail:  # at the latest the next round, or the one after the round running
                     busy = not poller.done.is_set()

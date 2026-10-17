@@ -537,7 +537,7 @@ class Gpu:
     def _command(self, pid):
         """(short name, command line from it on) of `pid` (see short_command)."""
         argv = argv_of(pid)
-        if not argv:  # not ours to read, not Linux or macOS, or the process already exited
+        if not argv:  # not ours to read (another account's, or on Windows the system's), or already exited
             name = self._name_of(pid)
             if not name:
                 return str(pid), ""
@@ -668,9 +668,10 @@ def process_facts(pid):
     and not ours, where unknown."""
     if os.name == "nt":
         sid = windows_sid(pid)
-        return sid and sid_name(sid), ours(pid), None, start_time(pid)
-    uid = uid_of(pid)
-    return account_name(uid), ours(pid), conda_env(pid), start_time(pid)
+        owner = sid and sid_name(sid)
+    else:
+        owner = account_name(uid_of(pid))
+    return owner, ours(pid), conda_env(pid), start_time(pid)
 
 
 def ours(pid):
@@ -711,6 +712,51 @@ def windows_sid(pid):
         kernel32.CloseHandle(process)
 
 
+def windows_image(process):
+    """The path of the program a Windows process `process` (windows_process) runs; None where unknown."""
+    path, size = ctypes.create_unicode_buffer(32768), ctypes.c_ulong(32768)
+    found = ctypes.windll.kernel32.QueryFullProcessImageNameW(process, 0, path, byref(size))
+    return path.value if found else None
+
+
+class UnicodeString(ctypes.Structure):  # UNICODE_STRING
+    _fields_ = [("length", ctypes.c_ushort), ("maximum", ctypes.c_ushort), ("buffer", c_void_p)]
+
+
+def windows_argv(pid):
+    """The command line of `pid` on Windows, its first word the path of the program it runs: a program may
+    start another with any first word, or none (TabTip has "/QuitInfo:..." alone). Just that path where the
+    line cannot be read (Windows before 8.1); [] where the process cannot be opened (the system's, another
+    account's)."""
+    process = windows_process(pid)
+    if process is None:
+        return []
+    try:
+        image = windows_image(process)
+        if image is None:
+            return []
+        line = ctypes.create_string_buffer(ctypes.sizeof(UnicodeString) + 65536)  # its length is 16 bits
+        if ctypes.windll.ntdll.NtQueryInformationProcess(process, 60, line, len(line), None) != 0:  # 60: the line
+            return [image]
+        text = UnicodeString.from_buffer(line)
+        text = ctypes.wstring_at(text.buffer, text.length // 2)
+    finally:
+        ctypes.windll.kernel32.CloseHandle(process)
+    words = []
+    if text:  # an empty line would come back as nvmon's own program
+        shell32, count = ctypes.windll.shell32, c_int()
+        shell32.CommandLineToArgvW.restype = ctypes.POINTER(ctypes.c_wchar_p)
+        split = shell32.CommandLineToArgvW(ctypes.c_wchar_p(text), byref(count))
+        if split:
+            words = [word for word in split[:count.value] if word]  # no empty ones, as on Linux
+            ctypes.windll.kernel32.LocalFree(ctypes.cast(split, c_void_p))
+
+    def stem(path):  # "C:\...\Python3.12.exe", "python3", "python" -> "python": a Store Python's aliases
+        name = os.path.basename(path).lower()
+        return (name[:-4] if name.endswith(".exe") else name).rstrip("0123456789.")
+    return [image] + (words[1:] if words and stem(words[0]) == stem(image) else words)
+
+
 @lru_cache(maxsize=None)
 def sid_name(sid):
     """The account name of `sid` (windows_sid); looked up once each, as it may ask a domain controller."""
@@ -741,6 +787,8 @@ def short_command(argv):
 
 def argv_of(pid):
     """The command line of `pid`; [] where unknown. On macOS only our own processes' can be read."""
+    if os.name == "nt":
+        return windows_argv(pid)
     if sys.platform != "darwin":
         return [a for a in (proc("{}/cmdline".format(pid)) or "").split("\0") if a]
     mib, size = (c_int * 3)(1, 49, pid), ctypes.c_size_t(0)  # CTL_KERN, KERN_PROCARGS2
@@ -761,6 +809,14 @@ def exe_of(pid):
     if sys.platform == "darwin":
         path = ctypes.create_string_buffer(4096)
         return path.value.decode("utf-8", "replace") if libc().proc_pidpath(pid, path, 4096) > 0 else None
+    if os.name == "nt":
+        process = windows_process(pid)
+        if process is None:
+            return None
+        try:
+            return windows_image(process)
+        finally:
+            ctypes.windll.kernel32.CloseHandle(process)
     try:
         return os.readlink("/proc/{}/exe".format(pid))
     except OSError:
@@ -772,7 +828,10 @@ def conda_env(pid):
     exe = exe_of(pid)
     if exe is None:
         return None
-    return conda_name(os.path.dirname(os.path.dirname(exe)))  # .../envs/NAME/bin/python
+    # ...\envs\NAME\python.exe or ...\Scripts\x.exe or ...\Library\bin\x.exe on Windows, .../envs/NAME/bin/python
+    folder = os.path.dirname(exe)
+    names = map(conda_name, (folder, os.path.dirname(folder), os.path.dirname(os.path.dirname(folder))))
+    return next(filter(None, names), None)
 
 
 def conda_name(prefix):
@@ -1990,9 +2049,10 @@ def labelled(stem, name, style, count):
 def tree(jobs, folds, picked, sort):
     """The list's lines, a tree: (tree cell, job, key, PIDs), the key (owner,) or (owner, env) on a group's
     line, whose job is then its total (see total), and the PIDs its jobs'; on a job's or a worker's (see
-    jobs) None, and the job's PID. A job with no environment hangs from its account. The `jobs` come in the order of `sort` = (column, descending), as do the groups (see TOTALED).
-    A folded group or job (see unfolded) shows its line only; its arrow folds it or opens it again (see
-    process_list). And the jobs in the order the tree has them, folded or not."""
+    jobs) None, and the job's PID. A job with no environment hangs from its account. The `jobs` come in the
+    order of `sort` = (column, descending), as do the groups (see TOTALED). A folded group or job (see
+    unfolded) shows its line only; its arrow folds it or opens it again (see process_list). And the jobs in
+    the order the tree has them, folded or not."""
     column, descending = sort
 
     def job_lines(down, last, job):  # its line, the lines down to it `down`; open, its workers' beneath

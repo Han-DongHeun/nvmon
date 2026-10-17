@@ -522,11 +522,13 @@ class Gpu:
 
     def _facts_of(self, pid):
         """(name, command, owner, ours, conda environment, start time, job, launcher name) of `pid`. A
-        notebook's kernel, in whatever language, known by the connection file it is given (kernel-*.json), is a
-        job of its own: what started it, Jupyter or an editor, runs every notebook, and stopping that would stop
-        them all. A worker multiprocessing spawned (torch's mp.spawn) runs its launcher's script: named after it."""
+        notebook's kernel is a job of its own: ipykernel, and one in another language known by the connection
+        file Jupyter gives it (kernel-*.json; papermill and nbconvert give ipykernel a temporary one). What
+        started it, Jupyter, an editor or papermill, runs every notebook, and stopping that would stop them all.
+        A worker multiprocessing spawned (torch's mp.spawn) runs its launcher's script: named after it."""
         command = self._command(pid)
-        launcher = None if re.search(r"\bkernel-[^/\s]*\.json\b", command[1]) else launcher_of(pid)
+        kernel = command[0].startswith("ipykernel") or re.search(r"\bkernel-[^/\s]*\.json\b", command[1])
+        launcher = None if kernel else launcher_of(pid)
         lead = launcher and self._command(launcher)
         if lead and command[1].endswith(" --multiprocessing-fork"):
             command = lead
@@ -1978,9 +1980,10 @@ def total(jobs, env=None):
 
 def labelled(stem, name, style, count):
     """A group's cell of the tree: `stem` (lines and arrow), the name, as much as fits, and how many jobs it
-    holds flush right: "▼ kim          (9)"."""
+    holds flush right: "▼ kim          (9)"; a name cut ends in "…", as a cut column does (see cells)."""
     count = "({})".format(count)
-    name = clip([(name, style)], TREE_W - width_of(stem) - len(count) - 1)
+    room = TREE_W - width_of(stem) - len(count) - 1
+    name = [(name, style)] if cells_of(name) <= room else clip([(name, style)], room - 1) + [("…", style)]
     return stem + name + [(" " * (TREE_W - width_of(stem + name) - len(count)), ""), (count, DIM)]
 
 
@@ -2217,6 +2220,7 @@ class View:
         self.folds = {}                   # (owner,), (owner, env), (owner, env, PID): open, as last clicked
         self.gpu_top, self.gpu_page = 0, 1  # the first row of boxes shown, and how many rows fit
         self.list_rows = range(0)         # the screen rows the list takes, when it is open
+        self.command_row = None           # the row of the job in focus, when its command is cut: the wheel moves it
         self.shift, self.shifted = 0, None  # how far the selected job's command is scrolled, and whose
         self.clicked = (0, None)          # (when, what): the last click, to tell a double click
         self.scroll = {}                  # GPU index: (lines, cells) its processes are moved on
@@ -2288,13 +2292,18 @@ class View:
         rows = min(len(self.entries) + 2, max(4, (height - 2) // 2), max(0, height - 2)) if self.listing else 0
         body = self.boxes(shown, width, height - 2 - rows)
         self.list_rows = range(1 + len(body), 1 + len(body) + rows)
+        self.command_row = None
         if rows:
             if self.shifted != self.job:
                 self.shift, self.shifted = 0, self.job
             room, wide = max(0, width - COMMAND_AT - 1), cells_of(focus.command) if focus else 0
             self.shift = min(self.shift, wide + 1 - room) if wide > room else 0  # in cells, up to its end
-            body += process_list(self.entries, width, rows, self.picked, self.job, self.scrolled(rows - 2),
-                                 self.sort, self.shift)
+            top = self.scrolled(rows - 2)
+            body += process_list(self.entries, width, rows, self.picked, self.job, top, self.sort, self.shift)
+            own = next((i for i, (_, job, key, _) in enumerate(self.entries)
+                        if key is None and job.pid == self.job and job.command), None)
+            if wide > room and own is not None and top <= own < top + rows - 2:
+                self.command_row = self.list_rows.start + 1 + own - top
         # A window one line high: the bottom line alone, with its questions and keys.
         self.lines = self.hover([top_line] + body + [self.bottom_line(width, picked, newer, gpus)])[-height:]
         return self.lines
@@ -2517,9 +2526,7 @@ class View:
                 if row in self.list_rows:
                     self.shift = max(0, self.shift + 8 * step)
             elif row in self.list_rows:
-                i = row - self.list_rows.start - 1 + self.top  # the line there: the job's own has its command
-                if (col >= COMMAND_AT and self.job is not None and self.target(row, col) == self.job
-                        and 0 <= i < len(self.entries) and self.entries[i][1].command):
+                if col >= COMMAND_AT and row == self.command_row:  # as drawn, though one before moved the list
                     self.shift = max(0, self.shift + 8 * step)
                 else:
                     self.top, self.follow = self.top + 3 * step, False
@@ -2865,6 +2872,7 @@ class Screen:
 
     def _open(self):
         """The terminal as nvmon has it; the next draw sends every line."""
+        self._on = True  # till __exit__ gives the terminal back
         self._painted, self._size = [], None  # the lines last sent, and the window they were sent to
         # 1000 + 1003 + 1006: clicks, the wheel and every move of the pointer come in as SGR-encoded sequences
         # (Shift+drag still selects text). A terminal without 1003 sends clicks and the wheel all the same.
@@ -2897,6 +2905,9 @@ class Screen:
         return bool(cursor) and int(cursor.group(1)) > 2, bool(TRUECOLOR_ANSWERS.search(data)), answered
 
     def __exit__(self, *exc):
+        if not self._on:  # given back already: ended while Ctrl+Z had it stopped (kill %1), the shell's now
+            return
+        self._on = False
         mouse = "\x1b[?1006l\x1b[?1003l\x1b[?1000l" if self._mouse else ""
         # The pointer's moves, and a button let go, that the terminal sent before it read the mouse off may still
         # be on their way (a round trip over ssh), for the shell to take as typed; they come ahead of the answer
@@ -3058,8 +3069,11 @@ def raw_keys():
     tty.setcbreak(fd)  # Ctrl+C keeps working: cbreak leaves signal keys alone
     # but for Ctrl+Z, which comes as a key: Screen.suspend puts the terminal back before nvmon stops
     mode = termios.tcgetattr(fd)
-    mode[6][termios.VSUSP] = bytes([os.fpathconf(fd, "PC_VDISABLE")])
-    termios.tcsetattr(fd, termios.TCSANOW, mode)
+    try:
+        mode[6][termios.VSUSP] = bytes([os.fpathconf(fd, "PC_VDISABLE")])
+        termios.tcsetattr(fd, termios.TCSANOW, mode)
+    except (OSError, ValueError):  # a system with no character for "none": Ctrl+Z stops nvmon as it is
+        pass
     return lambda: termios.tcsetattr(fd, termios.TCSADRAIN, saved)
 
 

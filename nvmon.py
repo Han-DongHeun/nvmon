@@ -6,7 +6,7 @@ the top); utilization, memory and PCIe traffic on the right; name, power,
 warnings, temperature, fan and clock on the top edge; processes on the bottom
 edge. It talks to the NVML library that ships with the NVIDIA driver through
 ctypes and draws with plain ANSI escape codes, so a single file runs on any
-Python >= 3.6. At start it asks PyPI whether a newer release is out
+Python >= 3.6.1. At start it asks PyPI whether a newer release is out
 (NVMON_NO_UPDATE_CHECK=1 turns that off).
 
     nvmon [-i SECONDS] [-g 0,2,4-7]        q / Esc / Ctrl+C to quit
@@ -2719,7 +2719,7 @@ class Settings:
         """The file's settings; {} when there is no file, None when it is not JSON nvmon can keep to (edited
         by hand, say), and so not to be written over."""
         try:
-            with open(self.path, encoding="utf-8") as f:
+            with open(self.path, "rb") as f:  # bytes: json reads UTF-8 with a BOM too, and UTF-16, as Windows saves it
                 data = json.load(f)
         except FileNotFoundError:
             return {}

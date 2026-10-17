@@ -747,9 +747,11 @@ def argv_of(pid):
     buf = ctypes.create_string_buffer(size.value)
     if libc().sysctl(mib, 3, buf, byref(size), None, 0) != 0:
         return []
-    # argc, the path of what was run, NULs to align, then the arguments (and the environment after them)
-    argc, words = int.from_bytes(buf.raw[:4], "little"), [w for w in buf.raw[4:size.value].split(b"\0") if w]
-    return [w.decode("utf-8", "replace") for w in words[1:1 + argc]]
+    # argc, the path of what was run, NULs to align, then the arguments and the environment after them: cut at
+    # argc before the empty arguments go, as each is a lone NUL too
+    argc, raw = int.from_bytes(buf.raw[:4], "little"), buf.raw[4:size.value]
+    args = raw.partition(b"\0")[2].lstrip(b"\0").split(b"\0")[:argc]
+    return [a.decode("utf-8", "replace") for a in args if a]
 
 
 def exe_of(pid):
@@ -886,10 +888,7 @@ def uid_of(pid):
 
 
 def parent_of(pid):
-    """The PID of `pid`'s parent; None where unknown."""
-    if sys.platform == "darwin":
-        info = short_info(pid)
-        return info and info.pbsi_ppid
+    """The PID of `pid`'s parent; None where unknown, on Windows and macOS always: no launchers there."""
     return stat_field(pid, 4)
 
 
@@ -1037,8 +1036,8 @@ class Registry:
         return found
 
     def clock_steps(self):
-        """The GPU's clock steps in MHz, lowest first, from the power manager's table (voltage-states9: pairs of
-        frequency and voltage, the first step 0, the GPU off); [] where not found."""
+        """The GPU's clock steps in MHz, lowest first, from the power manager's table (voltage-states9 of pmgr, of
+        pmgr-child from M6 on: pairs of frequency and voltage, the first step 0, the GPU off); [] where not found."""
         steps, it = [], c_uint()
         if self.services(0, self.matching(b"AppleARMIODevice"), byref(it)) != 0:
             return steps
@@ -1046,7 +1045,7 @@ class Registry:
         while entry:
             name = ctypes.create_string_buffer(128)
             self.entry_name(entry, name)
-            if name.value == b"pmgr" and not steps:
+            if name.value in (b"pmgr", b"pmgr-child") and not steps:  # the first with a table
                 table = self.property(entry, self.key("voltage-states9"), None, 0)
                 if table and self.type_of(table) == self.data_type:
                     raw = ctypes.string_at(self.data_bytes(table), self.data_length(table))
@@ -1081,8 +1080,9 @@ class Registry:
 
 class Report:
     """macOS: the GPU's counters in IOReport, the ones powermetrics reads, without sudo: its power, the
-    energy used between two readings over the time between them; its clock, the time it spent at each step
-    (GPUPH: OFF, P1, P2...), each step its clock (Registry.clock_steps)."""
+    energy used between two readings over the time between them, from the channel GPU Energy alone (GPU0 and
+    GPU SRAM0 beside it are its parts); its clock, the time it spent at each step (GPUPH: OFF, P1, P2...), each
+    step its clock (Registry.clock_steps)."""
     JOULES = {"mJ": 1e-3, "uJ": 1e-6, "nJ": 1e-9}
 
     def __init__(self, registry, steps):
@@ -1104,12 +1104,18 @@ class Report:
         merge = sig("IOReportMergeChannels", None, c_void_p, c_void_p, c_void_p)
 
         energy = copy(registry.key("Energy Model"), None, 0, 0, 0)
+        if not energy:  # NULL: passed on, it would crash Core Foundation, past any except
+            raise OSError("no IOReport energy channels")
         states = copy(registry.key("GPU Stats"), registry.key("GPU Performance States"), 0, 0, 0)
         if states:  # a Mac without it still has its power
             merge(energy, states, None)
+            registry.cf_release(states)
         self.channels, self.steps = registry.mutable_copy(None, 0, energy), steps
+        registry.cf_release(energy)
         self.subscribed = c_void_p()
         self.subscription = subscribe(None, self.channels, byref(self.subscribed), 0, None)
+        if not self.subscription:  # refused, as in a Mac VM, which has no energy counters
+            raise OSError("no IOReport subscription")
         self.key = registry.key("IOReportChannels")
         self.last = self.samples(self.subscription, self.subscribed, None), time.monotonic()
         self.wanted = None  # [(index, "energy" with its scale or "clock")] in a sample's channels, see read
@@ -1128,7 +1134,7 @@ class Report:
                 channel = self.registry.array_item(channels, i)
                 name = self.registry.value(self.channel_name(channel)) or ""
                 scale = self.JOULES.get(self.registry.value(self.unit(channel)) or "")
-                if name.startswith("GPU") and scale:  # "GPU Energy"
+                if name == "GPU Energy" and scale:
                     self.wanted.append((i, scale))
                 elif name == "GPUPH":
                     self.wanted.append((i, None))
@@ -1223,9 +1229,11 @@ class AppleGpu(Gpu):
         self.sample = self.now = None
         self.pcie_max_gen = self.pcie_max_width = None
         self.has_activity = False
-        self._facts, self._names = {}, {}
-        self._seen = {}    # registry ID of a connection -> (pid, its GPU time, when)
-        self._recent = {}  # pid -> (when it last used the GPU, its share then)
+        self._facts = {}
+        self._names = {}   # pid -> its name, of the processes on the GPU now
+        self._seen = {}    # registry ID of a connection -> its GPU time at the last poll, which was at _polled
+        self._polled = None
+        self._recent = {}  # pid -> when it last used the GPU
         size, length = c_ulonglong(), ctypes.c_size_t(8)
         found = libc().sysctlbyname(b"hw.memsize", byref(size), byref(length), None, 0) == 0
         self._total = size.value / 2**30 if found else None
@@ -1245,17 +1253,15 @@ class AppleGpu(Gpu):
     def poll(self, detail=False):
         stats = self.registry.get(self.entry, "PerformanceStatistics") or {}
         now, clients = time.monotonic(), self.registry.clients(self.entry)
+        self._names = {pid: name for pid, name, _ in clients.values()}
         shares = {}
-        for ident, (pid, name, gpu_time) in clients.items():
-            self._names[pid] = name
+        for ident, (pid, _, gpu_time) in clients.items():
             last = self._seen.get(ident)
-            if last and gpu_time > last[1]:
-                shares[pid] = shares.get(pid, 0) + (gpu_time - last[1]) / 1e9 / (now - last[2]) * 100
-        self._seen = {ident: (pid, gpu_time, now) for ident, (pid, _, gpu_time) in clients.items()}
-        alive = {pid for pid, _, _ in clients.values()}
-        self._recent = {pid: (now, shares[pid]) if pid in shares else seen for pid, seen in self._recent.items()
-                        if pid in alive and now - seen[0] < RECENT}
-        self._recent.update((pid, (now, share)) for pid, share in shares.items())
+            if last is not None and gpu_time > last:
+                shares[pid] = shares.get(pid, 0) + (gpu_time - last) / 1e9 / (now - self._polled) * 100
+        self._seen, self._polled = {ident: gpu_time for ident, (_, _, gpu_time) in clients.items()}, now
+        self._recent = {pid: when for pid, when in self._recent.items() if pid in self._names and now - when < RECENT}
+        self._recent.update(dict.fromkeys(shares, now))
         listed = sorted(self._recent, key=lambda pid: -shares.get(pid, 0))  # the busiest first
         self._facts = {pid: self._facts.get(pid) or self._facts_of(pid) for pid in listed}
         used = stats.get("In use system memory")
@@ -1413,9 +1419,9 @@ def stop(job, name):
     are the processes we saw: started when we saw them, holding a GPU open (inside a container, NVML can
     report PIDs of the host), and ours. While its launcher still leads them (their parent, ours), SIGTERM
     goes to the launcher, which then ends its workers, and SIGKILL, which it cannot pass on, to each worker
-    as well; with no launcher, or one gone (its workers left to PID 1), to each process. On Windows, which
-    has no SIGTERM and no launchers, SIGKILL only (see View.handle): each process is ended at once. Returns
-    (a note on what happened, whether any was sent)."""
+    as well; with no launcher (none on Windows and macOS), or one gone (its workers left to PID 1), to each
+    process. On Windows, which has no SIGTERM, SIGKILL only (see View.handle): each process is ended at once.
+    Returns (a note on what happened, whether any was sent)."""
     for pid, started in job.members:
         if start_time(pid) != started or not holds_gpu(pid):
             return [("{} has changed meanwhile: nothing sent".format(job.name), WARN)], False

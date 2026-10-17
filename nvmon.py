@@ -515,12 +515,15 @@ class Gpu:
 
     def _facts_of(self, pid):
         """(name, command, owner, ours, conda environment, start time, job, launcher name) of `pid`. A
-        notebook's kernel is a job of its own: what started it, Jupyter or an editor, runs every notebook, and
-        stopping that would stop them all."""
+        notebook's kernel, in whatever language, known by the connection file it is given (kernel-*.json), is a
+        job of its own: what started it, Jupyter or an editor, runs every notebook, and stopping that would stop
+        them all. A worker multiprocessing spawned (torch's mp.spawn) runs its launcher's script: named after it."""
         command = self._command(pid)
-        launcher = None if command[0].startswith("ipykernel") else launcher_of(pid)
-        return (command + process_facts(pid)
-                + ((launcher, self._command(launcher)[0]) if launcher else (pid, None)))
+        launcher = None if re.search(r"\bkernel-[^/\s]*\.json\b", command[1]) else launcher_of(pid)
+        lead = launcher and self._command(launcher)
+        if lead and command[1].endswith(" --multiprocessing-fork"):
+            command = lead
+        return command + process_facts(pid) + ((launcher, lead[0]) if launcher else (pid, None))
 
     def _command(self, pid):
         """(short name, command line from it on) of `pid` (see short_command)."""
@@ -884,9 +887,10 @@ def parent_of(pid):
 
 
 # Parents that start each program on its own, rather than as the parts of one job (a notebook's kernel stands
-# alone too, see Gpu._facts_of).
-NOT_LAUNCHERS = {"bash", "sh", "dash", "zsh", "fish", "ksh", "tcsh", "csh", "tmux: server", "screen", "SCREEN",
-                 "sshd", "sudo", "su", "login", "systemd", "init", "script", "nohup", "raylet"}
+# alone too, see Gpu._facts_of). An ssh login's own process is sshd-session from OpenSSH 9.8 on, sshd before.
+NOT_LAUNCHERS = {"bash", "sh", "dash", "zsh", "fish", "ksh", "mksh", "ash", "tcsh", "csh", "pwsh", "nu", "xonsh",
+                 "elvish", "tmux: server", "screen", "SCREEN", "zellij", "sshd", "sshd-session", "sudo", "su", "login",
+                 "systemd", "init", "script", "nohup", "raylet"}
 
 
 def launcher_of(pid):

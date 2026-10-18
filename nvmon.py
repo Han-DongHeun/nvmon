@@ -1878,21 +1878,36 @@ def memory(process):
 
 def process_label(processes, room, selected=frozenset()):
     """The processes (process_entries) on one line: "migi: train.py 2h13m 15.1G · eval.py 5m 0.5G   kim/torch:
-    a.py 1d4h 9.0G". As many whole entries as fit in `room` cells, then "+N" for the rest."""
-    def more(n):
-        return [("  +{}".format(n), DIM)] if n else []
-    entries, label, last = process_entries(processes), [], None
-    for i, (tag, process) in enumerate(entries):
-        gap = [] if not label else [(" · ", DIM)] if tag == last else [("   ", "")]
-        details = " ".join(part for part in (run_time(process), memory(process)) if part != "-")
-        entry = (gap + (tagged(process) + [(": ", DIM)] if tag and tag != last else [])
-                 + [process_name(process, selected)] + ([(" " + details, DIM, process.job)] if details else []))
-        rest = len(entries) - i - 1
-        if width_of(label + entry + more(rest)) > room:
-            # The first entry is always shown, cut if need be; later ones collapse into the count.
-            return clip(entry, room - width_of(more(rest))) + more(rest) if not label else label + more(rest + 1)
-        label += entry
-        last = tag
+    a.py 1d4h 9.0G". As many whole entries as fit in `room` cells, then "+N" for the rest; moved on, "+N"
+    before them too, as far as it takes to show the first of the `selected` jobs (the arrows going through
+    them one by one move it along)."""
+    entries = process_entries(processes)
+    focus = next((i for i, (_, process) in enumerate(entries) if process.job in selected), 0)
+
+    def more(n, before=False):
+        return [("+{}  ".format(n) if before else "  +{}".format(n), DIM)] if n else []
+
+    def line(start):  # (the label from entry `start` on, the last entry it shows)
+        label, last = more(start, True), None
+        for i in range(start, len(entries)):
+            tag, process = entries[i]
+            gap = [] if i == start else [(" · ", DIM)] if tag == last else [("   ", "")]
+            details = " ".join(part for part in (run_time(process), memory(process)) if part != "-")
+            entry = (gap + (tagged(process) + [(": ", DIM)] if tag and tag != last else [])
+                     + [process_name(process, selected)] + ([(" " + details, DIM, process.job)] if details else []))
+            rest = len(entries) - i - 1
+            if width_of(label + entry + more(rest)) > room:
+                # The first entry is always shown, cut if need be; later ones collapse into the count.
+                if i == start:
+                    return clip(label + entry, room - width_of(more(rest))) + more(rest), i
+                return label + more(rest + 1), i - 1
+            label += entry
+            last = tag
+        return label, len(entries) - 1
+    for start in range(focus + 1):
+        label, shown = line(start)
+        if shown >= focus:
+            break
     return label
 
 

@@ -2271,6 +2271,7 @@ def footer(width, newer=None, picker=()):
 
 
 MOVES = {"tab": 1, "down": 1, "up": -1, "backtab": -1, "pgdn": 10, "pgup": -10, "home": -10**6, "end": 10**6}
+WALKS = ("tab", "backtab", "left", "right", "up", "down", "home", "end")  # with no list: see View.walk
 
 
 class View:
@@ -2298,7 +2299,8 @@ class View:
         self.folds = {}                   # (owner,), (owner, env), (owner, env, PID): open, as last clicked
         self.gpu_top, self.gpu_page = 0, 1  # the first row of boxes shown, and how many rows fit
         self.list_rows = range(0)         # the screen rows the list takes, when it is open
-        self.boxed = []                   # the jobs as the boxes on screen show them: the arrows' order, no list
+        self.boxed = []                   # (GPU, job) as the boxes on screen show them: see walk
+        self.box = None                   # of them the GPU the arrows are at, as a job may be in several boxes
         self.command_row = None           # the row of the job in focus, when its command is cut: the wheel moves it
         self.shift, self.shifted = 0, None  # how far the selected job's command is scrolled, and whose
         self.clicked = (0, None)          # (when, what): the last click, to tell a double click
@@ -2372,8 +2374,8 @@ class View:
         rows = min(len(self.entries) + 2, max(4, (height - 2) // 2), max(0, height - 2)) if self.listing else 0
         body = self.boxes(shown, width, height - 2 - rows)
         boxed = {g.index: g for g in shown}  # the jobs in the order the boxes on screen have their processes
-        self.boxed = list(dict.fromkeys(p.job for _, _, index in self.panels
-                                        for _, p in process_entries(boxed[index].now.processes)))
+        self.boxed = [(index, job) for _, _, index in self.panels
+                      for job in dict.fromkeys(p.job for _, p in process_entries(boxed[index].now.processes))]
         self.list_rows = range(1 + len(body), 1 + len(body) + rows)
         self.command_row = None
         if rows:
@@ -2522,6 +2524,28 @@ class View:
             if key is not None and self.job in pids:
                 holder = i
         return holder
+
+    def walk(self, key):
+        """Tab and the arrows with no list open: a job at a time, as the boxes on screen show them (boxed), the
+        way they lie there. Along a box's bottom edge ← → (and Tab), on into the next box; ↑ ↓ to the first
+        of the box above or below. In the processes view, a line each, ↑ ↓ one by one (← → move them
+        sideways). A job in two boxes (DDP) is passed by once."""
+        order, step = self.boxed, (-1 if key in ("left", "up", "backtab") else 1)
+        here = (self.box, self.job) if (self.box, self.job) in self.boxed else next(
+            ((box, job) for box, job in order if job == self.job), None)
+        if key in ("home", "end") or here is None:
+            j = 0 if key == "home" or key != "end" and step > 0 else len(order) - 1
+        elif key in ("up", "down") and self.left != "processes":  # the next box's first, or the last one's
+            boxes = list(dict.fromkeys(box for box, _ in order))
+            box = boxes[min(max(boxes.index(here[0]) + step, 0), len(boxes) - 1)]
+            j = next(k for k, (b, _) in enumerate(order) if b == box)
+        else:
+            i = j = order.index(here)
+            while 0 <= j + step < len(order) and (j == i or order[j][1] == self.job):
+                j += step
+            j = j if order[j][1] != self.job else i
+        self.box, job = order[j]
+        self.pick([job])
 
     def scrolled(self, room):
         """The list's first line, kept in range and, after the selection moved, on the line picked by."""
@@ -2723,10 +2747,8 @@ class View:
         elif key in ("left", "right") and self.left == "processes":  # every GPU's processes, sideways
             step = 8 if key == "right" else -8
             self.scroll = {index: (top, shift + step) for index, (top, shift) in self.scroll.items()}
-        elif key in MOVES and not self.listing and self.boxed:  # no list: the jobs one by one, as the boxes
-            order, step = self.boxed, MOVES[key]                # show them, GPU after GPU
-            i = order.index(self.job) if self.job in order else (-1 if step > 0 else len(order))
-            self.pick([order[min(max(i + step, 0), len(order) - 1)]])
+        elif key in WALKS and not self.listing and self.boxed:
+            self.walk(key)
         elif key in MOVES and self.entries:  # the list's lines, a group's among them, picking all its jobs; a
             i, step = self.at(), MOVES[key]  # job's workers' lines pick the job, as its line does: passed by
             i = (-1 if step > 0 else len(self.entries)) if i is None else i

@@ -2535,10 +2535,13 @@ class View:
             ((box, job) for box, job in order if job == self.job), None)
         if key in ("home", "end") or here is None:
             j = 0 if key == "home" or key != "end" and step > 0 else len(order) - 1
-        elif key in ("up", "down") and self.left != "processes":  # the next box's first, or the last one's
-            boxes = list(dict.fromkeys(box for box, _ in order))
-            box = boxes[min(max(boxes.index(here[0]) + step, 0), len(boxes) - 1)]
-            j = next(k for k, (b, _) in enumerate(order) if b == box)
+        elif key in ("up", "down") and self.left != "processes":  # the first of the nearest box straight above
+            where = {index: (rows.start, cols.start) for rows, cols, index in self.panels}  # or below with any
+            row, col = where[here[0]]
+            column = sorted((where[box][0], box) for box in dict.fromkeys(box for box, _ in order)
+                            if where[box][1] == col and (where[box][0] - row) * step > 0)
+            box = column and (column[0] if step > 0 else column[-1])[1]
+            j = next(k for k, (b, _) in enumerate(order) if b == box) if column else order.index(here)
         else:
             i = j = order.index(here)
             while 0 <= j + step < len(order) and (j == i or order[j][1] == self.job):

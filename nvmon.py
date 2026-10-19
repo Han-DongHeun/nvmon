@@ -376,7 +376,7 @@ class Sample(NamedTuple):
     tensor: Optional[float]       # % Tensor Core activity (GPM)
     slowdown: Optional[tuple]     # (label, color) when the clock is held back
     processes: list               # [Process]
-    process_util: Optional[dict]  # pid -> % of time its kernels ran; None unless the process list is open
+    process_util: Optional[dict]  # pid -> % of time its kernels ran; None unless asked for (View.detail)
     renderer: Optional[float] = None  # % Apple GPU: busy drawing or computing
     tiler: Optional[float] = None     # % Apple GPU: busy splitting the screen into tiles
 
@@ -526,12 +526,15 @@ class Gpu:
         notebook's kernel is a job of its own: ipykernel, and one in another language known by the connection
         file Jupyter gives it (kernel-*.json; papermill and nbconvert give ipykernel a temporary one). What
         started it, Jupyter, an editor or papermill, runs every notebook, and stopping that would stop them all.
-        A worker multiprocessing spawned (torch's mp.spawn) runs its launcher's script: named after it."""
+        A worker multiprocessing spawned (torch's mp.spawn) runs its launcher's script: named after it; one its
+        forkserver forked (Python 3.14's way on Linux) after the script that started the forkserver."""
         command = self._command(pid)
         kernel = command[0].startswith("ipykernel") or re.search(r"\bkernel-[^/\s]*\.json\b", command[1])
         launcher = None if kernel else launcher_of(pid)
+        forked = FORKSERVER in command[1]  # the forkserver's command line, its workers' too
+        launcher = launcher_of(launcher) if forked and launcher else launcher
         lead = launcher and self._command(launcher)
-        if lead and command[1].endswith(" --multiprocessing-fork"):
+        if lead and (forked or command[1].endswith(" --multiprocessing-fork")):
             command = lead
         return command + process_facts(pid) + ((launcher, lead[0]) if launcher else (pid, None))
 
@@ -959,6 +962,7 @@ def parent_of(pid):
 NOT_LAUNCHERS = {"bash", "sh", "dash", "zsh", "fish", "ksh", "mksh", "ash", "tcsh", "csh", "pwsh", "nu", "xonsh",
                  "elvish", "tmux: server", "screen", "SCREEN", "zellij", "sshd", "sshd-session", "sudo", "su", "login",
                  "systemd", "init", "script", "nohup", "raylet"}
+FORKSERVER = "from multiprocessing.forkserver import main"  # what multiprocessing's forkserver runs (python -c)
 
 
 def launcher_of(pid):
@@ -968,7 +972,10 @@ def launcher_of(pid):
     if not parent or parent <= 1 or uid_of(parent) != uid_of(pid):
         return None
     name = proc("{}/comm".format(parent))
-    return None if name is None or name.strip() in NOT_LAUNCHERS else parent
+    if name is None:
+        return None
+    program = argv_of(parent)[:1]  # a shell running a script, as ./run.sh, is named after the script
+    return None if {name.strip(), *map(os.path.basename, program)} & NOT_LAUNCHERS else parent
 
 
 def holds_gpu(pid):
@@ -1894,15 +1901,17 @@ def process_label(processes, room, selected=frozenset()):
             tag, process = entries[i]
             gap = [] if i == start else [(" · ", DIM)] if tag == last else [("   ", "")]
             details = " ".join(part for part in (run_time(process), memory(process)) if part != "-")
-            entry = (gap + (tagged(process) + [(": ", DIM)] if tag and tag != last else [])
-                     + [process_name(process, selected)] + ([(" " + details, DIM, process.job)] if details else []))
+            who = tagged(process) + [(": ", DIM)] if tag and tag != last else []
+            what = [process_name(process, selected)] + ([(" " + details, DIM, process.job)] if details else [])
             rest = len(entries) - i - 1
-            if width_of(label + entry + more(rest)) > room:
-                # The first entry is always shown, cut if need be; later ones collapse into the count.
+            if width_of(label + gap + who + what + more(rest)) > room:
+                # The first entry is always shown, cut if need be, a picked one without its account (the bottom
+                # line has it), so that its name shows; later ones collapse into the count.
                 if i == start:
-                    return clip(label + entry, room - width_of(more(rest))) + more(rest), i
+                    first = label + ([] if process.job in selected else who) + what
+                    return clip(first, room - width_of(more(rest))) + more(rest), i
                 return label + more(rest + 1), i - 1
-            label += entry
+            label += gap + who + what
             last = tag
         return label, len(entries) - 1
     for start in range(focus + 1):
@@ -2016,10 +2025,8 @@ COLUMNS = [
         len(j.members) > 1), lambda j: j.name.lower()),
     ("GPUs", 8, lambda j: [(ranges(j.gpus), "")], lambda j: j.gpus),
     (">util", 5, lambda j: share(j.util, 100), lambda j: -1 if j.util is None else j.util),
-    (">memory", 7, lambda j: [("-" if j.mem is None else "{:.1f}G".format(j.mem), "")],
-     lambda j: -1 if j.mem is None else j.mem),
-    (">time", 7, lambda j: [(elapsed(j.started) if j.started is not None else "-", "")],
-     lambda j: -(j.started or 0)),
+    (">memory", 7, lambda j: [(memory(j), "")], lambda j: -1 if j.mem is None else j.mem),
+    (">time", 7, lambda j: [(run_time(j), "")], lambda j: -(j.started or 0)),
     ("command", 0, lambda j: [(j.command, DIM)], lambda j: j.command),
 ]
 SORTS = {heading.lstrip(">"): key for heading, _, _, key in COLUMNS}
@@ -2264,7 +2271,7 @@ def footer(width, newer=None, picker=()):
         link = [("   what's new: " + RELEASES, DIM)] if command else []  # a copied nvmon.py already links there
     every = keys(("v", "view"), ("c", "colors"), ("p", "processes"), ("Esc / q", "quit"))
     few = keys(("p", "processes"), ("Esc / q", "quit"))
-    # As much as fits: the link goes first, then how to update, the keys for view and theme, the picker.
+    # As much as fits: the link goes first, then the keys for view and theme, how to update, the picker.
     options = [(picker + notice + how + link, every), (picker + notice + how, every), (picker + notice + how, few),
                (picker + notice, few), (notice[1:] if picker else notice, few)]
     left, right = next((option for option in options if width_of(option[0]) + 2 + width_of(option[1]) <= width),
@@ -2340,9 +2347,9 @@ class View:
                      time.monotonic() + 3)
 
     def pick(self, pids, group=None):
-        """Pick the jobs `pids`, in the list's order, the first in focus, by the line of the tree's `group`
-        if so; none lets all go, and closes the list if a pick opened it."""
-        self.picked, self.group = set(pids), group
+        """Pick the jobs `pids`, in the list's order, the first in focus and its line kept in view, by the line
+        of the tree's `group` if so; none lets all go, and closes the list if a pick opened it."""
+        self.picked, self.group, self.follow = set(pids), group, True
         self.job = next((job.pid for job in self.jobs if job.pid in self.picked), None)
         if not self.picked:
             self.only = False
@@ -2530,20 +2537,19 @@ class View:
     def walk(self, key):
         """Tab and the arrows with no list open: a job at a time, as the boxes on screen show them (boxed), the
         way they lie there. Along a box's bottom edge ← → (and Tab), on into the next box; ↑ ↓ to the first
-        of the box above or below. In the processes view, a line each, ↑ ↓ one by one (← → move them
-        sideways). A job in two boxes (DDP) is passed by once."""
+        other job of the nearest box above or below. In the processes view, a line each, ↑ ↓ one by one (← →
+        move them sideways). The job in focus met again at once, as a DDP job in the next box, is passed by."""
         order, step = self.boxed, (-1 if key in ("left", "up", "backtab") else 1)
         here = (self.box, self.job) if (self.box, self.job) in self.boxed else next(
             ((box, job) for box, job in order if job == self.job), None)
         if key in ("home", "end") or here is None:
             j = 0 if key == "home" or key != "end" and step > 0 else len(order) - 1
-        elif key in ("up", "down") and self.left != "processes":  # the first of the nearest box straight above
-            where = {index: (rows.start, cols.start) for rows, cols, index in self.panels}  # or below with any
+        elif key in ("up", "down") and self.left != "processes":  # straight above or below, the nearest first
+            where = {index: (rows.start, cols.start) for rows, cols, index in self.panels}
             row, col = where[here[0]]
-            column = sorted((where[box][0], box) for box in dict.fromkeys(box for box, _ in order)
-                            if where[box][1] == col and (where[box][0] - row) * step > 0)
-            box = column and (column[0] if step > 0 else column[-1])[1]
-            j = next(k for k, (b, _) in enumerate(order) if b == box) if column else order.index(here)
+            ahead = [(where[box][0] * step, k) for k, (box, job) in enumerate(order)
+                     if job != self.job and where[box][1] == col and (where[box][0] - row) * step > 0]
+            j = min(ahead)[1] if ahead else order.index(here)
         else:
             i = j = order.index(here)
             while 0 <= j + step < len(order) and (j == i or order[j][1] == self.job):
@@ -2676,12 +2682,12 @@ class View:
             target = self.target(row, col)
             if isinstance(target, tuple) and target[0] != "group":  # a key hint, a heading, a GPU's number,
                 return self.handle(target)                             # a group's arrow
-            if target is None:  # anywhere else in a GPU's box: that GPU
-                target = next((("box", index) for rows, cols, index in self.panels if row in rows and col in cols),
-                              None)
+            box = next((index for rows, cols, index in self.panels if row in rows and col in cols), None)
+            if target is None and box is not None:  # anywhere else in a GPU's box: that GPU
+                target = ("box", box)
             now = time.monotonic()
             double = target is not None and self.clicked[1] == target and now - self.clicked[0] < 0.4
-            self.asking, self.follow, self.clicked = None, True, (now, target)
+            self.asking, self.clicked, self.box = None, (now, target), box  # the arrows go on from this box
             # A job picks it, a GPU or a group of the tree the jobs on it, and outside the list opens that; the
             # same again lets them go, as does a place meaning nothing, which outside the list closes that too.
             # A double click picks them and shows only their GPUs, or all again.
@@ -2754,8 +2760,9 @@ class View:
         elif key in ("left", "right") and self.left == "processes":  # every GPU's processes, sideways
             step = 8 if key == "right" else -8
             self.scroll = {index: (top, shift + step) for index, (top, shift) in self.scroll.items()}
-        elif key in WALKS and not self.listing and self.boxed:
-            self.walk(key)
+        elif key in WALKS and not self.listing:  # with no job in the boxes on screen, none
+            if self.boxed:
+                self.walk(key)
         elif key in MOVES and self.entries:  # the list's lines, a group's among them, picking all its jobs; a
             i, step = self.at(), MOVES[key]  # job's workers' lines pick the job, as its line does: passed by
             i = (-1 if step > 0 else len(self.entries)) if i is None else i
@@ -2765,7 +2772,6 @@ class View:
                 j += (step > 0) * 2 - 1
             _, _, group, pids = self.entries[j]
             self.pick(pids, group)
-            self.follow = True
         elif self.picked and key in ("f", "enter"):
             self.only = not self.only
         elif self.picked and key in ("t", "k"):

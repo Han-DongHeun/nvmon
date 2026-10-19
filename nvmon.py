@@ -2018,15 +2018,16 @@ def render(gpus, width, height, shape, selected=frozenset(), left="graph", scrol
 
 
 # The process list's columns: heading, width (">" when flush right), the cell for a job as segments (None for
-# the tree's, see tree), and the key it sorts by. "command" takes whatever width is left.
+# the tree's, see tree), and the key it sorts by. "command" takes whatever width is left. The numbers, GPUs to
+# time, flush right, util to time a cell wider than they need: apart, and still one block.
 COLUMNS = [
     ("account/env", 24, None, account),  # headed "account / env / PID": the accounts, their environments, PIDs
     ("process", 22, lambda j: [(j.name, THEME.accent)] + [(" · {} workers".format(len(j.members)), DIM)] * (
         len(j.members) > 1), lambda j: j.name.lower()),
-    ("GPUs", 8, lambda j: [(ranges(j.gpus), "")], lambda j: j.gpus),
-    (">util", 5, lambda j: share(j.util, 100), lambda j: -1 if j.util is None else j.util),
-    (">memory", 7, lambda j: [(memory(j), "")], lambda j: -1 if j.mem is None else j.mem),
-    (">time", 7, lambda j: [(run_time(j), "")], lambda j: -(j.started or 0)),
+    (">GPUs", 8, lambda j: [(ranges(j.gpus), "")], lambda j: j.gpus),
+    (">util", 6, lambda j: share(j.util, 100), lambda j: -1 if j.util is None else j.util),
+    (">memory", 8, lambda j: [(memory(j), "")], lambda j: -1 if j.mem is None else j.mem),
+    (">time", 8, lambda j: [(run_time(j), "")], lambda j: -(j.started or 0)),
     ("command", 0, lambda j: [(j.command, DIM)], lambda j: j.command),
 ]
 SORTS = {heading.lstrip(">"): key for heading, _, _, key in COLUMNS}

@@ -16,7 +16,7 @@ Or into the environment you are in:
 pip install nvmon
 ```
 
-Or no install at all (Linux): the one file, run with Python 3.6.1+ (on a server without internet, copy it over).
+Or no install at all (Linux, macOS): the one file nvmon.py, run with Python 3.6.1+ (on a server without internet, copy it over).
 
 ```bash
 curl -LO https://github.com/Han-DongHeun/nvmon/releases/latest/download/nvmon.py && python3 nvmon.py
@@ -26,7 +26,7 @@ curl -LO https://github.com/Han-DongHeun/nvmon/releases/latest/download/nvmon.py
 
 ```bash
 nvmon              # Esc, q or Ctrl+C to quit
-nvmon -i 1         # refresh every second (default: 0.5)
+nvmon -i 1         # refresh every second (default: 0.5; - and + change it)
 nvmon -g 0,2,4-7   # only these GPUs
 ssh -t HOST nvmon  # over ssh: -t gives it a terminal
 ```
@@ -75,13 +75,13 @@ Shift+wheel or ← → sideways.
 
 A **job** is a process, or a launcher (torchrun, deepspeed…) with its workers.
 
-- **Pick** one: click a process, or press Tab (Tab and the arrows move on). Its GPUs stand out, the
-  list opens with it picked, and the bottom line sums it up.
+- **Pick** one: click a process, or go with the arrows: ← → along a box's bottom edge, ↑ ↓ from box to
+  box. Its GPUs stand out and the bottom line sums it up.
 - **Pick a GPU's jobs**: click anywhere else in its box. The same again lets go, and closes the list it
   opened.
 - `f`, or a double click: only the picked jobs' GPUs; again for all.
-- `p`: every job in a list. Click a heading to sort, again to reverse (or `s`, `r`). ← → scroll the
-  picked job's command. Esc, or a click on an empty spot, lets go.
+- `p`: every job, in a tree by account and conda environment; ▶ ▼ fold. Click a heading to sort, again
+  to reverse (or `s`, `r`). ← → scroll the picked job's command. Esc closes it.
 - `t` stops the picked jobs of yours (SIGTERM), `k` kills them (SIGKILL): after a `y`, and only those
   still the jobs you picked.
 
@@ -111,13 +111,15 @@ The list, busiest first, one job picked; and that job with `f`:
 | `c` / `C` | next / previous theme |
 | `p` | process list, open or close |
 | point at a graph | utilization and memory then |
-| click, Tab, ↑ ↓ | pick a job |
+| click, arrows, Tab | pick a job |
 | click a GPU | pick its jobs |
 | `f`, double click | only the picked jobs' GPUs, or all |
 | `t`, `k`, then `y` | stop (SIGTERM) or kill (SIGKILL) the picked jobs |
 | click a heading, `s`, `r` | sort the list, by the next heading, the other way |
-| wheel, ← → | scroll; sideways the commands |
+| wheel | scroll |
 | PgUp, PgDn | scroll the GPUs |
+| `-` `+` | refresh faster, slower |
+| Ctrl+Z, Ctrl+L | put aside (`fg` to come back), redraw |
 | `0`-`9`, click a number | hide or show a GPU |
 | Esc | a step back, then quit |
 | `q`, Ctrl+C | quit |
@@ -126,7 +128,7 @@ Hold Shift to select text.
 
 ## It remembers
 
-The view, theme, list order and hidden GPUs, for each computer you connect from, in
+The view, theme, list order, hidden GPUs and refresh, for each computer you connect from, in
 `~/.config/nvmon/settings.json` (`%APPDATA%\nvmon` on Windows). Delete it to start afresh.
 
 ## Terminals
@@ -135,6 +137,7 @@ The view, theme, list order and hidden GPUs, for each computer you connect from,
   Japanese): nvmon notices and draws in ASCII. No 24-bit color reported: 256 colors.
 - Boxes still broken: use a font with one-cell line characters (D2Coding, Cascadia Mono, JetBrains Mono,
   DejaVu Sans Mono) and UTF-8.
+- macOS (Apple silicon): iTerm2, Ghostty or kitty; Terminal.app leaves seams in the graphs.
 - Windows: use Windows Terminal. `k` ends a process at once; there is no `t`, as Windows has nothing like
   SIGTERM.
 - nvmon asks PyPI once at start for a newer release; `NVMON_NO_UPDATE_CHECK=1` turns that off.

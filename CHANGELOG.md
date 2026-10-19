@@ -3,6 +3,23 @@
 What changes for you in each release. The same notes appear on the
 [releases page](https://github.com/Han-DongHeun/nvmon/releases).
 
+## 0.4.0
+
+- The process list is a tree: account, conda environment, job and a job's workers, each group with its
+  totals. Others' accounts start folded (click ▶ ▼); a group's line picks all its jobs. No PID column.
+- The arrows go the way the boxes lie: ← → along a box's bottom edge, ↑ ↓ from box to box (↓ was the
+  next job). A pick out of sight is brought into view.
+- `-` and `+`, or the wheel over "refresh", set the refresh from 0.1 s to 10 s, kept for the next run.
+- Ctrl+Z puts nvmon aside and `fg` brings it back; Ctrl+L redraws.
+- Korean, Chinese, Japanese and emoji no longer push borders and columns out of place.
+- On Windows a Python job shows its script and conda environment, not python.exe.
+- `t` and `k` no longer reach Jupyter or Spyder for a Julia, R or Spyder kernel, nor your ssh session
+  for a program run over ssh.
+- Apple silicon Macs work too.
+- Fixed: a utilization over 100 %; cores, tensor and PCIe reading 0 at start and after a click; the
+  pointer's last moves typed into the shell when nvmon quit over ssh; F1-F5 on the Linux console
+  quitting; crashes and garbled frames in some Windows setups. Python 3.6.1 or newer.
+
 ## 0.3.5
 
 - The mouse works on Windows as well: point at a graph, click, scroll with the wheel.

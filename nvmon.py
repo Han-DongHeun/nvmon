@@ -4,10 +4,11 @@
 One box per GPU: utilization history on the left (0 % at the bottom, 100 % at
 the top); utilization, memory and PCIe traffic on the right; name, power,
 warnings, temperature, fan and clock on the top edge; processes on the bottom
-edge. It talks to the NVML library that ships with the NVIDIA driver through
-ctypes and draws with plain ANSI escape codes, so a single file runs on any
-Python >= 3.6.1. At start it asks PyPI whether a newer release is out
-(NVMON_NO_UPDATE_CHECK=1 turns that off).
+edge. It talks to the NVML library that ships with the NVIDIA driver (on an
+Apple silicon Mac, to IOKit and IOReport) through ctypes and draws with plain
+ANSI escape codes, so a single file runs on any Python >= 3.6.1. At start it
+asks PyPI whether a newer release is out (NVMON_NO_UPDATE_CHECK=1 turns that
+off).
 
     nvmon [-i SECONDS] [-g 0,2,4-7]        q / Esc / Ctrl+C to quit
 """
@@ -2162,8 +2163,9 @@ def process_list(entries, width, rows, selected, focus, top, sort, shift=0):
         values = [stem if cell is None else cell(job) for _, _, cell, _ in COLUMNS]
         if shift and job.pid == focus and job.command:
             values[-1] = [("…" + cut(job.command, shift)[1], DIM)]
-        lines.append(cells([[(seg[0], THEME.selected if chosen else seg[1], seg[2] if len(seg) > 2 else means)
-                             for seg in column] for column in values], width, (THEME.selected if chosen else "", means)))
+        style = THEME.selected if chosen else ""
+        lines.append(cells([[(seg[0], style or seg[1], seg[2] if len(seg) > 2 else means) for seg in column]
+                            for column in values], width, (style, means)))
     if not entries:
         lines.append([(" no processes on these GPUs", DIM)])
     above, below = top, len(entries) - top - len(shown)
@@ -2690,8 +2692,10 @@ class View:
             group = target[1] if isinstance(target, tuple) and target[0] == "group" else None
             if group:
                 pids = [job.pid for job in self.held(group)]
+            elif isinstance(target, tuple):
+                pids = [job.pid for job in self.jobs if target[1] in job.gpus]
             else:
-                pids = [job.pid for job in self.jobs if target[1] in job.gpus] if isinstance(target, tuple) else [target]
+                pids = [target]
             if not pids:
                 self.note = ([("no processes on GPU {}".format(target[1]), DIM)], now + 2)
             elif double:
@@ -2836,7 +2840,7 @@ def client():
 
 class Settings:
     """What stays from one run to the next, for each client (see client): what is beside the stats, the theme, the
-    list's order, and the GPUs hidden, those for each machine, as several often share a home directory.
+    list's order, the refresh, and the GPUs hidden, those for each machine, as several often share a home directory.
     Kept in ~/.config/nvmon/settings.json (%APPDATA%\\nvmon on Windows); a file that cannot be read or written
     only means that nothing is kept."""
 
@@ -3244,8 +3248,8 @@ def main():
         prog="nvmon", description="A fancy NVIDIA GPU monitor for the terminal.",
         epilog="At start nvmon asks PyPI whether a newer release is out; NVMON_NO_UPDATE_CHECK=1 turns that "
                "off. Colors are 24-bit where the terminal says it shows them, else 256. The view, the theme, the "
-               "list's order and hidden GPUs are kept for each computer you connect from, in "
-               "~/.config/nvmon/settings.json. " + REPO)
+               "list's order, hidden GPUs and the refresh are kept for each computer you connect from, in "
+               "~/.config/nvmon/settings.json (%APPDATA%\\nvmon on Windows). " + REPO)
     parser.add_argument("-i", "--interval", type=interval, metavar="SEC",
                         help="seconds between updates, at least 0.1 (default: 0.5, or as last set with - and +)")
     parser.add_argument("-g", "--gpus", type=gpu_list, metavar="LIST",

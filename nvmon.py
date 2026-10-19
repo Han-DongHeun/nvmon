@@ -2303,6 +2303,7 @@ class View:
         self.shift, self.shifted = 0, None  # how far the selected job's command is scrolled, and whose
         self.clicked = (0, None)          # (when, what): the last click, to tell a double click
         self.scroll = {}                  # GPU index: (lines, cells) its processes are moved on
+        self.followed = None              # the job in focus the boxes' processes last scrolled to
         self.areas = []                   # (rows, columns, GPU) where those processes are on screen
         self.graphs = []                  # (rows, columns, GPU) where the graphs are on screen
         self.panels = []                  # (rows, columns, GPU index) where the boxes are on screen
@@ -2423,8 +2424,14 @@ class View:
                 continue
             most = listing_extent(g.now.processes, room, inner)  # the processes' offsets in range
             top, shift = self.scroll.get(g.index, (0, 0))
+            if self.job != self.followed:  # a new pick: its first line here in view; the wheel can move off it
+                at = next((i for i, (_, p) in enumerate(process_entries(g.now.processes)) if p.job in self.picked),
+                          None)
+                top = top if at is None else min(max(top, at - inner + 1), at)
             self.scroll[g.index] = min(max(top, 0), most[0]), min(max(shift, 0), most[1])
             self.areas.append((drawn(y, y + inner), range(x, x + room), g.index))
+        if self.left == "processes":
+            self.followed = self.job
         return render(gpus, width, height, (cols, inner), self.picked, self.left, self.scroll) + note
 
     def hovered(self):

@@ -3,6 +3,18 @@
 What changes for you in each release. The same notes appear on the
 [releases page](https://github.com/Han-DongHeun/nvmon/releases).
 
+## 0.4.1
+
+- Under the pointer, what a click acts on lights up: a job's line or name, a heading, a key hint, a GPU's
+  number.
+- In the process list, GPUs lines up on the right as the numbers after it do, all a little further apart.
+- ↑ ↓ pass a job's other boxes (DDP) for the next job above or below; after a click, the arrows go on from
+  the box clicked.
+- A job started by `./run.sh` is its own, as one started by `bash run.sh` is: `t` reaches it, not just the
+  shell. Workers of Python 3.14's forkserver show their script, not python3.
+- Fixed: with only idle GPUs on screen, the arrows picked jobs on hidden ones; on a narrow box's edge, a
+  picked job's name cut off behind its account; `t` and `k` asking about a launcher already gone.
+
 ## 0.4.0
 
 - The process list is a tree: account, conda environment, job and a job's workers, each group with its

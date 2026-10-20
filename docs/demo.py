@@ -162,12 +162,16 @@ STILL_AT = 5.2  # seconds into the GIF for its still: the pointer resting on a g
 
 def pointer_path(view, cols):
     """Where the pointer goes in the GIF, as (seconds, (row, column), bow) keyframes: in from the right, onto
-    the busiest GPU's graph, left along it, a rest, a little further, then out to the right again. Each way
-    there bends by `bow` rows, as a hand's does."""
+    the busiest GPU's graph, left along it, a rest, a little further, down onto the first job named on the
+    box's bottom edge (lit up, as what a click picks), then out to the right again. Each way there bends by
+    `bow` rows, as a hand's does."""
     rows, graph, _ = max(view.graphs, key=lambda shown: sum(shown[2].history))
-    mid, right = rows.start + len(rows) // 2, graph.stop
+    mid, right, edge = rows.start + len(rows) // 2, graph.stop, rows.stop
+    starts = itertools.accumulate([0] + [nvmon.cells_of(seg[0]) for seg in view.lines[edge]])
+    name = next(x + 2 for x, seg in zip(starts, view.lines[edge]) if len(seg) > 2 and isinstance(seg[2], int))
     return [(1.5, (mid + 3.5, cols + 2), 0), (2.7, (mid + 0.4, right - 5), -1.5), (4.8, (mid - 0.3, right - 33), 0.6),
-            (5.6, (mid - 0.3, right - 33), 0), (6.3, (mid + 0.5, right - 41), 0.4), (8.0, (mid - 2, cols + 3), -2)]
+            (5.6, (mid - 0.3, right - 33), 0), (6.3, (mid + 0.5, right - 41), 0.4), (7.4, (edge, name), 0.6),
+            (8.4, (edge, name), 0), (9.6, (mid - 2, cols + 3), -2)]
 
 
 def along(path, t):

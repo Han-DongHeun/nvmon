@@ -1716,15 +1716,26 @@ def lit(style):
     return paper + COLOR_ARG.sub(lighter, style[len(paper):])
 
 
+# The terminal's own text color lit up (glow): white, as nvmon's colors are made for a dark screen, where that
+# color is a light one; or, in bold already as bright as it goes, a gray a little darker.
+WHITE, DIMMER = _rgb((255, 255, 255)), _rgb((150, 150, 150))
+
+
 def glow(style):
-    """`style` lit up for what a click under the pointer would act on (View.light): further from the screen's
-    background, its colors halfway to white; on PAPER halfway to white before restyle turns lightness around,
-    so darker there (lit goes the other way, as a lit graph column should, but text would look faded). Bold
-    where it has no color, and as it is where it is bold already: as bright as the terminal's own color goes."""
+    """`style` lit up for what a click under the pointer would act on (View.light): its colors halfway to
+    white, further from the dark screen; on PAPER the same before restyle turns lightness around, so darker
+    there (lit goes the other way, right for a graph column, but text would look faded). What cannot get
+    brighter, a color near white or the terminal's own in bold, a little darker instead."""
     paper = ON_PAPER if style.startswith(ON_PAPER) else ""
+
+    def turned(m):
+        rgb = _palette_rgb(int(m.group(5))) if m.group(5) else tuple(int(v) for v in m.group(2, 3, 4))
+        L, a, b = _oklab(rgb)
+        rgb = tuple((v + 255) // 2 for v in rgb) if L < 0.9 else _from_oklab((L - 0.2, a, b))
+        return "\x1b[{}8;2;{};{};{}m".format(m.group(1), *rgb)
     if COLOR_ARG.search(style, len(paper)):
-        return paper + lit(style[len(paper):])
-    return style if BOLD in style else style + BOLD
+        return paper + COLOR_ARG.sub(turned, style[len(paper):])
+    return style + (DIMMER if BOLD in style else WHITE)
 
 
 def run_at(lines, row, col):

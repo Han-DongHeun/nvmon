@@ -1485,21 +1485,27 @@ def about_all(jobs):
     return [(" · ".join(parts), DIM)]
 
 
+def leads(job):
+    """Whether `job`'s launcher still leads its workers: their parent, and ours. Not with no launcher (none on
+    Windows and macOS), one gone (its workers left to PID 1), or one not their parent (multiprocessing's
+    forkserver forks them)."""
+    workers = [pid for pid, _ in job.members if pid != job.pid]  # the launcher may be on a GPU too
+    return bool(job.launcher) and ours(job.pid) and all(parent_of(pid) == job.pid for pid in workers)
+
+
 def stop(job, name):
     """Send signal `name` ("SIGTERM" or "SIGKILL") to `job`, once /proc or Windows confirms its PIDs still
     are the processes we saw: started when we saw them, holding a GPU open (inside a container, NVML can
-    report PIDs of the host), and ours. While its launcher still leads them (their parent, ours), SIGTERM
-    goes to the launcher, which then ends its workers, and SIGKILL, which it cannot pass on, to each worker
-    as well; with no launcher (none on Windows and macOS), or one gone (its workers left to PID 1), to each
-    process. On Windows, which has no SIGTERM, SIGKILL only (see View.handle): each process is ended at once.
-    Returns (a note on what happened, whether any was sent)."""
+    report PIDs of the host), and ours. While its launcher leads them (see leads), SIGTERM goes to the
+    launcher, which then ends its workers, and SIGKILL, which it cannot pass on, to each worker as well;
+    else to each process. On Windows, which has no SIGTERM, SIGKILL only (see View.handle): each process is
+    ended at once. Returns (a note on what happened, whether any was sent)."""
     for pid, started in job.members:
         if start_time(pid) != started or not holds_gpu(pid):
             return [("{} has changed meanwhile: nothing sent".format(job.name), WARN)], False
         if not ours(pid):
             return [("only your own processes can be stopped", WARN)], False
-    workers = [pid for pid, _ in job.members if pid != job.pid]  # the launcher may be on a GPU too
-    led = bool(job.launcher) and ours(job.pid) and all(parent_of(pid) == job.pid for pid in workers)
+    workers, led = [pid for pid, _ in job.members if pid != job.pid], leads(job)
     targets = ([job.pid] + (workers if name == "SIGKILL" else [])) if led else [pid for pid, _ in job.members]
     sent = []
     for pid in targets:  # each on its own: one ended meanwhile keeps none of the others from theirs
@@ -2644,9 +2650,10 @@ class View:
 
     def question(self, picked):
         """"stop train.py on GPUs 4-5: SIGTERM to its torchrun (PID 48213), which ends its 2 workers?" and the
-        like; for several jobs "stop your 2 of 3 jobs on GPUs 4-5,7, SIGTERM to each: train.py, eval.py?". The
-        GPUs are those the signal reaches, whichever was clicked. On Windows, "kill python.exe on GPU 0 (PID 4120)
-        at once?", as no signal is sent there."""
+        like, its launcher leading them (see leads), else "SIGTERM to each of its 2 processes"; for several jobs
+        "stop your 2 of 3 jobs on GPUs 4-5,7, SIGTERM to each: train.py, eval.py?". The GPUs are those the
+        signal reaches, whichever was clicked. On Windows, "kill python.exe on GPU 0 (PID 4120) at once?", as no
+        signal is sent there."""
         what = "stop" if self.asking == "SIGTERM" else "kill"
         ours = [job for job in picked if job.mine]
         where = "on " + gpu_numbers(index for job in ours for index in job.gpus)
@@ -2656,9 +2663,12 @@ class View:
             how = " at once" if os.name == "nt" else ", {} to each".format(self.asking)
             return "{} {} {}{}: {}?".format(what, which, where, how, ", ".join(job.name for job in ours))
         job = ours[0]
-        if not job.launcher:
+        if not leads(job):
+            if len(job.members) > 1:
+                return "{} {} {}: {} to each of its {} processes?".format(what, job.name, where, self.asking,
+                                                                          len(job.members))
             how = "at once" if os.name == "nt" else "with " + self.asking
-            return "{} {} {} (PID {}) {}?".format(what, job.name, where, job.pid, how)
+            return "{} {} {} (PID {}) {}?".format(what, job.name, where, job.members[0][0], how)
         passed = ", which ends its" if self.asking == "SIGTERM" else " and to its"
         return "{} {} {}: {} to its {} (PID {}){} {} workers?".format(what, job.name, where, self.asking,
                                                                      job.launcher, job.pid, passed, len(job.members))

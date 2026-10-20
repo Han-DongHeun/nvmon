@@ -1716,6 +1716,40 @@ def lit(style):
     return paper + COLOR_ARG.sub(lighter, style[len(paper):])
 
 
+def glow(style):
+    """`style` lit up for what a click under the pointer would act on (View.light): further from the screen's
+    background, its colors halfway to white; on PAPER halfway to white before restyle turns lightness around,
+    so darker there (lit goes the other way, as a lit graph column should, but text would look faded). Bold
+    where it has no color, and as it is where it is bold already: as bright as the terminal's own color goes."""
+    paper = ON_PAPER if style.startswith(ON_PAPER) else ""
+    if COLOR_ARG.search(style, len(paper)):
+        return paper + lit(style[len(paper):])
+    return style if BOLD in style else style + BOLD
+
+
+def run_at(lines, row, col):
+    """(first, last, meaning) of the segments of line `row`, next to each other, that mean what a click at
+    (row, col) does (see View.target); None where it means nothing."""
+    if not 0 <= row < len(lines):
+        return None
+    line, x = lines[row], 0
+    for i, seg in enumerate(line):
+        x += cells_of(seg[0])
+        if col < x:
+            break
+    else:
+        return None
+    means = seg[2] if len(seg) > 2 else None
+    if means is None:
+        return None
+    first = last = i
+    while first > 0 and line[first - 1][2:3] == (means,):
+        first -= 1
+    while last + 1 < len(line) and line[last + 1][2:3] == (means,):
+        last += 1
+    return first, last, means
+
+
 def ago(seconds):
     """How long ago, as short as a run time: now, 14.5s ago, 3m05s ago, 1h02m ago."""
     if seconds < 0.05:
@@ -2400,7 +2434,8 @@ class View:
             if wide > room and own is not None and top <= own < top + rows - 2:
                 self.command_row = self.list_rows.start + 1 + own - top
         # A window one line high: the bottom line alone, with its questions and keys.
-        self.lines = self.hover([top_line] + body + [self.bottom_line(width, picked, newer, gpus)])[-height:]
+        lines = self.hover([top_line] + body + [self.bottom_line(width, picked, newer, gpus)])[-height:]
+        self.lines = self.light(lines)
         return self.lines
 
     def boxes(self, gpus, width, height):
@@ -2619,13 +2654,28 @@ class View:
 
     def target(self, row, col):
         """What a click at (row, col) of the last screen means; None for nothing."""
-        if 0 <= row < len(self.lines):
-            x = 0
-            for seg in self.lines[row]:
-                if x <= col < x + cells_of(seg[0]):
-                    return seg[2] if len(seg) > 2 else None
-                x += cells_of(seg[0])
-        return None
+        run = run_at(self.lines, row, col)
+        return run[2] if run else None
+
+    def under(self, lines=None):
+        """(row, first, last segment) of the click target under the pointer on `lines`, the last screen if none:
+        what light lights up, the screen drawn again when it changes. None for nothing, and for the refresh,
+        whose buttons show instead."""
+        run = self.pointer and run_at(self.lines if lines is None else lines, *self.pointer)
+        return (self.pointer[0],) + run[:2] if run and run[2] not in REFRESH else None
+
+    def light(self, lines):
+        """`lines` with the click target under the pointer (under) lit up (glow), as far as it goes on its line:
+        a job's line in the list, a job's name on a box's edge, a heading, a key hint. Not a GPU's box as a whole,
+        which the pointer is over most of the time."""
+        under = self.under(lines)
+        if under is None:
+            return lines
+        row, first, last = under
+        line = lines[row]
+        lines = list(lines)
+        lines[row] = line[:first] + [(seg[0], glow(seg[1])) + seg[2:] for seg in line[first:last + 1]] + line[last + 1:]
+        return lines
 
     def handle(self, event):
         """Act on one key or mouse event; False means quit."""
@@ -3331,11 +3381,12 @@ def main():
                                             update.newer),
                                 view.shows, view.theme.gray, size)
                 # Keys and clicks redraw at once, the pointer when it moves over a graph (the chip goes with
-                # it), a note when it runs out; the numbers move on at the next frame. A quarter second at
-                # most, to see a resized window, or a note gone, soon with a long interval too.
+                # it) or onto another click target (lit up), a note when it runs out; the numbers move on at
+                # the next frame. A quarter second at most, to see a resized window, or a note gone, soon with a
+                # long interval too.
                 wait = 0.01 if peek is not None else (poll_at or frame_at) - time.monotonic()
                 events = screen.read(min(wait, 0.25))
-                pointed, before = view.pointed(), view.interval
+                pointed, under, before = view.pointed(), view.under(), view.interval
                 was_lit = refresh_pointed(size[0], view.interval, view.pointer)
                 going = all(map(view.handle, events))
                 if view.interval != before:  # sooner: the next frame at the new interval from now, at the latest
@@ -3347,8 +3398,8 @@ def main():
                 if not going:
                     break
                 lit = refresh_pointed(size[0], view.interval, view.pointer)  # the buttons come and go with it
-                redraw = (any(e[0] != "move" for e in events) or view.pointed() != pointed or lit != was_lit
-                          or view.expired())
+                redraw = (any(e[0] != "move" for e in events) or view.pointed() != pointed or view.under() != under
+                          or lit != was_lit or view.expired())
                 detail = view.detail(gpus)
                 if detail - poller.detail:  # at the latest the next round, or the one after the round running
                     busy = not poller.done.is_set()

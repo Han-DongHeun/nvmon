@@ -13,10 +13,12 @@ jobs:
       - name: Tag must match __version__
         run: test "v$(python3 -c 'import nvmon; print(nvmon.__version__)')" = "$GITHUB_REF_NAME"
       - name: Release notes from CHANGELOG.md
-        # The lines under "## <version>" up to the next "## "; no notes, no release.
+        # The lines under "## <version>" up to the next "## ", each item's indented lines joined onto it (the
+        # release page breaks a line where the file does); no notes, no release.
         run: |
           awk -v version="${GITHUB_REF_NAME#v}" '/^## / { if (found) exit; found = ($2 == version); next } found' \
-            CHANGELOG.md > release-notes.md
+            CHANGELOG.md | awk '/^ +[^ ]/ { sub(/^ +/, " "); line = line $0; next } NR > 1 { print line } { line = $0 }
+            END { print line }' > release-notes.md
           test -n "$(tr -d '[:space:]' < release-notes.md)" \
             || { echo "CHANGELOG.md has no notes under '## ${GITHUB_REF_NAME#v}'"; exit 1; }
       - run: uv build

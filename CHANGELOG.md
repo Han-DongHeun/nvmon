@@ -7,7 +7,8 @@ What changes for you in each release. The same notes appear on the
 
 - Under the pointer, what a click acts on lights up: a job's line or name, a heading, a key hint, a GPU's
   number.
-- In the process list, GPUs lines up on the right as the numbers after it do, all a little further apart.
+- In the process list, the GPUs column lines up on the right as the numbers after it do, all a little
+  further apart.
 - ↑ ↓ pass a job's other boxes (DDP) for the next job above or below; after a click, the arrows go on from
   the box clicked.
 - A job started by `./run.sh` is its own, as one started by `bash run.sh` is: `t` reaches it, not just the

@@ -2620,6 +2620,18 @@ class View:
         self.box, job = order[j]
         self.pick([job])
 
+    def edge(self):
+        """-1 or 1 while a drag on the list holds the pointer above its lines or below them, with more lines
+        that way to scroll to; else 0."""
+        if not (self.dragging and self.listing and self.pointer):
+            return 0
+        row, room = self.pointer[0], len(self.list_rows) - 2
+        if row <= self.list_rows.start and self.top > 0:  # on the headings, or higher
+            return -1
+        if row > self.list_rows.start + room and self.top + room < len(self.entries):  # on the last line, or lower
+            return 1
+        return 0
+
     def scrolled(self, room):
         """The list's first line, kept in range and, after the selection moved, on the line picked by."""
         i = self.at()
@@ -2718,6 +2730,7 @@ class View:
             return True
         if kind == "drag":  # the button held from a press on the list: every line from that one to this one put
             self.pointer = value  # among the picks then, or taken out, as the press did to its own
+            self.top += self.edge()  # held above or below the list, it scrolls a line (again and again: see main)
             shown = range(self.top, min(len(self.entries), self.top + len(self.list_rows) - 2))
             if self.dragging and self.listing and shown:
                 first, before, adding = self.dragging
@@ -3434,13 +3447,16 @@ def main():
                                             header(width, view.interval, driver, poller.waiting(), view.pointer),
                                             update.newer),
                                 view.shows, view.theme.gray, size)
-                # Keys and clicks redraw at once, a drag when it changes the picks, the pointer when it moves over
-                # a graph (the chip goes with it) or onto another click target (lit up), a note when it runs out;
-                # the numbers move on at the next frame. A quarter second at most, to see a resized window, or a
-                # note gone, soon with a long interval too.
+                # Keys and clicks redraw at once, a drag on the list too, the pointer when it moves over a graph
+                # (the chip goes with it) or onto another click target (lit up), a note when it runs out; the
+                # numbers move on at the next frame. A quarter second at most, to see a resized window, or a note
+                # gone, soon with a long interval too; a drag held still beyond the list scrolls it on 20 lines
+                # a second.
                 wait = 0.01 if peek is not None else (poll_at or frame_at) - time.monotonic()
-                events = screen.read(min(wait, 0.25))
-                pointed, under, before, picks = view.pointed(), view.under(), view.interval, set(view.picked)
+                events = screen.read(min(wait, 0.05 if view.edge() else 0.25))
+                if not events and view.edge():
+                    events = [("drag",) + view.pointer]
+                pointed, under, before = view.pointed(), view.under(), view.interval
                 was_lit = refresh_pointed(size[0], view.interval, view.pointer)
                 going = all(map(view.handle, events))
                 if view.interval != before:  # sooner: the next frame at the new interval from now, at the latest
@@ -3452,8 +3468,9 @@ def main():
                 if not going:
                     break
                 lit = refresh_pointed(size[0], view.interval, view.pointer)  # the buttons come and go with it
-                redraw = (any(e[0] not in ("move", "drag", "release") for e in events) or view.picked != picks
-                          or view.pointed() != pointed or view.under() != under or lit != was_lit or view.expired())
+                redraw = (any(e[0] not in ("move", "drag", "release") for e in events)
+                          or bool(events and view.dragging) or view.pointed() != pointed or view.under() != under
+                          or lit != was_lit or view.expired())
                 detail = view.detail(gpus)
                 if detail - poller.detail:  # at the latest the next round, or the one after the round running
                     busy = not poller.done.is_set()

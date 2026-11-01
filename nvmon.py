@@ -2202,12 +2202,6 @@ def cells(values, width, fill=("",)):
     return line
 
 
-def line_means(entry):
-    """What a click on a line of the list (see tree) means: its job's PID, or ("group", key) on a group's."""
-    _, job, key, _ = entry
-    return job.pid if key is None else ("group", key)
-
-
 def process_list(entries, width, rows, selected, focus, top, sort, shift=0):
     """The list p opens, `rows` lines: the headings (clicking one sorts by it; `sort` = (column, descending)),
     the `entries`, a tree (see tree), from index `top` on, how many more. A line means its jobs when
@@ -2223,9 +2217,8 @@ def process_list(entries, width, rows, selected, focus, top, sort, shift=0):
                       "" if name == column else DIM, ("sort", name))])
     lines = [cells(head, width)]
     shown = entries[top:top + rows - 2]
-    for entry in shown:
-        stem, job, key, pids = entry
-        chosen, means = set(pids) <= selected, line_means(entry)
+    for stem, job, key, pids in shown:
+        chosen, means = set(pids) <= selected, job.pid if key is None else ("group", key)
         values = [stem if cell is None else cell(job) for _, _, cell, _ in COLUMNS]
         if shift and job.pid == focus and job.command:
             values[-1] = [("…" + cut(job.command, shift)[1], DIM)]
@@ -2373,8 +2366,6 @@ class View:
         self.shift, self.shifted = 0, None  # how far the selected job's command is scrolled, and whose
         self.clicked = (0, None)          # (when, what): the last click, to tell a double click
         self.dragging = None              # (list line pressed on, picks before, put in or not) while held down
-        self.marking = False              # Space has picked: the arrows move the cursor, not the pick (see space)
-        self.cursor = None                # what the arrows are on then: a job's PID, or ("group", key) in the list
         self.scroll = {}                  # GPU index: (lines, cells) its processes are moved on
         self.followed = None              # the job in focus the boxes' processes last scrolled to
         self.areas = []                   # (rows, columns, GPU) where those processes are on screen
@@ -2410,12 +2401,11 @@ class View:
 
     def pick(self, pids, group=None):
         """Pick the jobs `pids`, in the list's order, the first in focus and its line kept in view, by the line
-        of the tree's `group` if so; none lets all go, and closes the list if a pick opened it, and the arrows
-        pick again (see space)."""
+        of the tree's `group` if so; none lets all go, and closes the list if a pick opened it."""
         self.picked, self.group, self.follow = set(pids), group, True
         self.job = next((job.pid for job in self.jobs if job.pid in self.picked), None)
         if not self.picked:
-            self.only = self.marking = False
+            self.only = False
             self.listing = self.listing and not self.opened
             self.opened = False
 
@@ -2443,7 +2433,7 @@ class View:
         if self.job not in self.picked:  # the one in focus ended: the next
             self.job = picked[0].pid if picked else None
         self.group = self.group if picked else None  # none left of it, ended or let go as its account folded
-        self.only, self.marking = self.only and bool(picked), self.marking and bool(picked)
+        self.only = self.only and bool(picked)
         if not any(job.mine for job in picked):  # ours ended while asked about: nothing left to stop
             self.asking = None
         focus = next(job for job in picked if job.pid == self.job) if picked else None
@@ -2596,11 +2586,8 @@ class View:
         return [job for job in self.jobs if (job.owner, job.env, job.pid)[:len(key)] == key]
 
     def at(self):
-        """The index in the list of the line the arrows are on: the cursor's while Space has picked (see
-        marking); else the line picked by: the group's, else the job's in focus, else, folded away, the line of
-        the innermost group shown that holds it; or None."""
-        if self.marking:
-            return next((i for i, entry in enumerate(self.entries) if line_means(entry) == self.cursor), None)
+        """The index in the list of the line picked by: the group's, else the job's in focus, else, folded
+        away, the line of the innermost group shown that holds it; or None."""
         holder = None
         for i, (_, job, key, pids) in enumerate(self.entries):
             if key == self.group is not None or key is None and job.pid == self.job:
@@ -2609,51 +2596,29 @@ class View:
                 holder = i
         return holder
 
-    def placed(self, job):
-        """(GPU, job) of `job` in the boxes on screen (boxed): in the box the arrows are at (box), else the first
-        it is in; None in none."""
-        return (self.box, job) if (self.box, job) in self.boxed else next(
-            ((box, j) for box, j in self.boxed if j == job), None)
-
-    def walk(self, key, at):
-        """(GPU, job) where Tab or an arrow with no list open goes from the job `at`, in the box the arrows are
-        at (box): a job at a time, as the boxes on screen show them (boxed), the way they lie there. Along a
-        box's bottom edge ← → (and Tab), on into the next box; ↑ ↓ to the first other job of the nearest box
-        above or below. In the processes view, a line each, ↑ ↓ one by one (← → move them sideways). The job
-        `at` met again at once, as a DDP job in the next box, is passed by."""
-        order, step, here = self.boxed, (-1 if key in ("left", "up", "backtab") else 1), self.placed(at)
+    def walk(self, key):
+        """Tab and the arrows with no list open: a job at a time, as the boxes on screen show them (boxed), the
+        way they lie there. Along a box's bottom edge ← → (and Tab), on into the next box; ↑ ↓ to the first
+        other job of the nearest box above or below. In the processes view, a line each, ↑ ↓ one by one (← →
+        move them sideways). The job in focus met again at once, as a DDP job in the next box, is passed by."""
+        order, step = self.boxed, (-1 if key in ("left", "up", "backtab") else 1)
+        here = (self.box, self.job) if (self.box, self.job) in self.boxed else next(
+            ((box, job) for box, job in order if job == self.job), None)
         if key in ("home", "end") or here is None:
             j = 0 if key == "home" or key != "end" and step > 0 else len(order) - 1
         elif key in ("up", "down") and self.left != "processes":  # straight above or below, the nearest first
             where = {index: (rows.start, cols.start) for rows, cols, index in self.panels}
             row, col = where[here[0]]
             ahead = [(where[box][0] * step, k) for k, (box, job) in enumerate(order)
-                     if job != at and where[box][1] == col and (where[box][0] - row) * step > 0]
+                     if job != self.job and where[box][1] == col and (where[box][0] - row) * step > 0]
             j = min(ahead)[1] if ahead else order.index(here)
         else:
             i = j = order.index(here)
-            while 0 <= j + step < len(order) and (j == i or order[j][1] == at):
+            while 0 <= j + step < len(order) and (j == i or order[j][1] == self.job):
                 j += step
-            j = j if order[j][1] != at else i
-        return order[j]
-
-    def space(self):
-        """Space: the line or job the arrows are on put among the picks, or taken out, as a click does; the
-        first with none. From then on, till the picks are all let go, the arrows move a cursor and pick
-        nothing (see marking), its line or job lit up as one under the pointer is."""
-        if self.listing and self.entries:
-            i = self.at()
-            entry = self.entries[0 if i is None else i]
-            self.cursor, group, pids = line_means(entry), entry[2], entry[3]
-        elif not self.listing and self.boxed:
-            self.box, self.cursor = self.placed(self.cursor if self.marking else self.job) or self.boxed[0]
-            group, pids = None, (self.cursor,)
-        else:
-            return
-        adding = not self.marking or not set(pids) <= self.picked
-        self.marking = True
-        self.mark(pids, adding, group=group)
-        self.follow = True
+            j = j if order[j][1] != self.job else i
+        self.box, job = order[j]
+        self.pick([job])
 
     def edge(self):
         """-1 or 1 while a drag on the list holds the pointer above its lines or below them, with more lines
@@ -2698,7 +2663,7 @@ class View:
                 left = [("{} jobs".format(len(picked)), THEME.accent), ("  ", DIM)] + about_all(picked)
             return spread(width, note or left, keys(*hints, ("Esc", "back")))
         if self.listing:
-            return spread(width, note or [("click, drag or Space to pick jobs; a heading sorts; ▼ ▶ fold", DIM)],
+            return spread(width, note or [("click or drag over jobs to pick them; a heading sorts; ▼ ▶ fold", DIM)],
                           keys(("s", "sort by next"), ("r", "reverse"), ("Esc", "close")))
         if note:
             return spread(width, note, keys(("p", "processes"), ("Esc / q", "quit")))
@@ -2741,32 +2706,17 @@ class View:
         run = self.pointer and run_at(self.lines if lines is None else lines, *self.pointer)
         return (self.pointer[0],) + run[:2] if run and run[2] not in REFRESH else None
 
-    def cursor_run(self, lines):
-        """(row, first, last segment) of the cursor on `lines` while Space has picked (see space): its line in
-        the list, else its job's name in the box the arrows are at; None out of sight."""
-        if not self.marking:
-            return None
-        boxes = [rows for rows, _, index in self.panels if index == self.box]
-        rows = self.list_rows if self.listing else boxes[0] if boxes else ()
-        for row in (row for row in rows if row < len(lines)):
-            x, runs = 0, set()
-            for seg in lines[row]:
-                if seg[2:3] == (self.cursor,):
-                    runs.add(run_at(lines, row, x)[:2])
-                x += cells_of(seg[0])
-            if runs:  # the longest, as a job's line goes on past its fold arrow (see tree)
-                return (row,) + max(runs, key=lambda run: run[1] - run[0])
-        return None
-
     def light(self, lines):
         """`lines` with the click target under the pointer (under) lit up (glow), as far as it goes on its line:
         a job's line in the list, a job's name on a box's edge, a heading, a key hint. Not a GPU's box as a whole,
-        which the pointer is over most of the time. The cursor too, after Space (cursor_run)."""
+        which the pointer is over most of the time."""
+        under = self.under(lines)
+        if under is None:
+            return lines
+        row, first, last = under
+        line = lines[row]
         lines = list(lines)
-        for row, first, last in {run for run in (self.under(lines), self.cursor_run(lines)) if run}:
-            line = lines[row]
-            lines[row] = (line[:first] + [(seg[0], glow(seg[1])) + seg[2:] for seg in line[first:last + 1]]
-                          + line[last + 1:])
+        lines[row] = line[:first] + [(seg[0], glow(seg[1])) + seg[2:] for seg in line[first:last + 1]] + line[last + 1:]
         return lines
 
     def handle(self, event):
@@ -2925,15 +2875,9 @@ class View:
         elif key in ("left", "right") and self.left == "processes":  # every GPU's processes, sideways
             step = 8 if key == "right" else -8
             self.scroll = {index: (top, shift + step) for index, (top, shift) in self.scroll.items()}
-        elif key == " ":
-            self.space()
-        elif key in WALKS and not self.listing:  # with no job in the boxes on screen, none; the cursor, after
-            if self.boxed:                         # Space (see space)
-                self.box, job = self.walk(key, self.cursor if self.marking else self.job)
-                if self.marking:
-                    self.cursor = job
-                else:
-                    self.pick([job])
+        elif key in WALKS and not self.listing:  # with no job in the boxes on screen, none
+            if self.boxed:
+                self.walk(key)
         elif key in MOVES and self.entries:  # the list's lines, a group's among them, picking all its jobs; a
             i, step = self.at(), MOVES[key]  # job's workers' lines pick the job, as its line does: passed by
             i = (-1 if step > 0 else len(self.entries)) if i is None else i
@@ -2941,11 +2885,8 @@ class View:
             same = 0 <= i < len(self.entries) and self.entries[i][2:4]
             while same and self.entries[j][2:4] == same and 0 <= j + (step > 0) * 2 - 1 < len(self.entries):
                 j += (step > 0) * 2 - 1
-            if self.marking:  # the cursor, after Space (see space)
-                self.cursor, self.follow = line_means(self.entries[j]), True
-            else:
-                _, _, group, pids = self.entries[j]
-                self.pick(pids, group)
+            _, _, group, pids = self.entries[j]
+            self.pick(pids, group)
         elif self.picked and key in ("f", "enter"):
             self.only = not self.only
         elif self.picked and key in ("t", "k"):

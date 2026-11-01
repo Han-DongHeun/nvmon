@@ -3,6 +3,13 @@
 What changes for you in each release. The same notes appear on the
 [releases page](https://github.com/Han-DongHeun/nvmon/releases).
 
+## 0.4.2
+
+- Pick several jobs: a click puts one more in, or takes a picked one out. In the process list, drag over
+  lines to pick them all, or start on a picked one to let them go; held past the list's edge, it scrolls.
+  A click on an empty spot lets all go.
+- In the process list, ← → fold and open the picked account or environment.
+
 ## 0.4.1
 
 - Under the pointer, what a click acts on lights up: a job's line or name, a heading, a key hint, a GPU's

@@ -2365,6 +2365,7 @@ class View:
         self.command_row = None           # the row of the job in focus, when its command is cut: the wheel moves it
         self.shift, self.shifted = 0, None  # how far the selected job's command is scrolled, and whose
         self.clicked = (0, None)          # (when, what): the last click, to tell a double click
+        self.dragging = None              # (list line pressed on, picks before, put in or not) while held down
         self.scroll = {}                  # GPU index: (lines, cells) its processes are moved on
         self.followed = None              # the job in focus the boxes' processes last scrolled to
         self.areas = []                   # (rows, columns, GPU) where those processes are on screen
@@ -2407,6 +2408,14 @@ class View:
             self.only = False
             self.listing = self.listing and not self.opened
             self.opened = False
+
+    def mark(self, pids, adding, base=None, group=None):
+        """Put the jobs `pids` among the picked (or those of `base`), the first of them in focus, by the line
+        of the tree's `group` if so; or take them out, the one in focus kept if it stays (see pick)."""
+        base, focus = self.picked if base is None else base, self.job
+        self.pick(base | set(pids) if adding else base - set(pids), group if adding else None)
+        put = [job.pid for job in self.jobs if job.pid in pids] if adding else []
+        self.job = put[0] if put else focus if focus in self.picked else self.job
 
     def selected(self):
         """The picked jobs, in the list's order."""
@@ -2642,7 +2651,7 @@ class View:
                 left = [("{} jobs".format(len(picked)), THEME.accent), ("  ", DIM)] + about_all(picked)
             return spread(width, note or left, keys(*hints, ("Esc", "back")))
         if self.listing:
-            return spread(width, note or [("click a job, an account, an env or a heading; ▼ ▶ fold", DIM)],
+            return spread(width, note or [("click or drag over jobs to pick them; a heading sorts; ▼ ▶ fold", DIM)],
                           keys(("s", "sort by next"), ("r", "reverse"), ("Esc", "close")))
         if note:
             return spread(width, note, keys(("p", "processes"), ("Esc / q", "quit")))
@@ -2701,8 +2710,22 @@ class View:
     def handle(self, event):
         """Act on one key or mouse event; False means quit."""
         kind, value = event[0], event[1:]
-        if kind == "move":
-            self.pointer = value
+        if kind == "move":  # with no button held: let go, outside the window maybe
+            self.pointer, self.dragging = value, None
+            return True
+        if kind == "release":
+            self.dragging = None
+            return True
+        if kind == "drag":  # the button held from a press on the list: every line from that one to this one put
+            self.pointer = value  # among the picks then, or taken out, as the press did to its own
+            shown = range(self.top, min(len(self.entries), self.top + len(self.list_rows) - 2))
+            if self.dragging and self.listing and shown:
+                first, before, adding = self.dragging
+                here = min(max(self.top + value[0] - self.list_rows.start - 1, shown.start), shown.stop - 1)
+                passed = self.entries[min(first, here):max(first, here) + 1]
+                self.opened = False  # the list stays open, all taken out too (see pick)
+                self.mark({pid for _, _, _, pids in passed for pid in pids}, adding, before)
+                self.follow = False
             return True
         if kind == "refresh":  # its - or + clicked
             if value[0]:
@@ -2751,7 +2774,7 @@ class View:
             return True
         if kind == "click":
             row, col = value
-            target = self.target(row, col)
+            target, self.dragging = self.target(row, col), None
             if isinstance(target, tuple) and target[0] != "group":  # a key hint, a heading, a GPU's number,
                 return self.handle(target)                             # a group's arrow
             box = next((index for rows, cols, index in self.panels if row in rows and col in cols), None)
@@ -2760,9 +2783,10 @@ class View:
             now = time.monotonic()
             double = target is not None and self.clicked[1] == target and now - self.clicked[0] < 0.4
             self.asking, self.clicked, self.box = None, (now, target), box  # the arrows go on from this box
-            # A job picks it, a GPU or a group of the tree the jobs on it, and outside the list opens that; the
-            # same again lets them go, as does a place meaning nothing, which outside the list closes that too.
-            # A double click picks them and shows only their GPUs, or all again.
+            # A job puts it among the picked, a GPU or a group of the tree the jobs on it, and outside the list
+            # opens that; the same again takes them out. A place meaning nothing lets all go, and outside the
+            # list closes that too. A double click keeps them picked and shows only the picked jobs' GPUs, or
+            # all again. On the list the press may go on as a drag (see "drag"), and the list stays where it is.
             if target is None:
                 self.pick(())
                 self.listing = self.listing and row in self.list_rows
@@ -2776,15 +2800,16 @@ class View:
                 pids = [target]
             if not pids:
                 self.note = ([("no processes on GPU {}".format(target[1]), DIM)], now + 2)
-            elif double:
-                self.pick(pids, group)
+                return True
+            adding, before = double or not set(pids) <= self.picked, set(self.picked)
+            self.mark(pids, adding, group=group)
+            if double:
                 self.only = not self.only
-            elif set(pids) == self.picked:
-                self.pick(())
-            else:
-                self.pick(pids, group)
+            elif adding:
                 self.opened = self.opened or not self.listing
                 self.listing = True
+            if row in self.list_rows:
+                self.follow, self.dragging = False, (self.top + row - self.list_rows.start - 1, before, adding)
             return True
         key = value[0].lower() if len(value[0]) == 1 else value[0]
         if self.asking:  # y stops; anything else, n and Esc among them, lets it be
@@ -3002,8 +3027,9 @@ CUT = re.compile(rb"\x1b(?:\[\[|\[[<?>0-9;]*|\[M.{0,2}|O|P[^\x1b]*\x1b?)?\Z"
 
 def events(data):
     """The input in `data`, the bytes a terminal sends: ("key", name) events, ("click", row, column) for
-    a left-button press, ("wheel", +1 down or -1 up, row, column), ("hwheel", +1 right or -1 left, row,
-    column), ("move", row, column) where the pointer went."""
+    a left-button press, ("drag", row, column) where it went held down, ("release",) for a button let go,
+    ("wheel", +1 down or -1 up, row, column), ("hwheel", +1 right or -1 left, row, column), ("move", row,
+    column) where the pointer went."""
     out = []
     for m in INPUT.finditer(data):
         if m.group("button") or m.group("old"):
@@ -3016,10 +3042,12 @@ def events(data):
             if button & 64:  # the wheel: 64 up, 65 down, 66 left, 67 right; with Shift (+4) sideways too
                 sideways = button & 2 or button & 4
                 out.append(("hwheel" if sideways else "wheel", 1 if button & 1 else -1, y - 1, x - 1))
-            elif button & 32:  # a move, a button held or not
-                out.append(("move", y - 1, x - 1))
+            elif button & 32:  # a move: with the left button held a drag, else with none or another
+                out.append(("drag" if button & ~(4 | 8 | 16) == 32 else "move", y - 1, x - 1))
             elif press and button & ~(4 | 8 | 16) == 0:  # left button down, Shift, Alt or Ctrl held at most
                 out.append(("click", y - 1, x - 1))
+            elif not press:
+                out.append(("release",))
         elif m.group("skip"):
             continue
         elif m.group("end"):
@@ -3419,8 +3447,8 @@ def main():
                 if not going:
                     break
                 lit = refresh_pointed(size[0], view.interval, view.pointer)  # the buttons come and go with it
-                redraw = (any(e[0] != "move" for e in events) or view.pointed() != pointed or view.under() != under
-                          or lit != was_lit or view.expired())
+                redraw = (any(e[0] not in ("move", "release") for e in events) or view.pointed() != pointed
+                          or view.under() != under or lit != was_lit or view.expired())
                 detail = view.detail(gpus)
                 if detail - poller.detail:  # at the latest the next round, or the one after the round running
                     busy = not poller.done.is_set()

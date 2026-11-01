@@ -77,8 +77,10 @@ A **job** is a process, or a launcher (torchrun, deepspeed…) with its workers.
 
 - **Pick** one: click a process, or go with the arrows: ← → along a box's bottom edge, ↑ ↓ from box to
   box. Its GPUs stand out and the bottom line sums it up.
-- **Pick a GPU's jobs**: click anywhere else in its box. The same again lets go, and closes the list it
-  opened.
+- **Pick more**: each click puts one more in, or takes a picked one out. In the list, drag over lines to
+  put them all in; a drag that starts on a picked line takes them out. A click on an empty spot lets all
+  go, and closes the list a pick opened.
+- **Pick a GPU's jobs**: click anywhere else in its box; the same again takes them out.
 - `f`, or a double click: only the picked jobs' GPUs; again for all.
 - `p`: every job, in a tree by account and conda environment; ▶ ▼ fold. Click a heading to sort, again
   to reverse (or `s`, `r`). ← → scroll the picked job's command. Esc closes it.
@@ -111,7 +113,8 @@ The list, busiest first, one job picked; and that job with `f`:
 | `c` / `C` | next / previous theme |
 | `p` | process list, open or close |
 | point at a graph | utilization and memory then |
-| click, arrows, Tab | pick a job |
+| click, arrows, Tab | pick a job; a click on a picked one takes it out |
+| drag over the list | pick those jobs, or take them out |
 | click a GPU | pick its jobs |
 | `f`, double click | only the picked jobs' GPUs, or all |
 | `t`, `k`, then `y` | stop (SIGTERM) or kill (SIGKILL) the picked jobs |

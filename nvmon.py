@@ -2663,7 +2663,8 @@ class View:
                 left = [("{} jobs".format(len(picked)), THEME.accent), ("  ", DIM)] + about_all(picked)
             return spread(width, note or left, keys(*hints, ("Esc", "back")))
         if self.listing:
-            return spread(width, note or [("click or drag over jobs to pick them; a heading sorts; ▼ ▶ fold", DIM)],
+            hint = "click or drag over jobs to pick them; a heading sorts; ▼ ▶ or ← → fold"
+            return spread(width, note or [(hint, DIM)],
                           keys(("s", "sort by next"), ("r", "reverse"), ("Esc", "close")))
         if note:
             return spread(width, note, keys(("p", "processes"), ("Esc / q", "quit")))
@@ -2870,8 +2871,13 @@ class View:
             self.follow = True
         elif key in ("pgup", "pgdn") and not self.listing:  # a page of GPU boxes
             self.gpu_top += self.gpu_page * (1 if key == "pgdn" else -1)
-        elif key in ("left", "right") and self.listing:  # the selected job's command, sideways
-            self.shift = max(0, self.shift + (8 if key == "right" else -8))
+        elif key in ("left", "right") and self.listing:  # on a group's line ← folds it, → opens it (see "fold");
+            i = self.at()                                   # else the selected job's command, sideways
+            group = None if i is None else self.entries[i][2]
+            if group is None:
+                self.shift = max(0, self.shift + (8 if key == "right" else -8))
+            elif unfolded(group, self.held(group), self.folds, self.picked) == (key == "left"):
+                self.handle(("fold", group))
         elif key in ("left", "right") and self.left == "processes":  # every GPU's processes, sideways
             step = 8 if key == "right" else -8
             self.scroll = {index: (top, shift + step) for index, (top, shift) in self.scroll.items()}

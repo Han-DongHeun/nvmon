@@ -82,8 +82,9 @@ A **job** is a process, or a launcher (torchrun, deepspeed…) with its workers.
   go, and closes the list a pick opened.
 - **Pick a GPU's jobs**: click anywhere else in its box; the same again takes them out.
 - `f`, or a double click: only the picked jobs' GPUs; again for all.
-- `p`: every job, in a tree by account and conda environment; ▶ ▼ fold. Click a heading to sort, again
-  to reverse (or `s`, `r`). ← → scroll the picked job's command. Esc closes it.
+- `p`: every job, in a tree by account and conda environment; ▶ ▼ fold, as ← → do on a picked account
+  or environment. Click a heading to sort, again to reverse (or `s`, `r`). ← → scroll the picked job's
+  command. Esc closes it.
 - `t` stops the picked jobs of yours (SIGTERM), `k` kills them (SIGKILL): after a `y`, and only those
   still the jobs you picked.
 

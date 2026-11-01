@@ -2801,6 +2801,11 @@ class View:
             if not pids:
                 self.note = ([("no processes on GPU {}".format(target[1]), DIM)], now + 2)
                 return True
+            # On the list a group open only while some of its jobs are picked (see unfolded) stays open, so that
+            # the lines under the pointer stay put as the picks change.
+            if row in self.list_rows:
+                self.folds.update({key: True for _, _, key, _ in self.entries
+                                   if key and unfolded(key, self.held(key), self.folds, self.picked)})
             adding, before = double or not set(pids) <= self.picked, set(self.picked)
             self.mark(pids, adding, group=group)
             if double:
@@ -3429,13 +3434,13 @@ def main():
                                             header(width, view.interval, driver, poller.waiting(), view.pointer),
                                             update.newer),
                                 view.shows, view.theme.gray, size)
-                # Keys and clicks redraw at once, the pointer when it moves over a graph (the chip goes with
-                # it) or onto another click target (lit up), a note when it runs out; the numbers move on at
-                # the next frame. A quarter second at most, to see a resized window, or a note gone, soon with a
-                # long interval too.
+                # Keys and clicks redraw at once, a drag when it changes the picks, the pointer when it moves over
+                # a graph (the chip goes with it) or onto another click target (lit up), a note when it runs out;
+                # the numbers move on at the next frame. A quarter second at most, to see a resized window, or a
+                # note gone, soon with a long interval too.
                 wait = 0.01 if peek is not None else (poll_at or frame_at) - time.monotonic()
                 events = screen.read(min(wait, 0.25))
-                pointed, under, before = view.pointed(), view.under(), view.interval
+                pointed, under, before, picks = view.pointed(), view.under(), view.interval, set(view.picked)
                 was_lit = refresh_pointed(size[0], view.interval, view.pointer)
                 going = all(map(view.handle, events))
                 if view.interval != before:  # sooner: the next frame at the new interval from now, at the latest
@@ -3447,8 +3452,8 @@ def main():
                 if not going:
                     break
                 lit = refresh_pointed(size[0], view.interval, view.pointer)  # the buttons come and go with it
-                redraw = (any(e[0] not in ("move", "release") for e in events) or view.pointed() != pointed
-                          or view.under() != under or lit != was_lit or view.expired())
+                redraw = (any(e[0] not in ("move", "drag", "release") for e in events) or view.picked != picks
+                          or view.pointed() != pointed or view.under() != under or lit != was_lit or view.expired())
                 detail = view.detail(gpus)
                 if detail - poller.detail:  # at the latest the next round, or the one after the round running
                     busy = not poller.done.is_set()

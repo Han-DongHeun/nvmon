@@ -3,6 +3,11 @@
 What changes for you in each release. The same notes appear on the
 [releases page](https://github.com/Han-DongHeun/nvmon/releases).
 
+## 0.4.3
+
+- Fixed: a GPU busy only rendering (OpenGL or Vulkan, as a simulator's EGL does; nvidia-smi's type G) showed
+  no processes. They are listed as CUDA ones are.
+
 ## 0.4.2
 
 - Pick several jobs: a click puts one more in, or takes a picked one out. In the process list, drag over

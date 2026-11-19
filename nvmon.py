@@ -505,14 +505,21 @@ class Gpu:
         self._sizes[kind] = size
         return rc, array[:count.value] if rc == NVML_SUCCESS else []
 
-    def _processes(self):
+    def _running(self, kind):
+        """The processes on this GPU of `kind`: "Compute" (CUDA) or "Graphics" (OpenGL, Vulkan: a simulator
+        rendering with EGL, say); none where the driver cannot tell."""
         # _v3 from driver R510 on; before it (R450 on) _v2, with the same entries.
-        for query in ("nvmlDeviceGetComputeRunningProcesses_v3", "nvmlDeviceGetComputeRunningProcesses_v2"):
-            rc, running = self._entries(ProcessInfo, lambda array, count: self._call(query, byref(count), array))
+        for version in ("_v3", "_v2"):
+            query = "nvmlDeviceGet{}RunningProcesses{}".format(kind, version)
+            _, running = self._entries(ProcessInfo, lambda array, count: self._call(query, byref(count), array))
             if query not in self._unsupported:
                 break
-        if rc != NVML_SUCCESS:
-            return []
+        return running
+
+    def _processes(self):
+        # A process doing both (nvidia-smi's C+G; on Windows, every one) is in both lists, with the same memory
+        # in each: once.
+        running = list({p.pid: p for p in self._running("Graphics") + self._running("Compute")}.values())
         self._facts = {p.pid: self._facts.get(p.pid) or self._facts_of(p.pid) for p in running}
         procs = []
         for p in running:
